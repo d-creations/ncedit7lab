@@ -20,7 +20,7 @@
   },
   "files": [
       "dist",
-      "package.json"
+      "package.json",
       "backend",
       "requirements.txt"
   ],

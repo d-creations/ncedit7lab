@@ -11,6 +11,7 @@ import 'ace-builds/src-noconflict/mode-text';
 import 'ace-builds/src-noconflict/theme-github';
 import 'ace-builds/src-noconflict/theme-one_dark';
 import 'ace-builds/src-noconflict/ext-searchbox';
+import { buildBackendUrlSync } from '@services/BackendUrl';
 
 // Mobile breakpoint - matches the media query in NCEditorApp.ts
 const MOBILE_BREAKPOINT = 768;
@@ -373,9 +374,7 @@ export class NCCodePane extends HTMLElement {
 
   private async applySyntaxRules(controlType: string) {
     try {
-      const port = (window as any).backendPort || 8000;
-      const portUrl = `http://127.0.0.1:${port}`;
-      const response = await fetch(`${portUrl}/api/syntax/${controlType}`);
+      const response = await fetch(buildBackendUrlSync(`/api/syntax/${controlType}`));
       if (!response.ok) throw new Error("Failed to load syntax");
       const data = await response.json();
       

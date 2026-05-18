@@ -12,6 +12,7 @@ import type {
 import { ServiceRegistry } from '@core/ServiceRegistry';
 import { CONFIG_SERVICE_TOKEN } from '@core/ServiceTokens';
 import { IConfigService } from './config/IConfigService';
+import { buildBackendUrl } from './BackendUrl';
 
 // Simple API Key for basic security
 const API_KEY = 'nc-edit7-secret-key';
@@ -30,35 +31,30 @@ export class BackendGateway {
   constructor(config?: Partial<BackendConfig>) {
     this.configService = ServiceRegistry.getInstance().get(CONFIG_SERVICE_TOKEN);
     
+    // Default to relative paths so packaged/deployed frontend talks to same origin.
+    // Preserve legacy local-dev behavior when `window.backendPort`/backendPort config is provided.
     this.config = {
-      baseUrl: `http://127.0.0.1:8000/cgiserver_import`,
+      baseUrl: "/cgiserver_import",
       timeout: 30000,
       retries: 3,
       ...config,
     };
   }
 
-  private async getPort(): Promise<number> {
-    return await this.configService.get('backendPort');
-  }
-
   private async getBaseUrl(): Promise<string> {
-    const port = await this.getPort();
-    return `http://127.0.0.1:${port}/cgiserver_import`;
+    return buildBackendUrl('/cgiserver_import', this.configService);
   }
 
   // --- FOCAS API Methods ---
   
   async getFeatures(): Promise<import('@core/types').BackendFeatures> {
-    const port = await this.getPort();
-    const response = await fetch(`http://127.0.0.1:${port}/api/features`);
+    const response = await fetch(await buildBackendUrl('/api/features', this.configService));
     if (!response.ok) throw new Error(await response.text());
     return response.json();
   }
 
   private async getFocasUrl(path: string): Promise<string> {
-    const port = await this.getPort();
-    return `http://127.0.0.1:${port}/api/focas/${path}`;
+    return buildBackendUrl(`/api/focas/${path}`, this.configService);
   }
 
   async focasPing(ip: string): Promise<import('@core/types').FocasPingResponse> {
@@ -107,10 +103,8 @@ export class BackendGateway {
   // --- CGI API Methods ---
 
   async listMachines(): Promise<ServerMachineListResponse> {
-    const port = await this.getPort();
-
     try {
-      const response = await fetch(`http://127.0.0.1:${port}/api/machines`);
+      const response = await fetch(await buildBackendUrl('/api/machines', this.configService));
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
       }

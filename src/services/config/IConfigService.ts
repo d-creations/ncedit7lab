@@ -5,6 +5,7 @@ export type FocasPlacement = 'side-panel' | 'bottom-panel' | 'external-panel' | 
 export interface AppConfiguration {
   focasDefaultIp: string;
   backendPort: number;
+  backendBaseUrl: string;
   themeMode: 'vscode' | 'one-dark' | 'light';
   hostMode: HostMode;
   focasPlacement: FocasPlacement;

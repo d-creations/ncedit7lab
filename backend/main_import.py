@@ -110,10 +110,24 @@ app.add_middleware(
 
 # Security: CORS
 # Restrict origins in production using ALLOWED_ORIGINS env var.
+_allowed_origins_env = os.environ.get("ALLOWED_ORIGINS", "").strip()
+if _allowed_origins_env == "*":
+    allowed_origins = ["*"]
+    logging.warning("ALLOWED_ORIGINS='*' — allowing all origins. Unsafe for production.")
+elif _allowed_origins_env:
+    allowed_origins = [o.strip() for o in _allowed_origins_env.split(",") if o.strip()]
+else:
+    allowed_origins = []
+    logging.info("ALLOWED_ORIGINS not set — CORS will not allow cross-origin requests. Use this in production or set explicit origins for development.")
+
+_allow_credentials = os.environ.get("ALLOW_CREDENTIALS", "True").lower() in ("true", "1", "t", "yes")
+if "*" in allowed_origins and _allow_credentials:
+    logging.warning("CORS: allow_credentials=True with '*' origin may be rejected by browsers. Specify explicit origins or set ALLOW_CREDENTIALS=False.")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.environ.get("ALLOWED_ORIGINS", "*").split(","),
-    allow_credentials=True,
+    allow_origins=allowed_origins,
+    allow_credentials=_allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )

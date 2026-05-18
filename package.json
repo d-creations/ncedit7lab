@@ -21,6 +21,8 @@
   "files": [
       "dist",
       "package.json"
+      "backend",
+      "requirements.txt"
   ],
   "dependencies": {
     "ace-builds": "^1.43.4",

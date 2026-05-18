@@ -53,3 +53,5 @@ bundle/
 package-lock.json
 THIRD_PARTY_NODE_LICENSES.md
 copilot_instructions.md
+deploy.zip
+package-lock.json

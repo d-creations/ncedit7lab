@@ -1,3 +1,9 @@
+import sys
+import os
+
+# Add root directory to sys.path to resolve 'backend' imports on Azure
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from fastapi import FastAPI, Request, HTTPException, Header, Depends
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -9,9 +15,7 @@ import math
 from typing import List, Dict, Any, Optional
 import re
 import traceback
-import sys
 from pathlib import Path
-import os
 import importlib.util
 from pydantic import BaseModel
 

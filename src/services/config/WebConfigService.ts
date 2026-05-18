@@ -10,6 +10,7 @@ export class WebConfigService implements IConfigService {
     focasPlacement: 'side-panel',
     showDrawPanel: true,
     showFocasTransfer: false,
+    backendTimeout: 10000,
   }; // Defaults
   private listeners: ((cfg: AppConfiguration) => void)[] = [];
   private loadPromise: Promise<AppConfiguration>;

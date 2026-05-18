@@ -62,55 +62,74 @@ export class MachineService {
   }
 
   private getDefaultMachines(): MachineProfile[] {
-    const machineTypes: MachineType[] = [
-      'FANUC_GENERIC',
-      'SIEMENS_GENERIC',
+    return [
+      {
+        machineName: 'FANUC_MILL',
+        controlType: 'FANUC',
+        axes: ['X', 'Y', 'Z'],
+        feedLimits: { min: 0, max: 20000 },
+        defaultTools: [],
+        availableChannels: 1,
+        regexPatterns: this.getFanucRegexPatterns(),
+        variablePrefix: '#',
+      },
+      {
+        machineName: 'SIEMENS_840D',
+        controlType: 'SIEMENS',
+        axes: ['X', 'Y', 'Z'],
+        feedLimits: { min: 0, max: 20000 },
+        defaultTools: [],
+        availableChannels: 1,
+        regexPatterns: this.getSiemensRegexPatterns(),
+        variablePrefix: 'R',
+      }
     ];
-
-    return machineTypes.map((machineType) => ({
-      machineName: machineType,
-      controlType: machineType === 'SIEMENS_GENERIC' ? 'SIEMENS' : 'FANUC',
-      axes: ['X', 'Y', 'Z'],
-      feedLimits: { min: 0, max: 10000 },
-      defaultTools: [],
-      availableChannels: 3,
-      regexPatterns: this.getDefaultRegexPatterns(),
-      variablePrefix: machineType === 'SIEMENS_GENERIC' ? 'R' : '#',
-    }));
   }
 
-  private getDefaultRegexPatterns(): MachineRegexPatterns {
+  private getFanucRegexPatterns(): MachineRegexPatterns {
     return {
       tools: {
-        pattern: 'T([1-9]|[1-9][0-9])(?!\\d)',
-        description: 'Tools T1-T99',
-        range: { min: 1, max: 99 },
+        pattern: 'T([1-9]|[1-9][0-9]{1,3})(?!\\d)',
+        description: 'Tools T1-T9999',
+        range: { min: 1, max: 9999 },
       },
       variables: {
-        pattern: '#([1-9]|[1-9][0-9]{1,2})(?!\\d)',
-        description: 'Variables #1 - #999',
-        range: { min: 1, max: 999 },
+        pattern: '#(\\d+)',
+        description: 'Variables #1 - #9999',
+        range: { min: 1, max: 9999 },
       },
       keywords: {
-        pattern:
-          '(T(100|[1-9][0-9]{2,3})|M(2[0-9]{2}|[3-8][0-8]{2})|M82|M83|M20|G[0-3]|M(0|1|3|5|30))',
-        description: 'Keywords: T100-T9999, M200-M888, M82, M83, M20, G0-G3, M0, M1, M3, M5, M30',
+        pattern: '([A-Z])(\\s*[+-]?\\d+(?:\\.\\d+)?)',
+        description: 'Standard Fanuc Keywords',
         codes: {
-          extended_tools: {
-            pattern: 'T(100|[1-9][0-9]{2,3})',
-            description: 'Extended tools',
-            range: { min: 100, max: 9999 },
-          },
-          m_codes_range: {
-            pattern: 'M(2[0-9]{2}|[3-8][0-8]{2})',
-            description: 'M codes range',
-            range: { min: 200, max: 888 },
-          },
-          special_m_codes: ['M82', 'M83', 'M20'],
           g_codes: ['G0', 'G1', 'G2', 'G3'],
           program_control: ['M0', 'M1', 'M3', 'M5', 'M30'],
         },
       },
     };
   }
+
+  private getSiemensRegexPatterns(): MachineRegexPatterns {
+    return {
+      tools: {
+        pattern: 'T([1-9]|[1-9][0-9]{1,3})(?!\\d)',
+        description: 'Tools T1-T9999',
+        range: { min: 1, max: 9999 },
+      },
+      variables: {
+        pattern: 'R(\\d+)',
+        description: 'R Parameters',
+        range: { min: 0, max: 9999 },
+      },
+      keywords: {
+        pattern: '(?:CYCLE|POCKET|HOLES|SLOT)\\d+|MCALL|WORKPIECE|REPEAT|MSG|([A-Z])(\\s*[+-]?\\d+(?:\\.\\d+)?)',
+        description: 'Siemens Keywords and G-codes',
+        codes: {
+          g_codes: ['G0', 'G1', 'G2', 'G3'],
+          program_control: ['M0', 'M1', 'M3', 'M5', 'M30', 'M17'],
+        },
+      },
+    };
+  }
 }
+

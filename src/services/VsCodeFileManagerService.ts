@@ -3,6 +3,8 @@ import { FileManagerService } from './FileManagerService';
 import { EventBus } from './EventBus';
 import { StateService } from './StateService';
 import { NCFile, NCProgram, ChannelId } from '../core/types';
+import { ServiceRegistry } from '../core/ServiceRegistry';
+import { HOST_BRIDGE_SERVICE_TOKEN } from '../core/ServiceTokens';
 
 export class VsCodeFileManagerService implements IFileManagerService {
     private baseManager: FileManagerService;
@@ -17,6 +19,11 @@ export class VsCodeFileManagerService implements IFileManagerService {
     ) {
         this.baseManager = new FileManagerService(eventBus, stateService, false);
         
+        window.addEventListener('vscode:host-undo-redo', (event: any) => {
+            const data = event.detail; // { type, channel, text }
+            this.updateChannelFromHost(data.channel, data.text);
+        });
+
         window.addEventListener('vscode:files-opened', (event: any) => {
             if (this.isInternalUpdate) return;
             const data = event.detail; // { type, activeChannel, isSingleFile, channels: { '1':'..', '2': '..' } }
@@ -97,11 +104,16 @@ export class VsCodeFileManagerService implements IFileManagerService {
         }
     }
 
-    private syncToHost(channelId: string, content: string) {
-        // Broadcast the specific channel text payload up to the NCEditorProvider host
-        window.dispatchEvent(new CustomEvent('vscode:file-changed', { 
-            detail: { channel: channelId, text: content } 
-        }));
+    private syncToHost(channelId: string, content: string, oldText: string) {
+        const hostBridge = ServiceRegistry.getInstance().get(HOST_BRIDGE_SERVICE_TOKEN);
+        if (hostBridge && hostBridge.isAvailable()) {
+            hostBridge.notifyDocumentChanged(channelId, content, oldText);
+        } else {
+            // Broadcast the specific channel text payload up to the NCEditorProvider host
+            window.dispatchEvent(new CustomEvent('vscode:file-changed', { 
+                detail: { channel: channelId, text: content, oldText } 
+            }));
+        }
     }
 
     // --- Pass-through to Core Logic ---
@@ -110,9 +122,11 @@ export class VsCodeFileManagerService implements IFileManagerService {
     getActiveProgram(channelId: string): NCProgram | null { return this.baseManager.getActiveProgram(channelId); }
     
     updateActiveProgramContent(channelId: string, content: string): void {
+        const activeProgram = this.baseManager.getActiveProgram(channelId);
+        const oldText = activeProgram ? activeProgram.content : '';
         this.baseManager.updateActiveProgramContent(channelId, content);
         this.isInternalUpdate = true;
-        this.syncToHost(channelId, content);
+        this.syncToHost(channelId, content, oldText);
         
         if (this.internalUpdateTimeout) {
             clearTimeout(this.internalUpdateTimeout);

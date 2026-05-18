@@ -32,6 +32,7 @@ export interface IHostBridgeService {
   isAvailable(): boolean;
   relayToWorkbench(message: WorkbenchBridgeMessage): void;
   openWorkbenchPanel(tab?: WorkbenchTab): void;
+  notifyDocumentChanged(channel: string, text: string, oldText: string): void;
 }
 
 type VsCodeApi = {
@@ -46,6 +47,7 @@ export class BrowserHostBridgeService implements IHostBridgeService {
   relayToWorkbench(_message: WorkbenchBridgeMessage): void {}
 
   openWorkbenchPanel(_tab?: WorkbenchTab): void {}
+  notifyDocumentChanged(_channel: string, _text: string, _oldText: string): void {}
 }
 
 export class VsCodeHostBridgeService implements IHostBridgeService {
@@ -59,6 +61,33 @@ export class VsCodeHostBridgeService implements IHostBridgeService {
 
     win.vscodeApi = win.vscodeApi || (typeof win.acquireVsCodeApi === 'function' ? win.acquireVsCodeApi() : undefined);
     this.api = win.vscodeApi;
+
+    window.addEventListener('message', this.handleHostMessage.bind(this));
+  }
+
+  private handleHostMessage(event: MessageEvent) {
+    const data = event.data;
+    if (data && typeof data === 'object') {
+      if (data.type === 'UNDO_APPLIED' || data.type === 'REDO_APPLIED') {
+        const { channel, text } = data;
+        if (channel && text !== undefined) {
+          // Trigger a custom event that VsCodeFileManagerService can handle 
+          // without triggering another 'changed' response
+          window.dispatchEvent(new CustomEvent('vscode:host-undo-redo', { 
+            detail: { type: data.type, channel, text } 
+          }));
+        }
+      }
+    }
+  }
+
+  notifyDocumentChanged(channel: string, text: string, oldText: string): void {
+    this.api?.postMessage({
+      type: 'changed',
+      channel,
+      text,
+      oldText,
+    });
   }
 
   isAvailable(): boolean {

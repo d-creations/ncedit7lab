@@ -1,9 +1,10 @@
 {
   "focasDefaultIp": "DEMO",
   "backendPort": 8000,
+  "backendTimeout": 20000,
   "themeMode": "light",
   "hostMode": "web",
   "focasPlacement": "side-panel",
-  "showDrawPanel": true,
+  "showDrawPanel": false,
   "showFocasTransfer": false
 }

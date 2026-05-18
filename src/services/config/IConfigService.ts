@@ -6,6 +6,7 @@ export interface AppConfiguration {
   focasDefaultIp: string;
   backendPort: number;
   backendBaseUrl: string;
+  backendTimeout: number;
   themeMode: 'vscode' | 'one-dark' | 'light';
   hostMode: HostMode;
   focasPlacement: FocasPlacement;

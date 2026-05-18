@@ -133,9 +133,11 @@ export class BackendGateway {
 
     let lastError: Error | undefined;
 
+    const dynamicTimeout = await this.configService.get('backendTimeout').catch(() => undefined) ?? this.config.timeout;
+
     for (let attempt = 0; attempt < this.config.retries; attempt++) {
       try {
-        const timeoutId = setTimeout(() => controller.abort(), this.config.timeout);
+        const timeoutId = setTimeout(() => controller.abort(), dynamicTimeout);
 
         const baseUrl = await this.getBaseUrl();
         const response = await fetch(baseUrl, {

@@ -298,6 +298,10 @@ export class NCCodePane extends HTMLElement {
     if (this.isVsCodeHost()) {
       this.themeObserver = new MutationObserver(() => this.applyEditorTheme());
       this.themeObserver.observe(document.body, { attributes: true, attributeFilter: ['class', 'data-theme-mode'] });
+      
+      // Let VS Code handle undo/redo natively
+      this.editor.commands.removeCommand('undo');
+      this.editor.commands.removeCommand('redo');
     }
 
     // Use ResizeObserver to handle dynamic layout changes
@@ -325,6 +329,24 @@ export class NCCodePane extends HTMLElement {
 
       // Trigger parse
       this.triggerParse();
+    });
+
+    this.editor.on('paste', () => {
+      // Small timeout ensures the pasted content has fully populated in Ace
+      setTimeout(() => {
+        if (!this.editor || this.isSettingValue) return;
+        const value = this.editor.getValue();
+        this.fileManager.updateActiveProgramContent(this.channelId, value);
+        this.stateService.updateChannel(this.channelId, { program: value });
+        this.dispatchEvent(
+          new CustomEvent('code-change', {
+            detail: { channelId: this.channelId, code: value },
+            bubbles: true,
+            composed: true,
+          }),
+        );
+        this.triggerParse();
+      }, 0);
     });
 
     // Listen for cursor changes to highlight corresponding plot segment

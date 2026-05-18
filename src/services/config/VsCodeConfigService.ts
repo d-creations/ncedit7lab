@@ -5,6 +5,7 @@ export class VsCodeConfigService implements IConfigService {
     focasDefaultIp: '192.168.1.1',
     backendPort: 8000,
     backendBaseUrl: '',
+    backendTimeout: 60000,
     themeMode: 'vscode',
     hostMode: 'vscode-editor',
     focasPlacement: 'external-panel',

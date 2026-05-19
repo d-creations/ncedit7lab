@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Request, HTTPException, Depends
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse, JSONResponse
 from pydantic import BaseModel
 from pathlib import Path
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,6 +12,23 @@ import logging
 from focas_service import get_focas_client, get_demo_focas_client, is_demo_ip, FocasClientBase, FocasError
 
 app = FastAPI(title="ncplot7py-adapter")
+
+@app.exception_handler(FocasError)
+async def focas_error_handler(request: Request, exc: FocasError):
+    print(f"[VSCODE_NOTIFICATION] ERROR: {str(exc)}", flush=True)
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    # Only pop up VS Code notifications for 5xx errors or explicit 400 bad requests to avoid annoying 404 popups
+    if exc.status_code >= 400:
+        print(f"[VSCODE_NOTIFICATION] ERROR: {exc.detail}", flush=True)
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    print(f"[VSCODE_NOTIFICATION] ERROR: Internal Server Error: {str(exc)}", flush=True)
+    return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
 
 app.add_middleware(
     CORSMiddleware,
@@ -256,8 +273,7 @@ async def focas_list_programs(path_no: int, ip_address: str, port: int = 8193, c
             
         programs = client.list_programs(path_no)
         return {"status": "success", "programs": programs}
-    except FocasError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+
     finally:
         client.disconnect()
 
@@ -274,9 +290,8 @@ async def focas_upload(path_no: int, prog_num: int, ip_address: str, port: int =
             raise HTTPException(status_code=500, detail="Failed to connect to CNC before upload")
             
         program_text = client.upload_program(prog_num, path_no)
+        print(f"[VSCODE_NOTIFICATION] SUCCESS: Program O{prog_num} successfully pulled from CNC ({ip_address})", flush=True)
         return {"status": "success", "program_text": program_text}
-    except FocasError as e:
-        raise HTTPException(status_code=400, detail=str(e))
     finally:
         client.disconnect()
 
@@ -289,12 +304,11 @@ async def focas_download(path_no: int, ip_address: str, data: FocasDownloadData,
         
     try:
         if not client.connect(ip_address, port):
-            raise HTTPException(status_code=500, detail="Failed to connect to CNC before download")
+            raise HTTPException(status_code=500, detail=f"Failed to connect to CNC ({ip_address}) before download")
             
         client.download_program(data.program_text, path_no)
+        print(f"[VSCODE_NOTIFICATION] SUCCESS: Program successfully sent to CNC ({ip_address})", flush=True)
         return {"status": "success", "message": "Program successfully downloaded to CNC"}
-    except FocasError as e:
-        raise HTTPException(status_code=400, detail=str(e))
     finally:
         client.disconnect()
 

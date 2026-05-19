@@ -338,7 +338,9 @@ export class NCCodePane extends HTMLElement {
         redo: () => {}, 
         reset: () => {}, 
         hasUndo: () => false, 
-        hasRedo: () => false 
+        hasRedo: () => false,
+        addSession: () => {},
+        addSelection: () => {}
       } as any;
       this.editor.session.setUndoManager(dummyUndoManager);
     }

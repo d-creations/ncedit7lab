@@ -148,7 +148,7 @@ export class NCCodePane extends HTMLElement {
         if (!message.channelId || message.channelId === this.channelId) {
           const newText = message.text !== undefined ? message.text : message.content;
           if (newText !== undefined) {
-            this.editor.setValue(newText, -1);
+            this.setValue(newText);
           }
         }
       }
@@ -340,7 +340,8 @@ export class NCCodePane extends HTMLElement {
         hasUndo: () => false, 
         hasRedo: () => false,
         addSession: () => {},
-        addSelection: () => {}
+        addSelection: () => {},
+        add: () => {}
       } as any;
       this.editor.session.setUndoManager(dummyUndoManager);
     }

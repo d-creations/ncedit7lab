@@ -332,14 +332,14 @@ export class NCCodePane extends HTMLElement {
       this.editor.commands.removeCommand('redo');
       
       // CRITICAL: Dummy UndoManager so Ace doesn't keep its own stack when natively running in VS Code host 
-      const dummyUndoManager = new (function(this: any) { 
-        this.execute = () => {}; 
-        this.undo = () => {}; 
-        this.redo = () => {}; 
-        this.reset = () => {}; 
-        this.hasUndo = () => false; 
-        this.hasRedo = () => false; 
-      })() as any;
+      const dummyUndoManager = { 
+        execute: () => {}, 
+        undo: () => {}, 
+        redo: () => {}, 
+        reset: () => {}, 
+        hasUndo: () => false, 
+        hasRedo: () => false 
+      } as any;
       this.editor.session.setUndoManager(dummyUndoManager);
     }
 

@@ -259,6 +259,14 @@ export class NCWorkbenchPanelApp extends HTMLElement {
           gap: 12px;
         }
 
+        .tab-row {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          flex-wrap: nowrap;
+        }
+
         .title {
           font-size: 12px;
           font-weight: 700;
@@ -282,6 +290,21 @@ export class NCWorkbenchPanelApp extends HTMLElement {
           color: var(--vscode-button-secondaryForeground, #cccccc);
           cursor: pointer;
           font-size: 12px;
+        }
+
+        .tabs,
+        .channel-switcher {
+          flex-wrap: nowrap;
+        }
+
+        .tabs {
+          display: flex;
+          gap: 6px;
+          flex: 1 1 auto;
+        }
+
+        .channel-switcher {
+          margin-left: auto;
         }
 
         .channel-button.active,
@@ -334,16 +357,18 @@ export class NCWorkbenchPanelApp extends HTMLElement {
       <div class="header">
         <div class="title-row">
         </div>
-        <div class="tabs">
-          <button class="tab-button ${this.activeTab === 'variables' ? 'active' : ''}" data-tab="variables">Variables</button>
-          <button class="tab-button ${this.activeTab === 'errors' ? 'active' : ''}" data-tab="errors">Errors</button>
-          ${this.showFocasTransfer ? `<button class="tab-button ${this.activeTab === 'focas' ? 'active' : ''}" data-tab="focas">FOCAS</button>` : ''}
-        </div>
+        <div class="tab-row">
+          <div class="tabs">
+            <button class="tab-button ${this.activeTab === 'variables' ? 'active' : ''}" data-tab="variables">Variables</button>
+            <button class="tab-button ${this.activeTab === 'errors' ? 'active' : ''}" data-tab="errors">Errors</button>
+            ${this.showFocasTransfer ? `<button class="tab-button ${this.activeTab === 'focas' ? 'active' : ''}" data-tab="focas">FOCAS</button>` : ''}
+          </div>
           <div class="channel-switcher">
             <button class="channel-button ${selectedChannel === '1' ? 'active' : ''}" data-channel="1" ${activeChannels.includes('1') ? '' : 'disabled'}>CH 1</button>
             <button class="channel-button ${selectedChannel === '2' ? 'active' : ''}" data-channel="2" ${activeChannels.includes('2') ? '' : 'disabled'}>CH 2</button>
             <button class="channel-button ${selectedChannel === '3' ? 'active' : ''}" data-channel="3" ${activeChannels.includes('3') ? '' : 'disabled'}>CH 3</button>
           </div>
+        </div>
       </div>
 
       <div class="tab-panels">

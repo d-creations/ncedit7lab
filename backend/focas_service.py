@@ -11,18 +11,40 @@ logger = logging.getLogger(__name__)
 
 # FOCAS Error Codes (from Fwlib64.h)
 EW_OK = 0
-EW_BUFFER = 10
+EW_PROTOCOL = -1
 EW_RESET = -2
+EW_HANDLE = -8
+EW_NODLL = -15
+EW_SOCKET = -16
 EW_DATA = 5
-EW_OVRFLOW = 8
 EW_PROT = 7
+EW_OVRFLOW = 8
+EW_BUFFER = 10
 EW_REJECT = 13
 EW_ALARM = 15
+
+# Additional error definitions
+ERROR_MESSAGES = {
+    0: "Success (EW_OK)",
+    -1: "Protocol error (EW_PROTOCOL)",
+    -2: "CNC reset/stop (EW_RESET)",
+    -8: "Socket timeout (EW_SOCKET)",
+    -15: "DLL not loaded or not found (EW_NODLL)",
+    -16: "Socket communication error. Connection closed by CNC or network failure (EW_SOCKET)",
+    1: "CNC is busy (EW_BUSY)",
+    5: "Data error / Program already exists (EW_DATA)",
+    7: "Write protected on CNC (EW_PROT)",
+    8: "Memory overflow on CNC (EW_OVRFLOW)",
+    10: "Buffer empty/full (EW_BUFFER)",
+    13: "Execution rejected by CNC (EW_REJECT)",
+    15: "Alarm state on CNC (EW_ALARM)",
+}
 
 class FocasError(Exception):
     def __init__(self, code: int, message: str):
         self.code = code
-        self.message = f"{message} (Error Code: {code})"
+        reason = ERROR_MESSAGES.get(code, "Unknown Error")
+        self.message = f"{message} (Code: {code} - {reason})"
         super().__init__(self.message)
 
 class FOCAS_DATE(ctypes.Structure):
@@ -54,6 +76,8 @@ class FocasClientBase:
     def disconnect(self):
         raise NotImplementedError
     def set_path(self, path_no: int):
+        raise NotImplementedError
+    def delete_program(self, prog_num: int, path_no: int = 0):
         raise NotImplementedError
     def download_program(self, program_text: str, path_no: int = 0):
         raise NotImplementedError
@@ -220,6 +244,13 @@ M30
     def set_path(self, path_no: int):
         logger.info(f"[DUMMY] Path set to {path_no}")
         
+    def delete_program(self, prog_num: int, path_no: int = 0):
+        target_path = path_no or 1
+        logger.info(f"[DUMMY] Deleting O{prog_num} from Path {target_path}")
+        with self._lock:
+            if target_path in self._programs_by_path and prog_num in self._programs_by_path[target_path]:
+                del self._programs_by_path[target_path][prog_num]
+
     def download_program(self, program_text: str, path_no: int = 0):
         target_path = path_no or 1
         logger.info(f"[DUMMY] Downloading {len(program_text)} bytes to Path {target_path}")
@@ -337,6 +368,9 @@ class RealFocasClient(FocasClientBase):
         self.lib.cnc_upend3.argtypes = [ctypes.c_ushort]
         self.lib.cnc_upend3.restype = ctypes.c_short
 
+        self.lib.cnc_delete.argtypes = [ctypes.c_ushort, ctypes.c_short]
+        self.lib.cnc_delete.restype = ctypes.c_short
+
     def connect(self, ip: str, port: int = 8193, timeout: int = 10) -> bool:
         if not self.lib:
             raise RuntimeError("FOCAS Library not loaded")
@@ -376,6 +410,13 @@ class RealFocasClient(FocasClientBase):
         if ret != EW_OK:
             raise FocasError(ret, f"Failed to set FOCAS path to {path_no}")
 
+    def delete_program(self, prog_num: int, path_no: int = 0):
+        self.set_path(path_no)
+        # Attempt to delete the program, ignore if it doesn't exist to allow safe overwrite
+        ret = self.lib.cnc_delete(self.handle, prog_num)
+        if ret != EW_OK and ret != EW_DATA: 
+            logger.warning(f"cnc_delete returned code {ret} for O{prog_num}. Program might not exist or could be protected.")
+
     def download_program(self, program_text: str, path_no: int = 0):
         self.set_path(path_no)
         
@@ -384,8 +425,16 @@ class RealFocasClient(FocasClientBase):
             
         raw_data = program_text.encode('ascii', errors='ignore')
         
+        # Try to parse program number from text to explicitly delete before upload
+        prog_match = re.search(r"O(\d+)", program_text, flags=re.IGNORECASE)
+        if prog_match:
+            try:
+                self.delete_program(int(prog_match.group(1)), path_no)
+            except Exception as e:
+                logger.warning(f"Fail to delete O{prog_match.group(1)} beforehand: {e}")
+
         ret = self.lib.cnc_dwnstart3(self.handle, 0)
-        if ret != EW_OK: raise FocasError(ret, "Failed to start download sequence (cnc_dwnstart3)")
+        if ret != EW_OK: raise FocasError(ret, "Failed to start download sequence (cnc_dwnstart3). It might already exist or memory is full.")
 
         try:
             while len(raw_data) > 0:

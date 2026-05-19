@@ -30,6 +30,7 @@ export class NCCodePane extends HTMLElement {
   private plotClearedSubscription?: EventSubscription;
   private machineChangedSubscription?: EventSubscription;
   private themeObserver?: MutationObserver;
+  private messageListener?: (event: MessageEvent) => void;
 
   constructor() {
     super();
@@ -129,6 +130,30 @@ export class NCCodePane extends HTMLElement {
         }
       }
     });
+
+    this.messageListener = (event: MessageEvent) => {
+      const message = event.data;
+      if (!this.editor) return;
+      
+      if (message.type === 'TRIGGER_FIND') {
+        this.editor.execCommand('find');
+      }
+      
+      if (message.type === 'TRIGGER_REPLACE') {
+        this.editor.execCommand('replace');
+      }
+      
+      if (message.type === 'FILE_UPDATED_EXTERNALLY') {
+        // Update to handle external text injection, optionally scoping by channel if provided
+        if (!message.channelId || message.channelId === this.channelId) {
+          const newText = message.text !== undefined ? message.text : message.content;
+          if (newText !== undefined) {
+            this.editor.setValue(newText, -1);
+          }
+        }
+      }
+    };
+    window.addEventListener('message', this.messageListener);
   }
 
   disconnectedCallback() {
@@ -146,6 +171,9 @@ export class NCCodePane extends HTMLElement {
     }
     if (this.themeObserver) {
       this.themeObserver.disconnect();
+    }
+    if (this.messageListener) {
+      window.removeEventListener('message', this.messageListener);
     }
     if (this.editor) {
       this.editor.destroy();

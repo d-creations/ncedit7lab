@@ -212,6 +212,70 @@ export class NCFocasTransfer extends HTMLElement {
     }
   }
 
+  private async handleCompare(progNum: number, pathNo: string) {
+    try {
+      if (pathNo === 'PA') {
+        const prog = this.cncPrograms.get(progNum);
+        if (!prog) return;
+
+        let combinedContent = "%\n";
+        
+        // Include header information
+        combinedContent += `&F=/O${progNum.toString().padStart(4, '0')}(${prog.comment || 'PA_PROG'})/\n`;
+
+        for (const p of [1, 2, 3] as const) {
+            if (prog.paths[p]) {
+                const resp = await this.backend.focasUpload(this.ipAddress, p, progNum);
+                
+                // Format block with <> XML-like tags matching the specified standard
+                combinedContent += `<O${progNum.toString().padStart(4, '0')}.P${p}>\n`;
+                
+                let cleanText = resp.program_text.trim();
+                if (cleanText.endsWith('%')) {
+                   cleanText = cleanText.slice(0, -1).trimEnd();
+                }
+                if (cleanText.startsWith('%')) {
+                   cleanText = cleanText.slice(1).trimStart();
+                }
+                // Also strip the `OXXXX` header if it's there
+                const firstNewLine = cleanText.indexOf('\n');
+                if (cleanText.startsWith('O') && firstNewLine > -1 && firstNewLine < 15) {
+                    cleanText = cleanText.slice(firstNewLine + 1).trimStart();
+                }
+                
+                combinedContent += `${cleanText}\n \n`;
+            }
+        }
+        
+        combinedContent += "%\n";
+
+        const fileName = `O${progNum.toString().padStart(4, '0')}.PA`;
+        if ((window as any).vscodeApi) {
+          (window as any).vscodeApi.postMessage({
+                type: 'COMPARE_FOCAS_FILE',
+                fileName: fileName,
+                content: combinedContent
+            });
+        }
+
+      } else {
+        const pNum = parseInt(pathNo, 10);
+        const resp = await this.backend.focasUpload(this.ipAddress, pNum, progNum);
+        
+        const fileName = `O${progNum.toString().padStart(4, '0')}.P${pNum}`;
+        if ((window as any).vscodeApi) {
+          (window as any).vscodeApi.postMessage({
+                type: 'COMPARE_FOCAS_FILE',
+                fileName: fileName,
+                content: resp.program_text
+            });
+        }
+      }
+    } catch (e) {
+      alert("Compare failed: " + e);
+    }
+  }
+
   private render() {
     if (!this.shadowRoot) return;
 
@@ -333,11 +397,13 @@ export class NCFocasTransfer extends HTMLElement {
               </div>
               <div class="actions">
                 ${prog.isPA ? 
-                  `<button class="btn-upl" data-path="PA" data-prog="${prog.number}">Pull PA</button>` : 
+                  `${(window as any).vscodeApi ? `<button class="btn-cmp" data-path="PA" data-prog="${prog.number}">Cmp PA</button>` : ''}
+                   <button class="btn-upl" data-path="PA" data-prog="${prog.number}">Pull PA</button>` : 
                   ''
                 }
                 ${[1,2,3].map(path => prog.paths[path as 1|2|3] ? 
-                  `<button class="btn-upl" data-path="${path}" data-prog="${prog.number}">Pull P${path}</button>` : 
+                  `${(window as any).vscodeApi ? `<button class="btn-cmp" data-path="${path}" data-prog="${prog.number}">Cmp P${path}</button>` : ''}
+                   <button class="btn-upl" data-path="${path}" data-prog="${prog.number}">Pull P${path}</button>` : 
                   ''
                 ).join('')}
               </div>
@@ -381,6 +447,16 @@ export class NCFocasTransfer extends HTMLElement {
           const prog = parseInt(target.getAttribute('data-prog') || '0', 10);
           const path = target.getAttribute('data-path') || '1';
           if(prog) this.handleUpload(prog, path);
+        });
+      });
+
+      const cmpButtons = this.shadowRoot?.querySelectorAll('.btn-cmp');
+      cmpButtons?.forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          const target = e.target as HTMLElement;
+          const prog = parseInt(target.getAttribute('data-prog') || '0', 10);
+          const path = target.getAttribute('data-path') || '1';
+          if(prog) this.handleCompare(prog, path);
         });
       });
 

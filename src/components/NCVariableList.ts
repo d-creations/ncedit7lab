@@ -282,20 +282,13 @@ export class NCVariableList extends HTMLElement {
           text-align: center;
           color: var(--vscode-descriptionForeground, #7f848e);
         }
-        
-        .input-hint {
-          font-size: 10px;
-          color: var(--vscode-descriptionForeground, #7f848e);
-          margin-top: 4px;
-          width: 100%;
-        }
+       
       </style>
 
       <div class="toolbar">
         <input type="text" class="filter-input" id="filter" placeholder="Filter (e.g., 100-200)">
       </div>
       <div class="custom-section">
-        <div class="custom-section-title">Custom Variables</div>
         <div class="custom-input-row">
           <div class="name-group">
             <span class="prefix-display" id="var-prefix">${this.variablePrefix}</span>
@@ -305,7 +298,6 @@ export class NCVariableList extends HTMLElement {
           <input type="number" class="custom-input value" id="custom-value" placeholder="Value" step="any">
           <button class="add-button" id="add-custom">+ Add</button>
         </div>
-        <div class="input-hint">Enter register number (e.g., 5, 100) or full name (e.g., R5, #100)</div>
         <div class="custom-list" id="custom-list"></div>
       </div>
       <div class="variable-list" id="list"></div>

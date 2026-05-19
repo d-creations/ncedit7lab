@@ -526,7 +526,7 @@ export class NCToolpathPlot extends HTMLElement {
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.05;
     this.controls.screenSpacePanning = true;
-    this.controls.minDistance = 10;
+    this.controls.minDistance = 0.1;
     this.controls.maxDistance = 500;
     this.controls.target.set(50, 25, 0);
 

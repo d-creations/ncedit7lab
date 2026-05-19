@@ -330,6 +330,17 @@ export class NCCodePane extends HTMLElement {
       // Let VS Code handle undo/redo natively
       this.editor.commands.removeCommand('undo');
       this.editor.commands.removeCommand('redo');
+      
+      // CRITICAL: Dummy UndoManager so Ace doesn't keep its own stack when natively running in VS Code host 
+      const dummyUndoManager = new (function(this: any) { 
+        this.execute = () => {}; 
+        this.undo = () => {}; 
+        this.redo = () => {}; 
+        this.reset = () => {}; 
+        this.hasUndo = () => false; 
+        this.hasRedo = () => false; 
+      })() as any;
+      this.editor.session.setUndoManager(dummyUndoManager);
     }
 
     // Use ResizeObserver to handle dynamic layout changes

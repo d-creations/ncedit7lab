@@ -5,7 +5,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fastapi import FastAPI, Request, HTTPException, Header, Depends
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
@@ -99,6 +99,23 @@ except Exception as e:
     ExceptionNode = None  # type: ignore
 
 app = FastAPI(title="ncplot7py-adapter-import")
+
+@app.exception_handler(FocasError)
+async def focas_error_handler(request: Request, exc: FocasError):
+    print(f"[VSCODE_NOTIFICATION] ERROR: {str(exc)}", flush=True)
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    # Only pop up VS Code notifications for 5xx errors or explicit 400 bad requests to avoid annoying 404 popups
+    if exc.status_code >= 400:
+        print(f"[VSCODE_NOTIFICATION] ERROR: {exc.detail}", flush=True)
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    print(f"[VSCODE_NOTIFICATION] ERROR: Internal Server Error: {str(exc)}", flush=True)
+    return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
 
 # Security: Trusted Host Middleware
 # Prevents Host Header attacks. In Azure, this should be set to your domain (e.g., "nc-edit7.azurewebsites.net").
@@ -889,6 +906,7 @@ async def focas_upload(path_no: int, prog_num: int, ip_address: str, port: int =
             raise HTTPException(status_code=500, detail="Failed to connect to CNC before upload")
             
         program_text = client.upload_program(prog_num, path_no)
+        print(f"[VSCODE_NOTIFICATION] SUCCESS: Program O{prog_num} successfully pulled from CNC ({ip_address})", flush=True)
         return {"status": "success", "program_text": program_text}
     except FocasError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -906,6 +924,7 @@ async def focas_download(path_no: int, ip_address: str, data: FocasDownloadData,
             raise HTTPException(status_code=500, detail="Failed to connect to CNC before download")
             
         client.download_program(data.program_text, path_no)
+        print(f"[VSCODE_NOTIFICATION] SUCCESS: Program successfully sent to CNC ({ip_address})", flush=True)
         return {"status": "success", "message": "Program successfully downloaded to CNC"}
     except FocasError as e:
         raise HTTPException(status_code=400, detail=str(e))

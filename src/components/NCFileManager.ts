@@ -19,9 +19,9 @@ export class NCFileManager extends HTMLElement {
   }
 
   connectedCallback() {
-    // 2. Hide when running in VS Code / Theia Desktop Mode
+    // 2. Hide when running in VS Code
     // @ts-ignore
-    if (window.acquireVsCodeApi !== undefined || (window.parent && window.parent !== window)) {
+    if (typeof acquireVsCodeApi !== 'undefined' || window.acquireVsCodeApi !== undefined) {
         this.style.display = 'none';
         return;
     }

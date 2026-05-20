@@ -99,6 +99,12 @@ export class StateService {
     } catch(e) {
       console.error("Failed to load app state", e);
     }
+    
+    // Ensure at least channel 1 is active at start if none are (handles both stored and unstored edge cases)
+    if (this.getActiveChannels().length === 0) {
+      const ch1 = this.state.channels.get('1');
+      if (ch1) ch1.active = true;
+    }
   }
 
   private serializeState(state: AppState): string {

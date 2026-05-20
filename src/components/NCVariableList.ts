@@ -90,10 +90,17 @@ export class NCVariableList extends HTMLElement {
    * Get custom variables for sending with plot requests
    */
   getCustomVariables(): CustomVariable[] {
-    return Array.from(this.customVariables.entries()).map(([name, value]) => ({
-      name,
-      value,
-    }));
+    return Array.from(this.customVariables.entries()).map(([name, value]) => {
+      // The API requires only the numeric identifier (e.g., "500" instead of "#500" or "R500")
+      // Extract the numeric part if the name starts with non-digit characters.
+      const match = name.match(/^\D*(\d+)$/);
+      const cleanName = match ? match[1] : name;
+      
+      return {
+        name: cleanName,
+        value,
+      };
+    });
   }
 
   private render() {

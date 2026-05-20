@@ -14,7 +14,7 @@ import './NCMachineSelector';
 import './NCToolpathPlot';
 import './NCDrawBoardPanel';
 import './NCFileManager'; // Keep for global file loading if needed, but removed from template
-import './NCFocasTransfer';
+import './NCTransferPanel';
 
 // Constants for plot panel sizing
 const PLOT_PANEL_MIN_WIDTH = 200;
@@ -69,14 +69,14 @@ export class NCEditorApp extends HTMLElement {
       const config = this.config ?? await this.configService.getConfig();
       this.config = config;
 
-      if (!config.showFocasTransfer || config.focasPlacement === 'external-panel' || config.focasPlacement === 'disabled') {
-        this.hideEmbeddedFocas();
+      if (!config.showTransferPanel || config.transferPlacement === 'external-panel' || config.transferPlacement === 'disabled') {
+        this.hideEmbeddedTransfer();
       }
 
       // Check feature flags
       this.registry.get(BACKEND_GATEWAY_TOKEN).getFeatures().then(features => {
-        if (!features.focas_enabled) {
-          this.hideEmbeddedFocas();
+        if (!features.transfer_enabled) {
+          this.hideEmbeddedTransfer();
         }
       }).catch(() => { /* Ignore network feature check errors on init */ });
 
@@ -97,20 +97,20 @@ export class NCEditorApp extends HTMLElement {
     }
   }
 
-  private hideEmbeddedFocas(): void {
-    const focasToggle = this.querySelector('#focas-toggle');
-    if (focasToggle) {
-      (focasToggle as HTMLElement).style.display = 'none';
+  private hideEmbeddedTransfer(): void {
+    const transferToggle = this.querySelector('#transfer-toggle');
+    if (transferToggle) {
+      (transferToggle as HTMLElement).style.display = 'none';
     }
 
-    const focasTab = this.querySelector('.side-tab[data-view="focas"]');
-    if (focasTab) {
-      (focasTab as HTMLElement).style.display = 'none';
+    const transferTab = this.querySelector('.side-tab[data-view="transfer"]');
+    if (transferTab) {
+      (transferTab as HTMLElement).style.display = 'none';
     }
 
-    const focasView = this.querySelector('#side-view-focas');
-    if (focasView) {
-      (focasView as HTMLElement).style.display = 'none';
+    const transferView = this.querySelector('#side-view-transfer');
+    if (transferView) {
+      (transferView as HTMLElement).style.display = 'none';
     }
   }
 
@@ -118,7 +118,7 @@ export class NCEditorApp extends HTMLElement {
     const config = this.config ?? await this.configService.getConfig();
     this.config = config;
     const showDrawPanel = config.showDrawPanel;
-    const showFocasTransfer = config.showFocasTransfer;
+    const showTransferPanel = config.showTransferPanel;
 
     this.innerHTML = `
       <style>
@@ -170,7 +170,7 @@ export class NCEditorApp extends HTMLElement {
           color: var(--vscode-disabledForeground, #7f848e);
         }
 
-        .app-focas-toggle {
+        .app-transfer-toggle {
           padding: 4px 12px;
           background: var(--vscode-button-secondaryBackground, #3a3f4b);
           color: var(--vscode-button-secondaryForeground, #abb2bf);
@@ -180,7 +180,7 @@ export class NCEditorApp extends HTMLElement {
           font-size: 12px;
         }
 
-        .app-focas-toggle.active {
+        .app-transfer-toggle.active {
           background: var(--vscode-button-background, #61afef);
           color: var(--vscode-button-foreground, #1f2329);
         }
@@ -249,13 +249,13 @@ export class NCEditorApp extends HTMLElement {
           overflow: hidden;
         }
 
-        .app-focas-container {
+        .app-transfer-container {
           width: 350px;
           display: none;
           background: var(--vscode-editor-background, #282c34);
         }
         
-        .app-main-content.show-focas .app-focas-container {
+        .app-main-content.show-transfer .app-transfer-container {
           display: block;
         }
 
@@ -490,7 +490,7 @@ export class NCEditorApp extends HTMLElement {
           <button class="app-channel-toggle" data-channel="1">Channel 1</button>
           <button class="app-channel-toggle" data-channel="2">Channel 2</button>
           <button class="app-channel-toggle" data-channel="3">Channel 3</button>
-          ${showFocasTransfer ? '<button class="app-focas-toggle" id="focas-toggle" title="CNC FOCAS Transfer">Transfer</button>' : ''}
+          ${showTransferPanel ? '<button class="app-transfer-toggle" id="transfer-toggle" title="CNC  Transfer">Transfer</button>' : ''}
           <!-- plot toggle removed from header — small open bar sits beside the plot container when hidden -->
         </div>
         <button class="app-channel-toggle mobile-channels-btn" id="mobile-channels-btn" style="display: none;">Channels</button>
@@ -515,18 +515,18 @@ export class NCEditorApp extends HTMLElement {
             <div class="side-panel-tabs" style="display: flex; background: var(--vscode-editorGroupHeader-tabsBackground, #2d2d2d); border-bottom: 1px solid var(--vscode-editorGroup-border, #3e3e42);">
               <button class="side-tab active" data-view="plot" style="flex:1; padding: 6px; background: var(--vscode-tab-activeBackground, #1e1e1e); color: var(--vscode-tab-activeForeground, #ffffff); border: none; cursor: pointer; border-top: 2px solid var(--vscode-tab-activeBorderTop, #007fd4);">Plot</button>
               ${showDrawPanel ? '<button class="side-tab" data-view="draw" style="flex:1; padding: 6px; background: var(--vscode-tab-inactiveBackground, #2d2d2d); color: var(--vscode-tab-inactiveForeground, #cccccc); border: none; cursor: pointer; border-top: 2px solid transparent;">Draw</button>' : ''}
-              ${showFocasTransfer ? '<button class="side-tab" data-view="focas" style="flex:1; padding: 6px; background: var(--vscode-tab-inactiveBackground, #2d2d2d); color: var(--vscode-tab-inactiveForeground, #cccccc); border: none; cursor: pointer; border-top: 2px solid transparent;">FOCAS</button>' : ''}
+              ${showTransferPanel ? '<button class="side-tab" data-view="transfer" style="flex:1; padding: 6px; background: var(--vscode-tab-inactiveBackground, #2d2d2d); color: var(--vscode-tab-inactiveForeground, #cccccc); border: none; cursor: pointer; border-top: 2px solid transparent;">Transfer</button>' : ''}
             </div>
             <div id="side-view-plot" style="flex: 1; overflow: hidden; display: block;">
               <nc-toolpath-plot></nc-toolpath-plot>
             </div>
             ${showDrawPanel ? '<div id="side-view-draw" style="flex: 1; overflow: hidden; display: none;"><nc-draw-board-panel></nc-draw-board-panel></div>' : ''}
-            ${showFocasTransfer ? '<div id="side-view-focas" style="flex: 1; overflow: hidden; display: none;"><nc-focas-transfer></nc-focas-transfer></div>' : ''}
+            ${showTransferPanel ? '<div id="side-view-transfer" style="flex: 1; overflow: hidden; display: none;"><nc-transfer-panel></nc-transfer-panel></div>' : ''}
           </div>
           <div class="plot-hide-bar" id="plot-hide-bar" title="Hide side panel"></div>
         </div>
 
-        ${showFocasTransfer ? '<div class="app-focas-container" id="focas-container"><nc-focas-transfer></nc-focas-transfer></div>' : ''}
+        ${showTransferPanel ? '<div class="app-transfer-container" id="transfer-container"><nc-transfer-panel></nc-transfer-panel></div>' : ''}
       </div>
 
       <div class="app-status-bar">
@@ -567,12 +567,11 @@ export class NCEditorApp extends HTMLElement {
   }
 
   private attachEventListeners(): void {
-    // FOCAS transfer toggle
-    const focasToggle = this.querySelector('#focas-toggle') as HTMLButtonElement;
-    if (focasToggle) {
-      focasToggle.addEventListener('click', () => {
+    const transferToggle = this.querySelector('#transfer-toggle') as HTMLButtonElement;
+    if (transferToggle) {
+      transferToggle.addEventListener('click', () => {
         this.setPlotViewerVisible(true);
-        this.switchSidePanelView('focas');
+        this.switchSidePanelView('transfer');
       });
     }
 
@@ -847,7 +846,7 @@ export class NCEditorApp extends HTMLElement {
     const tabs = this.querySelectorAll('.side-tab');
     const plotView = this.querySelector('#side-view-plot') as HTMLElement;
     const drawView = this.querySelector('#side-view-draw') as HTMLElement;
-    const focasView = this.querySelector('#side-view-focas') as HTMLElement;
+    const transferView = this.querySelector('#side-view-transfer') as HTMLElement;
     
     tabs.forEach(t => {
       const btn = t as HTMLButtonElement;
@@ -865,21 +864,21 @@ export class NCEditorApp extends HTMLElement {
     if (view === 'plot') {
       if (plotView) plotView.style.display = 'block';
       if (drawView) drawView.style.display = 'none';
-      if (focasView) focasView.style.display = 'none';
-      const focasToggle = this.querySelector('#focas-toggle') as HTMLButtonElement;
-      if (focasToggle) focasToggle.classList.remove('active');
+      if (transferView) transferView.style.display = 'none';
+      const transferToggle = this.querySelector('#transfer-toggle') as HTMLButtonElement;
+      if (transferToggle) transferToggle.classList.remove('active');
     } else if (view === 'draw') {
       if (plotView) plotView.style.display = 'none';
       if (drawView) drawView.style.display = 'block';
-      if (focasView) focasView.style.display = 'none';
-      const focasToggle = this.querySelector('#focas-toggle') as HTMLButtonElement;
-      if (focasToggle) focasToggle.classList.remove('active');
-    } else if (view === 'focas') {
+      if (transferView) transferView.style.display = 'none';
+      const transferToggle = this.querySelector('#transfer-toggle') as HTMLButtonElement;
+      if (transferToggle) transferToggle.classList.remove('active');
+    } else if (view === 'transfer') {
       if (plotView) plotView.style.display = 'none';
       if (drawView) drawView.style.display = 'none';
-      if (focasView) focasView.style.display = 'block';
-      const focasToggle = this.querySelector('#focas-toggle') as HTMLButtonElement;
-      if (focasToggle) focasToggle.classList.add('active');
+      if (transferView) transferView.style.display = 'block';
+      const transferToggle = this.querySelector('#transfer-toggle') as HTMLButtonElement;
+      if (transferToggle) transferToggle.classList.add('active');
     }
   }
 
@@ -900,8 +899,8 @@ export class NCEditorApp extends HTMLElement {
       plotOpenBar?.classList.remove('hidden');
       plotToggle?.classList.remove('active');
       
-      const focasToggle = this.querySelector('#focas-toggle') as HTMLButtonElement | null;
-      if(focasToggle) focasToggle.classList.remove('active');
+      const transferToggle = this.querySelector('#transfer-toggle') as HTMLButtonElement | null;
+      if(transferToggle) transferToggle.classList.remove('active');
     }
 
     this.stateService.updateUISettings({ plotViewerOpen: visible });

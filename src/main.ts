@@ -141,7 +141,7 @@ async function bootstrap() {
 
     // Determine environment
     // @ts-ignore
-    const isVSCode = window.acquireVsCodeApi !== undefined;
+    const isVSCode =(typeof acquireVsCodeApi !== 'undefined' || window.acquireVsCodeApi !== undefined);
 
     // Register Config Service early (Factory/Strategy pattern based on environment)
     registry.register(
@@ -175,7 +175,7 @@ async function bootstrap() {
       () => {
         const eventBus = registry.get(EVENT_BUS_TOKEN);
         // @ts-ignore
-        const isVSCode = window.acquireVsCodeApi !== undefined || (window.parent && window.parent !== window);
+        const isVSCode = window.acquireVsCodeApi !== undefined ;
         // Turn off local storage persistence for StateService in VS Code
         return new StateService(eventBus, !isVSCode);
       },
@@ -191,7 +191,7 @@ async function bootstrap() {
         // CLEAN ARCHITECTURE: Detect if we are running inside VS Code / Theia
         // If so, inject the VsCodeFileManagerService, otherwise fallback to the web FileManagerService
         // @ts-ignore
-        const isVSCode = window.acquireVsCodeApi !== undefined;
+        const isVSCode = (typeof acquireVsCodeApi !== 'undefined' || window.acquireVsCodeApi !== undefined);
         
         if (isVSCode) {
             console.log("Running in Desktop/IDE Mode: Injecting VsCodeFileManagerService");

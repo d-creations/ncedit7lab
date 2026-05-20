@@ -1,6 +1,6 @@
 import './NCVariablesPanelContent';
 import './NCErrorsPanelContent';
-import './NCFocasTransfer';
+import './NCTransferPanel';
 import { ServiceRegistry } from '@core/ServiceRegistry';
 import { EVENT_BUS_TOKEN, STATE_SERVICE_TOKEN, PARSER_SERVICE_TOKEN, FILE_MANAGER_SERVICE_TOKEN, CONFIG_SERVICE_TOKEN } from '@core/ServiceTokens';
 import type { ChannelId, ExecutedProgramResult } from '@core/types';
@@ -18,7 +18,7 @@ export class NCWorkbenchPanelApp extends HTMLElement {
   private fileManager: IFileManagerService;
   private configService: IConfigService;
   private activeTab: WorkbenchTab = 'variables';
-  private showFocasTransfer = true;
+  private showTransferPanel = true;
   private subscriptions: EventSubscription[] = [];
   private fileSyncListener?: EventListener;
   private bridgeListener?: EventListener;
@@ -37,8 +37,8 @@ export class NCWorkbenchPanelApp extends HTMLElement {
 
   async connectedCallback(): Promise<void> {
     const config = await this.configService.getConfig();
-    this.showFocasTransfer = config.showFocasTransfer;
-    if (!this.showFocasTransfer && this.activeTab === 'focas') {
+    this.showTransferPanel = config.showTransferPanel;
+    if (!this.showTransferPanel && this.activeTab === 'transfer') {
       this.activeTab = 'variables';
     }
 
@@ -346,7 +346,7 @@ export class NCWorkbenchPanelApp extends HTMLElement {
 
         nc-variables-panel-content,
         nc-errors-panel-content,
-        nc-focas-transfer {
+        nc-transfer-panel {
           display: block;
           flex: 1;
           min-height: 0;
@@ -361,7 +361,7 @@ export class NCWorkbenchPanelApp extends HTMLElement {
           <div class="tabs">
             <button class="tab-button ${this.activeTab === 'variables' ? 'active' : ''}" data-tab="variables">Variables</button>
             <button class="tab-button ${this.activeTab === 'errors' ? 'active' : ''}" data-tab="errors">Errors</button>
-            ${this.showFocasTransfer ? `<button class="tab-button ${this.activeTab === 'focas' ? 'active' : ''}" data-tab="focas">FOCAS</button>` : ''}
+            ${this.showTransferPanel ? `<button class="tab-button ${this.activeTab === 'transfer' ? 'active' : ''}" data-tab="transfer">Transfer</button>` : ''}
           </div>
           <div class="channel-switcher">
             <button class="channel-button ${selectedChannel === '1' ? 'active' : ''}" data-channel="1" ${activeChannels.includes('1') ? '' : 'disabled'}>CH 1</button>
@@ -378,7 +378,7 @@ export class NCWorkbenchPanelApp extends HTMLElement {
         <div class="tab-panel ${this.activeTab === 'errors' ? 'active' : ''}" data-tab-panel="errors">
           <nc-errors-panel-content channel-id="${selectedChannel}"></nc-errors-panel-content>
         </div>
-        ${this.showFocasTransfer ? `<div class="tab-panel ${this.activeTab === 'focas' ? 'active' : ''}" data-tab-panel="focas"><nc-focas-transfer></nc-focas-transfer></div>` : ''}
+        ${this.showTransferPanel ? `<div class="tab-panel ${this.activeTab === 'transfer' ? 'active' : ''}" data-tab-panel="transfer"><nc-transfer-panel></nc-transfer-panel></div>` : ''}
       </div>
     `;
   }

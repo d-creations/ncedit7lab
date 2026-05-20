@@ -1,31 +1,34 @@
 import { ServiceRegistry } from '@core/ServiceRegistry';
 import { BACKEND_GATEWAY_TOKEN, FILE_MANAGER_SERVICE_TOKEN, CONFIG_SERVICE_TOKEN } from '@core/ServiceTokens';
+import { ITransferProtocol } from '../services/transfer/ITransferProtocol';
+import { TransferProtocolFactory } from '../services/transfer/TransferProtocolFactory';
 import { BackendGateway } from '@services/BackendGateway';
 import { IFileManagerService } from '@services/IFileManagerService';
 import { IConfigService } from '@services/config/IConfigService';
 
-import { FocasProgram } from '@core/types';
+import { TransferProgram } from '@core/types';
 
 interface GroupedProgram {
   number: number;
   comment: string;
   paths: {
-    1?: FocasProgram;
-    2?: FocasProgram;
-    3?: FocasProgram;
+    1?: TransferProgram;
+    2?: TransferProgram;
+    3?: TransferProgram;
   };
   isPA: boolean; // Indicates if it exists on multiple paths identically
 }
 
-export class NCFocasTransfer extends HTMLElement {
+export class NCTransferPanel extends HTMLElement {
   private backend: BackendGateway;
+  private transferClient!: ITransferProtocol;
   private fileManager: IFileManagerService;
   private configService: IConfigService;
 
   
   private cncPrograms: Map<number, GroupedProgram> = new Map();
   private ipAddress: string = '192.168.1.1';
-  private isFocasConnected: boolean = false;
+  private isConnectedToCnc: boolean = false;
   loading: boolean = false;
 
   constructor() {
@@ -36,10 +39,11 @@ export class NCFocasTransfer extends HTMLElement {
     this.configService = ServiceRegistry.getInstance().get(CONFIG_SERVICE_TOKEN);
     
     // Asynchronously load the default IP address from our configuration factory
-    this.configService.get('focasDefaultIp').then(ip => {
-      this.ipAddress = ip;
+    this.configService.getConfig().then(cfg => {
+      this.transferClient = TransferProtocolFactory.create(cfg.transferProtocol || 'focas', this.backend, cfg.transferDriverPath);
+      this.ipAddress = cfg.transferDefaultIp || '192.168.1.1';
       this.render();
-      if (this.isConnected) {
+      if (this.isConnectedToCnc) {
         this.attachEventListeners();
         void this.checkPing();
       }
@@ -48,7 +52,7 @@ export class NCFocasTransfer extends HTMLElement {
     // Listen for file drops fetched via Extension
     window.addEventListener('message', (event) => {
         const message = event.data;
-        if (message.type === 'DO_FOCAS_UPLOAD') {
+        if (message.type === 'DO_TRANSFER_UPLOAD') {
             this.uploadDroppedFile(message.content, message.pathId);
         }
     });
@@ -67,12 +71,12 @@ export class NCFocasTransfer extends HTMLElement {
     try {
       this.loading = true;
       this.render();
-      await this.backend.focasConnect(this.ipAddress);
-      this.isFocasConnected = true;
+      await this.transferClient.connect(this.ipAddress);
+      this.isConnectedToCnc = true;
       await this.fetchPrograms();
     } catch (e) {
-      alert("Failed to connect to FOCAS: " + e);
-      this.isFocasConnected = false;
+      alert("Failed to connect to transfer: " + e);
+      this.isConnectedToCnc = false;
     } finally {
       this.loading = false;
       this.render();
@@ -93,10 +97,10 @@ export class NCFocasTransfer extends HTMLElement {
     }
     
     try {
-      const response = await this.backend.focasPing(this.ipAddress);
+      const available = await this.transferClient.ping(this.ipAddress);
       if (pingIndicator) {
-        pingIndicator.style.background = response.available ? '#89d185' : '#f48771';
-        pingIndicator.title = response.available ? 'Machine Reachable (Ping OK)' : 'Machine Unreachable';
+        pingIndicator.style.background = available ? '#89d185' : '#f48771';
+        pingIndicator.title = available ? 'Machine Reachable (Ping OK)' : 'Machine Unreachable';
       }
     } catch(e) {
       if (pingIndicator) {
@@ -112,8 +116,8 @@ export class NCFocasTransfer extends HTMLElement {
 
     for (const path of paths) {
       try {
-        const response = await this.backend.focasListPrograms(this.ipAddress, path);
-        for (const prog of response.programs) {
+        const response = await this.transferClient.listPrograms(this.ipAddress, path);
+        for (const prog of response) {
           if (!this.cncPrograms.has(prog.number)) {
             this.cncPrograms.set(prog.number, {
               number: prog.number,
@@ -152,14 +156,14 @@ export class NCFocasTransfer extends HTMLElement {
 
         for (const p of [1, 2, 3] as const) {
             if (prog.paths[p]) {
-                const resp = await this.backend.focasUpload(this.ipAddress, p, progNum);
-                this.fileManager.updateActiveProgramContent(p.toString(), resp.program_text);
+                const resp = await this.transferClient.uploadProgram(this.ipAddress, p, progNum);
+                this.fileManager.updateActiveProgramContent(p.toString(), resp);
                 
                 // Format block with <> XML-like tags matching the specified standard
                 combinedContent += `<O${progNum.toString().padStart(4, '0')}.P${p}>\n`;
                 
                 // Remove trailing % or whitespace from individual blocks if present, to prevent mid-file terminations
-                let cleanText = resp.program_text.trim();
+                let cleanText = resp.trim();
                 if (cleanText.endsWith('%')) {
                    cleanText = cleanText.slice(0, -1).trimEnd();
                 }
@@ -181,7 +185,7 @@ export class NCFocasTransfer extends HTMLElement {
         const fileName = `O${progNum.toString().padStart(4, '0')}.PA`;
         if ((window as any).vscodeApi) {
           (window as any).vscodeApi.postMessage({
-                type: 'SAVE_FOCAS_FILE',
+                type: 'SAVE_TRANSFER_FILE',
                 fileName: fileName,
                 content: combinedContent
             });
@@ -190,18 +194,18 @@ export class NCFocasTransfer extends HTMLElement {
 
       } else {
         const pNum = parseInt(pathNo, 10);
-        const resp = await this.backend.focasUpload(this.ipAddress, pNum, progNum);
+        const resp = await this.transferClient.uploadProgram(this.ipAddress, pNum, progNum);
         
         // Load into matching local channel
         const channelId = pNum.toString();
-        this.fileManager.updateActiveProgramContent(channelId, resp.program_text);
+        this.fileManager.updateActiveProgramContent(channelId, resp);
         
         const fileName = `O${progNum.toString().padStart(4, '0')}.P${pNum}`;
         if ((window as any).vscodeApi) {
           (window as any).vscodeApi.postMessage({
-                type: 'SAVE_FOCAS_FILE',
+                type: 'SAVE_TRANSFER_FILE',
                 fileName: fileName,
-                content: resp.program_text
+                content: resp
             });
         }
 
@@ -225,12 +229,12 @@ export class NCFocasTransfer extends HTMLElement {
 
         for (const p of [1, 2, 3] as const) {
             if (prog.paths[p]) {
-                const resp = await this.backend.focasUpload(this.ipAddress, p, progNum);
+                const resp = await this.transferClient.uploadProgram(this.ipAddress, p, progNum);
                 
                 // Format block with <> XML-like tags matching the specified standard
                 combinedContent += `<O${progNum.toString().padStart(4, '0')}.P${p}>\n`;
                 
-                let cleanText = resp.program_text.trim();
+                let cleanText = resp.trim();
                 if (cleanText.endsWith('%')) {
                    cleanText = cleanText.slice(0, -1).trimEnd();
                 }
@@ -252,7 +256,7 @@ export class NCFocasTransfer extends HTMLElement {
         const fileName = `O${progNum.toString().padStart(4, '0')}.PA`;
         if ((window as any).vscodeApi) {
           (window as any).vscodeApi.postMessage({
-                type: 'COMPARE_FOCAS_FILE',
+                type: 'COMPARE_TRANSFER_FILE',
                 fileName: fileName,
                 content: combinedContent
             });
@@ -260,14 +264,14 @@ export class NCFocasTransfer extends HTMLElement {
 
       } else {
         const pNum = parseInt(pathNo, 10);
-        const resp = await this.backend.focasUpload(this.ipAddress, pNum, progNum);
+        const resp = await this.transferClient.uploadProgram(this.ipAddress, pNum, progNum);
         
         const fileName = `O${progNum.toString().padStart(4, '0')}.P${pNum}`;
         if ((window as any).vscodeApi) {
           (window as any).vscodeApi.postMessage({
-                type: 'COMPARE_FOCAS_FILE',
+                type: 'COMPARE_TRANSFER_FILE',
                 fileName: fileName,
-                content: resp.program_text
+                content: resp
             });
         }
       }
@@ -374,13 +378,13 @@ export class NCFocasTransfer extends HTMLElement {
       </style>
       
       <div class="header">
-        <strong>FOCAS 2 Transfer</strong>
+        <strong>Transfer</strong>
         <span id="ping-indicator" title="Ping Status" style="display:inline-block; width:10px; height:10px; border-radius:50%; background:gray; margin-left:8px; cursor:help;"></span>
         <input type="text" id="ip-address" value="${this.ipAddress}" placeholder="CNC IP" />
-        <button id="connect-btn">${this.loading ? 'Connecting...' : (this.isFocasConnected ? 'Reconnect' : 'Connect')}</button>
+        <button id="connect-btn">${this.loading ? 'Connecting...' : (this.isConnectedToCnc ? 'Reconnect' : 'Connect')}</button>
       </div>
 
-      ${this.isFocasConnected ? `
+      ${this.isConnectedToCnc ? `
         <div class="list">
           <h3>CNC Memory</h3>
           ${Array.from(this.cncPrograms.values()).sort((a,b)=>a.number-b.number).map(prog => `
@@ -439,7 +443,7 @@ export class NCFocasTransfer extends HTMLElement {
       ipInput.addEventListener('blur', () => this.checkPing());
     }
     
-    if (this.isFocasConnected) {
+    if (this.isConnectedToCnc) {
       const uplButtons = this.shadowRoot?.querySelectorAll('.btn-upl');
       uplButtons?.forEach(btn => {
         btn.addEventListener('click', (e) => {
@@ -469,7 +473,7 @@ export class NCFocasTransfer extends HTMLElement {
             const isPA = item.getAttribute('data-drag-pa') === 'true';
             
             // Set text payload so it can at least be dropped into text editors
-            dragEvent.dataTransfer.setData('text/plain', `FOCAS Program O${progNum.padStart(4, '0')} (${isPA ? 'PA' : 'Multi-path'})`);
+            dragEvent.dataTransfer.setData('text/plain', `Transfer Program O${progNum.padStart(4, '0')} (${isPA ? 'PA' : 'Multi-path'})`);
             dragEvent.dataTransfer.effectAllowed = 'copy';
           }
         });
@@ -564,11 +568,11 @@ export class NCFocasTransfer extends HTMLElement {
           if (cleanContent.startsWith('%')) cleanContent = cleanContent.slice(1).trimStart();
           if (cleanContent.endsWith('%')) cleanContent = cleanContent.slice(0, -1).trimEnd();
           
-          // FOCAS cnc_download3 format: Must start with LF and end with % (no leading %)
+          // Transfer format: Must start with LF and end with % (no leading %)
           const finalContent = `\n${cleanContent}\n%`;
           
           try {
-            await this.backend.focasDownload(this.ipAddress, p, finalContent);
+            await this.transferClient.downloadProgram(this.ipAddress, p, finalContent);
             uploadedPaths.push(p);
           } catch(e) {
             console.warn(`Failed to push to Path ${p}`, e);
@@ -590,10 +594,9 @@ export class NCFocasTransfer extends HTMLElement {
         if (cleanContent.startsWith('%')) cleanContent = cleanContent.slice(1).trimStart();
         if (cleanContent.endsWith('%')) cleanContent = cleanContent.slice(0, -1).trimEnd();
         
-        // FOCAS cnc_download3 format: Must start with LF and end with % (no leading %)
         const finalContent = `\n${cleanContent}\n%`;
         
-        await this.backend.focasDownload(this.ipAddress, pathNo, finalContent);
+        await this.transferClient.downloadProgram(this.ipAddress, pathNo, finalContent);
         alert(`File pushed to Path ${pathNo} successfully!`);
       }
     } catch(e) {
@@ -608,4 +611,4 @@ export class NCFocasTransfer extends HTMLElement {
 
 }
 
-customElements.define('nc-focas-transfer', NCFocasTransfer);
+customElements.define('nc-transfer-panel', NCTransferPanel);

@@ -416,7 +416,7 @@ export class NCCodePane extends HTMLElement {
 
   private isVsCodeHost(): boolean {
     // @ts-ignore
-    return window.acquireVsCodeApi !== undefined || (window.parent && window.parent !== window);
+    return (typeof acquireVsCodeApi !== 'undefined' || window.acquireVsCodeApi !== undefined);
   }
 
   private applyEditorTheme(): void {

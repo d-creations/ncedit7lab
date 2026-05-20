@@ -2,14 +2,15 @@ import { IConfigService, AppConfiguration } from './IConfigService';
 
 export class WebConfigService implements IConfigService {
   private config: AppConfiguration = {
-    focasDefaultIp: '192.168.1.1',
+    transferDefaultIp: '192.168.1.1',
     backendPort: 8000,
     backendBaseUrl: '',
     themeMode: 'light',
     hostMode: 'web',
-    focasPlacement: 'side-panel',
+    transferPlacement: 'side-panel',
+    transferProtocol: 'focas',
     showDrawPanel: true,
-    showFocasTransfer: false,
+    showTransferPanel: false,
     backendTimeout: 10000,
   }; // Defaults
   private listeners: ((cfg: AppConfiguration) => void)[] = [];

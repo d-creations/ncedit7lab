@@ -1,6 +1,6 @@
 # Backend Service
 
-This folder contains the FastAPI backend used by NC-Edit7. It serves the built frontend when available, exposes the backend API used by the editor, and bridges to the `ncplot7py` CGI and FOCAS helpers.
+This folder contains the FastAPI backend used by NC-Edit7. It serves the built frontend when available, exposes the backend API used by the editor, and bridges to the `ncplot7py` CGI and Transfer helpers.
 
 ## What it serves
 
@@ -9,7 +9,7 @@ This folder contains the FastAPI backend used by NC-Edit7. It serves the built f
 - `GET /api/features` reports which backend features are enabled.
 - `GET /api/machines` returns the machine list used by the frontend machine selector.
 - `GET /api/syntax/{control_type}` returns ACE syntax rules for the requested control type.
-- `GET /api/focas/ping`, `POST /api/focas/connect`, and `GET /api/focas/programs/{path_no}` expose the FOCAS integration.
+- `GET /api/transfer/ping`, `POST /api/transfer/connect`, and `GET /api/transfer/programs/{path_no}` expose the Transfer integration.
 
 ## Run locally
 
@@ -33,7 +33,7 @@ uvicorn backend.main_import:app --host 0.0.0.0 --port 8000 --reload
 
 - `CGI_PATH` sets the path to the CGI script used by the subprocess bridge. The default is `/app/ncplot7py/scripts/cgiserver.cgi`.
 - `CGI_TIMEOUT` sets the CGI subprocess timeout in seconds. The default is `30`.
-- `ENABLE_FOCAS` enables or disables FOCAS routes. The default is `True`.
+- `ENABLE_Transfer` enables or disables Transfer routes. The default is `True`.
 
 ## Notes
 

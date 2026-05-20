@@ -7,6 +7,8 @@ from copy import deepcopy
 from threading import Lock
 from typing import Optional, Tuple, Dict, Any
 
+from .interface import ProtocolClient, TransferError
+
 logger = logging.getLogger(__name__)
 
 # FOCAS Error Codes (from Fwlib64.h)
@@ -40,12 +42,10 @@ ERROR_MESSAGES = {
     15: "Alarm state on CNC (EW_ALARM)",
 }
 
-class FocasError(Exception):
+class FocasError(TransferError):
     def __init__(self, code: int, message: str):
-        self.code = code
         reason = ERROR_MESSAGES.get(code, "Unknown Error")
-        self.message = f"{message} (Code: {code} - {reason})"
-        super().__init__(self.message)
+        super().__init__(code=code, message=message, reason=reason)
 
 class FOCAS_DATE(ctypes.Structure):
     """Date structure for FOCAS directory listings"""
@@ -69,24 +69,7 @@ class PRGDIR3(ctypes.Structure):
         ("cdate", FOCAS_DATE)
     ]
 
-class FocasClientBase:
-    """Abstract base class for Dependency Injection"""
-    def connect(self, ip: str, port: int = 8193, timeout: int = 10) -> bool:
-        raise NotImplementedError
-    def disconnect(self):
-        raise NotImplementedError
-    def set_path(self, path_no: int):
-        raise NotImplementedError
-    def delete_program(self, prog_num: int, path_no: int = 0):
-        raise NotImplementedError
-    def download_program(self, program_text: str, path_no: int = 0):
-        raise NotImplementedError
-    def upload_program(self, prog_num: int, path_no: int = 0) -> str:
-        raise NotImplementedError
-    def list_programs(self, path_no: int = 0) -> list:
-        raise NotImplementedError
-
-class DummyFocasClient(FocasClientBase):
+class DummyFocasClient(ProtocolClient):
     """Dummy FOCAS client for testing without a CNC or DLLs."""
     def __init__(self):
         self.connected = False
@@ -232,7 +215,9 @@ M30
                 return comment[:48]
         return fallback
         
-    def connect(self, ip: str, port: int = 8193, timeout: int = 10) -> bool:
+    def connect(self, ip: str, port: Optional[int] = 8193, timeout: int = 10) -> bool:
+        if port is None:
+            port = 8193
         logger.info(f"[DUMMY] Connecting to {ip}:{port}")
         self.connected = True
         return True
@@ -300,7 +285,7 @@ M30
         with self._lock:
             self._programs_by_path = deepcopy(self._build_seed_programs())
 
-class RealFocasClient(FocasClientBase):
+class RealFocasClient(ProtocolClient):
     def __init__(self, dll_path: str = "focas_dlls/FWLIB64.DLL"):
         self.lib = None
         self.handle = ctypes.c_ushort(0)
@@ -371,7 +356,9 @@ class RealFocasClient(FocasClientBase):
         self.lib.cnc_delete.argtypes = [ctypes.c_ushort, ctypes.c_short]
         self.lib.cnc_delete.restype = ctypes.c_short
 
-    def connect(self, ip: str, port: int = 8193, timeout: int = 10) -> bool:
+    def connect(self, ip: str, port: Optional[int] = 8193, timeout: int = 10) -> bool:
+        if port is None:
+            port = 8193
         if not self.lib:
             raise RuntimeError("FOCAS Library not loaded")
             
@@ -528,7 +515,7 @@ USE_MOCK = os.environ.get("USE_MOCK_FOCAS", "0") == "1"
 # You can set USE_MOCK_FOCAS=1 in your environment/docker-compose to use the mock DLLs.
 _focas_instance = DummyFocasClient() if USE_MOCK else RealFocasClient()
 
-def get_focas_client() -> FocasClientBase:
+def get_focas_client() -> ProtocolClient:
     """FastAPI Dependency for FOCAS operations"""
     return _focas_instance
 
@@ -540,5 +527,5 @@ def is_demo_ip(ip_address: str) -> bool:
     return ip_address.strip().upper() == "DEMO"
 
 
-def get_demo_focas_client() -> DummyFocasClient:
+def get_demo_focas_client() -> ProtocolClient:
     return _demo_focas_instance

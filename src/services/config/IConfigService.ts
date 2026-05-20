@@ -1,17 +1,20 @@
 export type HostMode = 'web' | 'vscode-editor' | 'vscode-panel';
 
-export type FocasPlacement = 'side-panel' | 'bottom-panel' | 'external-panel' | 'disabled';
+export type TransferPlacement = 'side-panel' | 'bottom-panel' | 'external-panel' | 'disabled';
+export type TransferProtocol = 'focas' | 'ftp' | 'smb' | 'none';
 
 export interface AppConfiguration {
-  focasDefaultIp: string;
+  transferDefaultIp: string;
   backendPort: number;
   backendBaseUrl: string;
   backendTimeout: number;
   themeMode: 'vscode' | 'one-dark' | 'light';
   hostMode: HostMode;
-  focasPlacement: FocasPlacement;
+  transferPlacement: TransferPlacement;
+  transferProtocol: TransferProtocol;
+  transferDriverPath?: string;
   showDrawPanel: boolean;
-  showFocasTransfer: boolean;
+  showTransferPanel: boolean;
 }
 
 export interface IConfigService {

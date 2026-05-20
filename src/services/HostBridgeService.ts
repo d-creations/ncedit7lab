@@ -1,4 +1,4 @@
-export type WorkbenchTab = 'variables' | 'errors' | 'focas';
+export type WorkbenchTab = 'variables' | 'errors' | 'transfer';
 
 export type WorkbenchBridgeMessage =
   | {

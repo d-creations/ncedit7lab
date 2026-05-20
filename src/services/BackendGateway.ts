@@ -5,9 +5,9 @@ import type {
   PlotResponse,
   ServerMachineListRequest,
   ServerMachineListResponse,
-  FocasListResponse,
-  FocasUploadResponse,
-  FocasDownloadResponse,
+  TransferListResponse,
+  TransferUploadResponse,
+  TransferDownloadResponse,
 } from '@core/types';
 import { ServiceRegistry } from '@core/ServiceRegistry';
 import { CONFIG_SERVICE_TOKEN } from '@core/ServiceTokens';
@@ -45,7 +45,7 @@ export class BackendGateway {
     return buildBackendUrl('/cgiserver_import', this.configService);
   }
 
-  // --- FOCAS API Methods ---
+  // --- Transfer API Methods ---
   
   async getFeatures(): Promise<import('@core/types').BackendFeatures> {
     const response = await fetch(await buildBackendUrl('/api/features', this.configService));
@@ -53,48 +53,60 @@ export class BackendGateway {
     return response.json();
   }
 
-  private async getFocasUrl(path: string): Promise<string> {
-    return buildBackendUrl(`/api/focas/${path}`, this.configService);
+  private async getTransferUrl(path: string): Promise<string> {
+    return buildBackendUrl(`/api/transfer/${path}`, this.configService);
   }
 
-  async focasPing(ip: string): Promise<import('@core/types').FocasPingResponse> {
-    const url = await this.getFocasUrl('ping');
+  private buildQuery(params: Record<string, any>): string {
+    const q = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined && value !== null) {
+        q.append(key, String(value));
+      }
+    }
+    return q.toString();
+  }
+
+  async transferPing(ip: string): Promise<import('@core/types').TransferPingResponse> {
+    const url = await this.getTransferUrl('ping');
     const response = await fetch(`${url}?ip_address=${ip}`);
     if (!response.ok) throw new Error(await response.text());
     return response.json();
   }
 
-  async focasConnect(ip: string, port: number = 8193): Promise<{status: string, message: string}> {
-    const url = await this.getFocasUrl('connect');
+  async transferConnect(ip: string, port: number, protocol: string, driverPath?: string): Promise<{status: string, message: string}> {
+    const url = await this.getTransferUrl('connect');
     const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ip_address: ip, port, timeout: 10 })
+      body: JSON.stringify({ ip_address: ip, port, timeout: 10, protocol, driver_path: driverPath })
     });
     if (!response.ok) throw new Error(await response.text());
     return response.json();
   }
 
-  async focasListPrograms(ip: string, pathNo: number, port: number = 8193): Promise<FocasListResponse> {
-    const url = await this.getFocasUrl(`programs/${pathNo}`);
-    const response = await fetch(`${url}?ip_address=${ip}&port=${port}`);
+  async transferListPrograms(ip: string, pathNo: number, port: number, protocol: string, driverPath?: string): Promise<TransferListResponse> {
+    const url = await this.getTransferUrl(`programs/${pathNo}`);
+    const qs = this.buildQuery({ ip_address: ip, port, protocol, driver_path: driverPath });
+    const response = await fetch(`${url}?${qs}`);
     if (!response.ok) throw new Error(await response.text());
     return response.json();
   }
 
-  async focasUpload(ip: string, pathNo: number, progNum: number, port: number = 8193): Promise<FocasUploadResponse> {
-    const url = await this.getFocasUrl(`upload/${pathNo}/${progNum}`);
-    const response = await fetch(`${url}?ip_address=${ip}&port=${port}`);
+  async transferUpload(ip: string, pathNo: number, progNum: number, port: number, protocol: string, driverPath?: string): Promise<TransferUploadResponse> {
+    const url = await this.getTransferUrl(`upload/${pathNo}/${progNum}`);
+    const qs = this.buildQuery({ ip_address: ip, port, protocol, driver_path: driverPath });
+    const response = await fetch(`${url}?${qs}`);
     if (!response.ok) throw new Error(await response.text());
     return response.json();
   }
 
-  async focasDownload(ip: string, pathNo: number, programText: string, port: number = 8193): Promise<FocasDownloadResponse> {
-    const url = await this.getFocasUrl(`download/${pathNo}`);
-    const response = await fetch(`${url}?ip_address=${ip}&port=${port}`, {
+  async transferDownload(ip: string, pathNo: number, programText: string, port: number, protocol: string, driverPath?: string): Promise<TransferDownloadResponse> {
+    const url = await this.getTransferUrl(`download/${pathNo}`);
+    const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ program_text: programText })
+      body: JSON.stringify({ ip_address: ip, port, program_text: programText, protocol, driver_path: driverPath })
     });
     if (!response.ok) throw new Error(await response.text());
     return response.json();

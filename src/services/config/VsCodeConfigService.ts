@@ -2,15 +2,16 @@ import { IConfigService, AppConfiguration } from './IConfigService';
 
 export class VsCodeConfigService implements IConfigService {
   private config: AppConfiguration = {
-    focasDefaultIp: '192.168.1.1',
+    transferDefaultIp: '192.168.1.1',
     backendPort: 8000,
     backendBaseUrl: '',
     backendTimeout: 60000,
     themeMode: 'vscode',
     hostMode: 'vscode-editor',
-    focasPlacement: 'external-panel',
+    transferPlacement: 'external-panel',
+    transferProtocol: 'focas',
     showDrawPanel: true,
-    showFocasTransfer: true,
+    showTransferPanel: true,
   }; // Defaults
   private listeners: ((cfg: AppConfiguration) => void)[] = [];
 
@@ -19,8 +20,8 @@ export class VsCodeConfigService implements IConfigService {
     if ((window as any).backendPort) {
       this.config.backendPort = (window as any).backendPort;
     }
-    if ((window as any).focasDefaultIp) {
-      this.config.focasDefaultIp = (window as any).focasDefaultIp;
+    if ((window as any).transferDefaultIp) {
+      this.config.transferDefaultIp = (window as any).transferDefaultIp;
     }
     
     // VS Code passes some settings initially via the webview HTML

@@ -4,7 +4,7 @@ CNC NC code editor view with plot interface.
 
 The editor integrates the ACE text editor and enables the plotting of toolpaths with the three.js library.
 
-Licensing note: NC-Edit7 source code is licensed under the MIT License. Some repository variants or releases may also include FANUC FOCAS runtime files in `backend/focas_dlls`. Those FANUC files are proprietary FANUC software, redistributed under FANUC's redistribution terms, and are not covered by the MIT License.
+Licensing note: NC-Edit7 source code is licensed under the MIT License. Some repository variants or releases may also include FANUC Transfer runtime files in `backend/focas_dlls`. Those FANUC files are proprietary FANUC software, redistributed under FANUC's redistribution terms, and are not covered by the MIT License.
 
 ## Live Demo
 

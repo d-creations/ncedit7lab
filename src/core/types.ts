@@ -1,5 +1,6 @@
 export interface BackendFeatures {
-  focas_enabled: boolean;
+  transfer_enabled: boolean;
+  transfer_protocols?: string[];
   cgi_path: string;
 }
 
@@ -226,29 +227,29 @@ export interface NCProgram {
   lastModified: number;
 }
 
-export interface FocasProgram {
+export interface TransferProgram {
   number: number;
   length: number;
   comment: string;
 }
 
-export interface FocasListResponse {
+export interface TransferListResponse {
   status: string;
-  programs: FocasProgram[];
+  programs: TransferProgram[];
 }
 
-export interface FocasPingResponse {
+export interface TransferPingResponse {
   status: string;
   available: boolean;
   error?: string;
 }
 
-export interface FocasUploadResponse {
+export interface TransferUploadResponse {
   status: string;
   program_text: string;
 }
 
-export interface FocasDownloadResponse {
+export interface TransferDownloadResponse {
   status: string;
   message: string;
 }

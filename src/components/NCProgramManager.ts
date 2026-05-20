@@ -33,7 +33,7 @@ export class NCProgramManager extends HTMLElement {
   connectedCallback() {
     // 2. Hide when running in VS Code / Theia Desktop Mode
     // @ts-ignore
-    if (window.acquireVsCodeApi !== undefined || (window.parent && window.parent !== window)) {
+    if (typeof acquireVsCodeApi !== 'undefined' || window.acquireVsCodeApi !== undefined) {
         this.style.display = 'none';
         return;
     }

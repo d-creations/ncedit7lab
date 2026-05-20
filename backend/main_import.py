@@ -19,27 +19,32 @@ from pathlib import Path
 import importlib.util
 from pydantic import BaseModel
 
-# Focas Service
+# Transfer Service
 try:
-    from backend.focas_service import get_focas_client, get_demo_focas_client, is_demo_ip, FocasClientBase, FocasError
-    FOCAS_IMPORT_OK = True
+    from backend.transfer.interface import TransferError
+    from backend.transfer.router import router as transfer_router
+    TRANSFER_IMPORT_OK = True
 except ImportError:
     try:
-        from focas_service import get_focas_client, get_demo_focas_client, is_demo_ip, FocasClientBase, FocasError
-        FOCAS_IMPORT_OK = True
+        from transfer.interface import TransferError
+        from transfer.router import router as transfer_router
+        TRANSFER_IMPORT_OK = True
     except ImportError as e:
         import logging
-        logging.exception(f"Failed to import focas_service: {e}")
-        FOCAS_IMPORT_OK = False
-        class FocasClientBase: pass
-        def get_focas_client(): return None
-        def get_demo_focas_client(): return None
-        def is_demo_ip(ip_address: str): return False
-        class FocasError(Exception): pass
+        logging.exception(f"Failed to import transfer.router: {e}")
+        TRANSFER_IMPORT_OK = False
+        class TransferClientBase:
+            pass
+        def get_transfer_client():
+            return None
+        def get_demo_transfer_client():
+            return None
+        transfer_router = None
+        class TransferError(Exception): pass
 
 # Simple security: API Key to prevent basic bot requests
 API_KEY = os.environ.get("API_KEY", "nc-edit7-secret-key")
-ENABLE_FOCAS = os.environ.get("ENABLE_FOCAS", "True").lower() in ("true", "1", "t", "yes")
+ENABLE_TRANSFER = os.environ.get("ENABLE_TRANSFER", "True").lower() in ("true", "1", "t", "yes")
 
 async def verify_api_key(x_api_key: Optional[str] = Header(None)): return True
 
@@ -100,8 +105,11 @@ except Exception as e:
 
 app = FastAPI(title="ncplot7py-adapter-import")
 
-@app.exception_handler(FocasError)
-async def focas_error_handler(request: Request, exc: FocasError):
+if transfer_router:
+    app.include_router(transfer_router)
+
+@app.exception_handler(TransferError)
+async def transfer_error_handler(request: Request, exc: TransferError):
     print(f"[VSCODE_NOTIFICATION] ERROR: {str(exc)}", flush=True)
     return JSONResponse(status_code=400, content={"detail": str(exc)})
 
@@ -824,111 +832,9 @@ async def legacy_cgiserver(request: Request):
 async def get_features():
     """Endpoint for frontend to query which backend modules are available."""
     return {
-        "focas_enabled": ENABLE_FOCAS and FOCAS_IMPORT_OK,
+        "transfer_enabled": ENABLE_TRANSFER and TRANSFER_IMPORT_OK,
         "cgi_path": ""  # Only relevant for main.py subprocess
     }
 
-# --- FOCAS API Routes ---
-
-class FocasConnection(BaseModel):
-    ip_address: str
-    port: int = 8193
-    timeout: int = 10
-
-class FocasDownloadData(BaseModel):
-    program_text: str
-
-@app.get("/api/focas/ping")
-async def focas_ping(ip_address: str):
-    if not ENABLE_FOCAS:
-        raise HTTPException(status_code=501, detail="FOCAS support is disabled on this server.")
-    
-    import platform
-    import asyncio
-    
-    is_windows = platform.system().lower() == "windows"
-    param_count = "-n" if is_windows else "-c"
-    param_wait = "-w" if is_windows else "-W"
-    wait_val = "1000" if is_windows else "1"
-    
-    try:
-        process = await asyncio.create_subprocess_exec(
-            "ping", param_count, "1", param_wait, wait_val, ip_address,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        await process.communicate()
-        return {"status": "success", "available": process.returncode == 0}
-    except Exception as e:
-        return {"status": "success", "available": False, "error": str(e)}
-
-@app.post("/api/focas/connect")
-async def focas_connect(conn: FocasConnection, client: FocasClientBase = Depends(get_focas_client)):
-    if is_demo_ip(conn.ip_address):
-        client = get_demo_focas_client()
-    elif not ENABLE_FOCAS or not FOCAS_IMPORT_OK:
-        raise HTTPException(status_code=501, detail="FOCAS support is disabled.")
-    try:
-        success = client.connect(conn.ip_address, conn.port, conn.timeout)
-        if not success:
-            raise HTTPException(status_code=500, detail="Failed to connect to CNC")
-        
-        client.disconnect()
-        return {"status": "success", "message": f"Connected to {conn.ip_address}"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/focas/programs/{path_no}")
-async def focas_list_programs(path_no: int, ip_address: str, port: int = 8193, client: FocasClientBase = Depends(get_focas_client)):
-    if is_demo_ip(ip_address):
-        client = get_demo_focas_client()
-    elif not ENABLE_FOCAS or not FOCAS_IMPORT_OK:
-        raise HTTPException(status_code=501, detail="FOCAS support is disabled.")
-    try:
-        if not client.connect(ip_address, port):
-            raise HTTPException(status_code=500, detail="Failed to connect to CNC")
-            
-        programs = client.list_programs(path_no)
-        return {"status": "success", "programs": programs}
-    except FocasError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    finally:
-        client.disconnect()
-
-@app.get("/api/focas/upload/{path_no}/{prog_num}")
-async def focas_upload(path_no: int, prog_num: int, ip_address: str, port: int = 8193, client: FocasClientBase = Depends(get_focas_client)):
-    if is_demo_ip(ip_address):
-        client = get_demo_focas_client()
-    elif not ENABLE_FOCAS or not FOCAS_IMPORT_OK:
-        raise HTTPException(status_code=501, detail="FOCAS support is disabled.")
-    try:
-        if not client.connect(ip_address, port):
-            raise HTTPException(status_code=500, detail="Failed to connect to CNC before upload")
-            
-        program_text = client.upload_program(prog_num, path_no)
-        print(f"[VSCODE_NOTIFICATION] SUCCESS: Program O{prog_num} successfully pulled from CNC ({ip_address})", flush=True)
-        return {"status": "success", "program_text": program_text}
-    except FocasError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    finally:
-        client.disconnect()
-
-@app.post("/api/focas/download/{path_no}")
-async def focas_download(path_no: int, ip_address: str, data: FocasDownloadData, port: int = 8193, client: FocasClientBase = Depends(get_focas_client)):
-    if is_demo_ip(ip_address):
-        client = get_demo_focas_client()
-    elif not ENABLE_FOCAS or not FOCAS_IMPORT_OK:
-        raise HTTPException(status_code=501, detail="FOCAS support is disabled.")
-    try:
-        if not client.connect(ip_address, port):
-            raise HTTPException(status_code=500, detail="Failed to connect to CNC before download")
-            
-        client.download_program(data.program_text, path_no)
-        print(f"[VSCODE_NOTIFICATION] SUCCESS: Program successfully sent to CNC ({ip_address})", flush=True)
-        return {"status": "success", "message": "Program successfully downloaded to CNC"}
-    except FocasError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    finally:
-        client.disconnect()
 
 

@@ -286,7 +286,7 @@ M30
             self._programs_by_path = deepcopy(self._build_seed_programs())
 
 class RealFocasClient(ProtocolClient):
-    def __init__(self, dll_path: str = "focas_dlls/FWLIB64.DLL"):
+    def __init__(self, dll_path: str = "dlls/FWLIB64.DLL"):
         self.lib = None
         self.handle = ctypes.c_ushort(0)
         
@@ -308,7 +308,7 @@ class RealFocasClient(ProtocolClient):
             self._setup_prototypes()
             logger.info(f"Successfully loaded FOCAS library: {abs_dll_path}")
         except OSError as e:
-            logger.error(f"Could not load FOCAS library {abs_dll_path}. Ensure it is inside backend/focas_dlls: {e}")
+            logger.error(f"Could not load FOCAS library {abs_dll_path}. Ensure it is inside driver path: {e}")
 
     def _setup_prototypes(self):
         """Define argument types and return types for safety."""
@@ -511,12 +511,15 @@ class RealFocasClient(ProtocolClient):
 # Dependency Injection setup
 USE_MOCK = os.environ.get("USE_MOCK_FOCAS", "0") == "1"
 
-# Initialize a global instance based on environment variable
-# You can set USE_MOCK_FOCAS=1 in your environment/docker-compose to use the mock DLLs.
-_focas_instance = DummyFocasClient() if USE_MOCK else RealFocasClient()
+# Lazily initialize the default client so request-specific driver paths can be
+# honored without import-time DLL load attempts against the bundled fallback.
+_focas_instance: Optional[ProtocolClient] = None
 
 def get_focas_client() -> ProtocolClient:
     """FastAPI Dependency for FOCAS operations"""
+    global _focas_instance
+    if _focas_instance is None:
+        _focas_instance = DummyFocasClient() if USE_MOCK else RealFocasClient()
     return _focas_instance
 
 

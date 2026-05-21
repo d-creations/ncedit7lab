@@ -40,11 +40,19 @@ export class NCTransferPanel extends HTMLElement {
     
     // Asynchronously load the default IP address from our configuration factory
     this.configService.getConfig().then(cfg => {
-      this.transferClient = TransferProtocolFactory.create(cfg.transferProtocol || 'focas', this.backend, cfg.transferDriverPath);
-      this.ipAddress = cfg.transferDefaultIp || '192.168.1.1';
+      this.applyTransferConfig(cfg);
       this.render();
       if (this.isConnectedToCnc) {
         this.attachEventListeners();
+        void this.checkPing();
+      }
+    });
+
+    this.configService.onConfigChanged((cfg) => {
+      this.applyTransferConfig(cfg);
+      this.render();
+      this.attachEventListeners();
+      if (this.isConnectedToCnc) {
         void this.checkPing();
       }
     });
@@ -62,6 +70,11 @@ export class NCTransferPanel extends HTMLElement {
     this.render();
     this.attachEventListeners();
     setTimeout(() => this.checkPing(), 100);
+  }
+
+  private applyTransferConfig(cfg: Awaited<ReturnType<IConfigService['getConfig']>>) {
+    this.transferClient = TransferProtocolFactory.create(cfg.transferProtocol || 'none', this.backend, cfg.transferDriverPath);
+    this.ipAddress = cfg.transferDefaultIp || '192.168.1.1';
   }
 
   private async handleConnect() {

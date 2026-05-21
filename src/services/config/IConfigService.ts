@@ -1,7 +1,7 @@
 export type HostMode = 'web' | 'vscode-editor' | 'vscode-panel';
 
 export type TransferPlacement = 'side-panel' | 'bottom-panel' | 'external-panel' | 'disabled';
-export type TransferProtocol = 'focas' | 'ftp' | 'smb' | 'none';
+export type TransferProtocol = 'ftp' | 'focas' | 'smb' | 'none';
 
 export interface AppConfiguration {
   transferDefaultIp: string;

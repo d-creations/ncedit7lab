@@ -44,7 +44,6 @@ app.add_middleware(
 
 CGI_PATH = os.environ.get("CGI_PATH", "/app/ncplot7py/scripts/cgiserver.cgi")
 CGI_TIMEOUT = int(os.environ.get("CGI_TIMEOUT", "30"))
-ENABLE_FOCAS = os.environ.get("ENABLE_FOCAS", "false").lower() in ("true", "1", "t", "yes")
 
 logging.basicConfig(level=logging.INFO)
 
@@ -100,7 +99,6 @@ async def config_json():
 async def get_features():
     """Endpoint for frontend to query which backend modules are available."""
     return {
-        "focas_enabled": ENABLE_FOCAS,
         "cgi_path": CGI_PATH
     }
 

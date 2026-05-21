@@ -9,7 +9,7 @@ export class VsCodeConfigService implements IConfigService {
     themeMode: 'vscode',
     hostMode: 'vscode-editor',
     transferPlacement: 'external-panel',
-    transferProtocol: 'focas',
+    transferProtocol: 'none',
     showDrawPanel: true,
     showTransferPanel: true,
   }; // Defaults

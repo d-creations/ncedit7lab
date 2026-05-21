@@ -8,7 +8,7 @@ export class WebConfigService implements IConfigService {
     themeMode: 'light',
     hostMode: 'web',
     transferPlacement: 'side-panel',
-    transferProtocol: 'focas',
+    transferProtocol: 'none',
     showDrawPanel: true,
     showTransferPanel: false,
     backendTimeout: 10000,

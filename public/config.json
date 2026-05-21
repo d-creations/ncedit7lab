@@ -7,5 +7,5 @@
   "transferDefaultIp": "DEMO",
   "showTransferPanel": false,
   "transferPlacement": "side-panel",
-  "transferProtocol": "focas"
+  "transferProtocol": "none"
 }

@@ -2,8 +2,14 @@ import { DrawBoard, Camera, MouseControl, MouseState, PropertySchemaProvider, To
 
 export class NCDrawBoardPanel extends HTMLElement {
     private canvas: HTMLCanvasElement;
+    private layoutRoot: HTMLDivElement;
+    private canvasArea: HTMLDivElement;
+    private canvasViewport: HTMLDivElement;
+    private inspectorPanel: HTMLDivElement;
+    private inspectorEmptyState: HTMLDivElement;
     private toolPanel: HTMLDivElement;
     private propertyPanel: HTMLDivElement;
+    private toolbarDiv?: HTMLDivElement;
 
     public drawBoard!: DrawBoard;
     public mouseControl!: MouseControl;
@@ -12,6 +18,49 @@ export class NCDrawBoardPanel extends HTMLElement {
 
     constructor() {
         super();
+
+        this.layoutRoot = document.createElement('div');
+        this.layoutRoot.style.display = 'flex';
+        this.layoutRoot.style.flexDirection = 'column';
+        this.layoutRoot.style.width = '100%';
+        this.layoutRoot.style.height = '100%';
+        this.layoutRoot.style.minHeight = '0';
+
+        this.canvasArea = document.createElement('div');
+        this.canvasArea.style.display = 'flex';
+        this.canvasArea.style.flex = '1';
+        this.canvasArea.style.minHeight = '0';
+        this.canvasArea.style.minWidth = '0';
+
+        this.canvasViewport = document.createElement('div');
+        this.canvasViewport.style.position = 'relative';
+        this.canvasViewport.style.flex = '1';
+        this.canvasViewport.style.minWidth = '0';
+        this.canvasViewport.style.minHeight = '0';
+        this.canvasViewport.style.background = 'var(--vscode-editor-background, #1e1e1e)';
+
+        this.inspectorPanel = document.createElement('div');
+        this.inspectorPanel.classList.add('nc-draw-inspector');
+        this.inspectorPanel.style.display = 'flex';
+        this.inspectorPanel.style.flexDirection = 'column';
+        this.inspectorPanel.style.gap = '12px';
+        this.inspectorPanel.style.width = '320px';
+        this.inspectorPanel.style.maxWidth = '40%';
+        this.inspectorPanel.style.minWidth = '280px';
+        this.inspectorPanel.style.padding = '12px';
+        this.inspectorPanel.style.borderLeft = '1px solid var(--vscode-editorGroup-border, #444)';
+        this.inspectorPanel.style.background = 'var(--vscode-sideBar-background, var(--vscode-editorWidget-background, #252526))';
+        this.inspectorPanel.style.overflowY = 'auto';
+        this.inspectorPanel.style.boxSizing = 'border-box';
+
+        this.inspectorEmptyState = document.createElement('div');
+        this.inspectorEmptyState.textContent = 'Select geometry to edit properties or activate a drawing tool to see guided inputs here.';
+        this.inspectorEmptyState.style.padding = '12px';
+        this.inspectorEmptyState.style.border = '1px dashed var(--vscode-widget-border, #454545)';
+        this.inspectorEmptyState.style.borderRadius = '8px';
+        this.inspectorEmptyState.style.color = 'var(--vscode-descriptionForeground, #9d9d9d)';
+        this.inspectorEmptyState.style.fontSize = '12px';
+        this.inspectorEmptyState.style.lineHeight = '1.5';
         
         // 1. Create Canvas
         this.canvas = document.createElement("canvas");
@@ -19,51 +68,52 @@ export class NCDrawBoardPanel extends HTMLElement {
         this.canvas.style.height = "100%";
         this.canvas.style.display = "block"; // prevents bottom scrollbar space
 
-        // Create Tool Panel (Bottom Center)
+        // Create Tool Panel (Docked Inspector)
         this.toolPanel = document.createElement('div');
         this.toolPanel.classList.add('nc-tool-panel');
-        this.toolPanel.style.position = 'absolute';
-        this.toolPanel.style.bottom = '12px';
-        this.toolPanel.style.left = '50%';
-        this.toolPanel.style.transform = 'translateX(-50%)';
+        this.toolPanel.style.display = 'none';
         this.toolPanel.style.padding = '10px 16px';
         this.toolPanel.style.background = 'var(--vscode-editorHoverWidget-background, rgba(40, 40, 40, 0.95))';
         this.toolPanel.style.color = 'var(--vscode-editorHoverWidget-foreground, white)';
         this.toolPanel.style.border = '1px solid var(--vscode-editorHoverWidget-border, #454545)';
         this.toolPanel.style.borderRadius = '8px';
-        this.toolPanel.style.minWidth = '280px';
-        this.toolPanel.style.display = 'none';
-        this.toolPanel.style.zIndex = '20';
+        this.toolPanel.style.boxSizing = 'border-box';
+        this.toolPanel.style.width = '100%';
+        this.toolPanel.style.boxShadow = '0px 2px 5px rgba(0,0,0,0.15)';
 
-        // Create Property Panel (Right Side)
+        // Create Property Panel (Docked Inspector)
         this.propertyPanel = document.createElement('div');
         this.propertyPanel.classList.add('nc-property-panel');
-        this.propertyPanel.style.position = 'absolute';
-        this.propertyPanel.style.top = '50px';
-        this.propertyPanel.style.right = '10px';
         this.propertyPanel.style.background = 'var(--vscode-editorHoverWidget-background, rgba(40, 40, 40, 0.95))';
         this.propertyPanel.style.color = 'var(--vscode-editorHoverWidget-foreground, white)';
         this.propertyPanel.style.border = '1px solid var(--vscode-editorHoverWidget-border, #454545)';
         this.propertyPanel.style.boxShadow = '2px 2px 10px rgba(0,0,0,0.2)';
         this.propertyPanel.style.padding = '12px';
-        this.propertyPanel.style.minWidth = '240px';
-        this.propertyPanel.style.maxHeight = 'calc(100% - 60px)';
+        this.propertyPanel.style.width = '100%';
+        this.propertyPanel.style.boxSizing = 'border-box';
         this.propertyPanel.style.overflowY = 'auto';
         this.propertyPanel.style.display = 'none';
-        this.propertyPanel.style.zIndex = '20';
+
+        this.canvasViewport.appendChild(this.canvas);
+        this.inspectorPanel.appendChild(this.toolPanel);
+        this.inspectorPanel.appendChild(this.propertyPanel);
+        this.inspectorPanel.appendChild(this.inspectorEmptyState);
+        this.canvasArea.appendChild(this.canvasViewport);
+        this.canvasArea.appendChild(this.inspectorPanel);
+        this.layoutRoot.appendChild(this.canvasArea);
     }
 
     connectedCallback() {
-        // Ensure relative positioning
         this.style.display = "block";
-        this.style.position = "relative";
         this.style.width = "100%";
         this.style.height = "100%";
         this.style.overflow = "hidden";
+        this.style.minHeight = '0';
 
-        this.appendChild(this.canvas);
-        this.appendChild(this.toolPanel);
-        this.appendChild(this.propertyPanel);
+        this.appendChild(this.layoutRoot);
+
+        // Connect initial toolbar state before sizing so the canvas region gets correct space.
+        this.renderToolbar();
 
         // 2. Initialize Engine
         const camera = new Camera();
@@ -81,9 +131,6 @@ export class NCDrawBoardPanel extends HTMLElement {
 
         // 4. Bind Events
         this.setupEventForwarding();
-        
-        // Connect initial toolbar state
-        this.renderToolbar();
     }
 
     private setupResizeObserver() {
@@ -103,7 +150,7 @@ export class NCDrawBoardPanel extends HTMLElement {
                 this.drawBoard.draw();
             }
         });
-        ro.observe(this);
+        ro.observe(this.canvasViewport);
     }
 
     private getPosition(e: MouseEvent) {
@@ -180,10 +227,21 @@ export class NCDrawBoardPanel extends HTMLElement {
 
         if (!snapshot.visible) {
             this.toolPanel.style.display = 'none';
+            this.updateInspectorState();
             return;
         }
 
         this.toolPanel.style.display = 'block';
+
+        const sectionLabel = document.createElement('div');
+        sectionLabel.textContent = 'Active Tool';
+        sectionLabel.style.fontSize = '11px';
+        sectionLabel.style.fontWeight = '600';
+        sectionLabel.style.letterSpacing = '0.08em';
+        sectionLabel.style.textTransform = 'uppercase';
+        sectionLabel.style.color = 'var(--vscode-descriptionForeground, #9d9d9d)';
+        sectionLabel.style.marginBottom = '6px';
+        this.toolPanel.appendChild(sectionLabel);
 
         const title = document.createElement('div');
         title.textContent = snapshot.title;
@@ -252,6 +310,8 @@ export class NCDrawBoardPanel extends HTMLElement {
             status.style.color = snapshot.status.tone === 'error' ? 'var(--vscode-errorForeground, #f14c4c)' : 'var(--vscode-notificationsInfoIcon-foreground, #3794ff)';
             this.toolPanel.appendChild(status);
         }
+
+        this.updateInspectorState();
     }
 
     private renderPropertyNode(node: any, parent: HTMLElement) {
@@ -341,10 +401,21 @@ export class NCDrawBoardPanel extends HTMLElement {
 
         if (!schema.visible) {
             this.propertyPanel.style.display = 'none';
+            this.updateInspectorState();
             return;
         }
 
         this.propertyPanel.style.display = 'block';
+
+        const sectionLabel = document.createElement('div');
+        sectionLabel.textContent = 'Selection';
+        sectionLabel.style.fontSize = '11px';
+        sectionLabel.style.fontWeight = '600';
+        sectionLabel.style.letterSpacing = '0.08em';
+        sectionLabel.style.textTransform = 'uppercase';
+        sectionLabel.style.color = 'var(--vscode-descriptionForeground, #9d9d9d)';
+        sectionLabel.style.marginBottom = '6px';
+        this.propertyPanel.appendChild(sectionLabel);
 
         const title = document.createElement('h3');
         title.textContent = schema.title;
@@ -379,6 +450,12 @@ export class NCDrawBoardPanel extends HTMLElement {
         }
 
         this.propertyPanel.appendChild(actions);
+        this.updateInspectorState();
+    }
+
+    private updateInspectorState() {
+        const hasVisiblePanel = this.toolPanel.style.display !== 'none' || this.propertyPanel.style.display !== 'none';
+        this.inspectorEmptyState.style.display = hasVisiblePanel ? 'none' : 'block';
     }
 
     public setTool(toolName: string) {
@@ -423,34 +500,34 @@ export class NCDrawBoardPanel extends HTMLElement {
     }
 
     private renderToolbar() {
-        // Toolbar Container
+        if (this.toolbarDiv) {
+            return;
+        }
+
         const toolbarDiv = document.createElement('div');
-        toolbarDiv.style.position = 'absolute';
-        toolbarDiv.style.top = '10px';
-        toolbarDiv.style.left = '10px';
-        toolbarDiv.style.right = '10px'; // Added right constraint
         toolbarDiv.style.display = 'flex';
         toolbarDiv.style.gap = '5px';
         toolbarDiv.style.flexWrap = 'nowrap';
         toolbarDiv.style.alignItems = 'center';
-        toolbarDiv.style.zIndex = '10';
+        toolbarDiv.style.flex = '0 0 auto';
         toolbarDiv.style.backgroundColor = 'var(--vscode-editor-background, rgba(30,30,30,0.85))';
-        toolbarDiv.style.padding = '4px';
-        toolbarDiv.style.borderRadius = '4px';
-        toolbarDiv.style.border = '1px solid var(--vscode-editorGroup-border, #444)';
-        toolbarDiv.style.boxShadow = '0px 2px 5px rgba(0,0,0,0.3)';
+        toolbarDiv.style.padding = '8px 10px';
+        toolbarDiv.style.borderBottom = '1px solid var(--vscode-editorGroup-border, #444)';
         toolbarDiv.style.overflowX = 'auto'; // Enable horizontal scrolling
         toolbarDiv.style.scrollbarWidth = 'none'; // Hide scrollbar (Firefox)
         (toolbarDiv.style as any)['-ms-overflow-style'] = 'none'; // Hide scrollbar (IE/Edge)
 
         // Hide scrollbar (Chrome/Safari/Webkit)
-        const style = document.createElement('style');
-        style.textContent = `
-            .nc-draw-toolbar::-webkit-scrollbar {
-                display: none;
-            }
-        `;
-        document.head.appendChild(style);
+        if (!document.getElementById('nc-draw-toolbar-style')) {
+            const style = document.createElement('style');
+            style.id = 'nc-draw-toolbar-style';
+            style.textContent = `
+                .nc-draw-toolbar::-webkit-scrollbar {
+                    display: none;
+                }
+            `;
+            document.head.appendChild(style);
+        }
         toolbarDiv.classList.add('nc-draw-toolbar');
 
         // Helper to format grouped tool dropdowns
@@ -549,7 +626,8 @@ export class NCDrawBoardPanel extends HTMLElement {
         toolbarDiv.appendChild(createBtn('Undo', 'UNDO'));
         toolbarDiv.appendChild(createBtn('Clear', 'CLEAR', true));
 
-        this.appendChild(toolbarDiv);
+        this.toolbarDiv = toolbarDiv;
+        this.layoutRoot.insertBefore(toolbarDiv, this.canvasArea);
     }
 }
 

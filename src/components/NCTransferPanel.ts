@@ -126,7 +126,7 @@ export class NCTransferPanel extends HTMLElement {
   }
 
   private getSupportedPaths(): Array<1 | 2 | 3> {
-    const configuredPaths = (window as { nccode7labSupportedTransferPaths?: unknown }).nccode7labSupportedTransferPaths;
+    const configuredPaths = (window as { ncedit7labSupportedTransferPaths?: unknown }).ncedit7labSupportedTransferPaths;
     if (Array.isArray(configuredPaths)) {
       const paths = configuredPaths.filter((path): path is 1 | 2 | 3 => path === 1 || path === 2 || path === 3);
       if (paths.length > 0) {

@@ -2,7 +2,7 @@ import { IConfigService, AppConfiguration } from './IConfigService';
 
 export class VsCodeConfigService implements IConfigService {
   private config: AppConfiguration = {
-    transferDefaultIp: '192.168.1.1',
+    transferDefaultIp: 'DEMO',
     backendPort: 8000,
     backendBaseUrl: '',
     backendTimeout: 60000,
@@ -10,8 +10,8 @@ export class VsCodeConfigService implements IConfigService {
     hostMode: 'vscode-editor',
     transferPlacement: 'external-panel',
     transferProtocol: 'none',
-    showDrawPanel: true,
-    showTransferPanel: true,
+    showDrawPanel: false,
+    showTransferPanel: false,
   }; // Defaults
   private listeners: ((cfg: AppConfiguration) => void)[] = [];
 

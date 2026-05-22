@@ -1,7 +1,7 @@
 {
-  "name": "nc-edit7",
+  "name": "ncedit7lab",
   "version": "0.1.0",
-  "description": "Multi-channel CNC NC code editor with plot interface",
+  "description": "Multi-channel CNC NC code editor with plot interface focus on Star CNC machines",
   "type": "module",
   "engines": {
     "vscode": "^1.90.0"
@@ -48,13 +48,13 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/d-creations/NC-Edit7.git"
+    "url": "git+https://github.com/d-creations/ncedit7lab.git"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "bugs": {
-    "url": "https://github.com/d-creations/NC-Edit7/issues"
+    "url": "https://github.com/d-creations/ncedit7lab/issues"
   },
-  "homepage": "https://github.com/d-creations/NC-Edit7#readme"
+  "homepage": "https://github.com/d-creations/ncedit7lab#readme"
 }

@@ -1,4 +1,4 @@
 fastapi
 uvicorn
 gunicorn
-git+https://github.com/d-creations/nccode7plot.git
+git+https://github.com/d-creations/ncedit7plot.git

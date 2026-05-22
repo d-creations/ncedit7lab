@@ -24,6 +24,8 @@ export class NCTransferPanel extends HTMLElement {
   private transferClient!: ITransferProtocol;
   private fileManager: IFileManagerService;
   private configService: IConfigService;
+  private fileInput?: HTMLInputElement;
+  private pendingUploadPath: string | null = null;
 
   
   private cncPrograms: Map<number, GroupedProgram> = new Map();
@@ -123,8 +125,20 @@ export class NCTransferPanel extends HTMLElement {
     }
   }
 
+  private getSupportedPaths(): Array<1 | 2 | 3> {
+    const configuredPaths = (window as { nccode7labSupportedTransferPaths?: unknown }).nccode7labSupportedTransferPaths;
+    if (Array.isArray(configuredPaths)) {
+      const paths = configuredPaths.filter((path): path is 1 | 2 | 3 => path === 1 || path === 2 || path === 3);
+      if (paths.length > 0) {
+        return Array.from(new Set(paths));
+      }
+    }
+
+    return [1, 2];
+  }
+
   private async fetchPrograms() {
-    const paths = [1, 2, 3];
+    const paths = this.getSupportedPaths();
     this.cncPrograms.clear();
 
     for (const path of paths) {
@@ -167,7 +181,7 @@ export class NCTransferPanel extends HTMLElement {
         // Include header information (assuming prog.comment is available)
         combinedContent += `&F=/O${progNum.toString().padStart(4, '0')}(${prog.comment || 'PA_PROG'})/\n`;
 
-        for (const p of [1, 2, 3] as const) {
+        for (const p of this.getSupportedPaths()) {
             if (prog.paths[p]) {
                 const resp = await this.transferClient.uploadProgram(this.ipAddress, p, progNum);
                 this.fileManager.updateActiveProgramContent(p.toString(), resp);
@@ -240,7 +254,7 @@ export class NCTransferPanel extends HTMLElement {
         // Include header information
         combinedContent += `&F=/O${progNum.toString().padStart(4, '0')}(${prog.comment || 'PA_PROG'})/\n`;
 
-        for (const p of [1, 2, 3] as const) {
+        for (const p of this.getSupportedPaths()) {
             if (prog.paths[p]) {
                 const resp = await this.transferClient.uploadProgram(this.ipAddress, p, progNum);
                 
@@ -295,6 +309,8 @@ export class NCTransferPanel extends HTMLElement {
 
   private render() {
     if (!this.shadowRoot) return;
+
+    const supportedPaths = this.getSupportedPaths();
 
     this.shadowRoot.innerHTML = `
       <style>
@@ -407,7 +423,7 @@ export class NCTransferPanel extends HTMLElement {
                   <span class="prog-num">O${prog.number.toString().padStart(4, '0')}</span>
                   ${prog.isPA 
                     ? '<span class="pa-badge">PA Program</span>' 
-                    : `<span class="single-badge">Path ${[1,2,3].filter(p => prog.paths[p as 1|2|3]).join(', ')}</span>`
+                    : `<span class="single-badge">Path ${supportedPaths.filter(p => prog.paths[p]).join(', ')}</span>`
                   }
                 </div>
                 <small>${prog.comment}</small>
@@ -418,7 +434,7 @@ export class NCTransferPanel extends HTMLElement {
                    <button class="btn-upl" data-path="PA" data-prog="${prog.number}">Pull PA</button>` : 
                   ''
                 }
-                ${[1,2,3].map(path => prog.paths[path as 1|2|3] ? 
+                ${supportedPaths.map(path => prog.paths[path] ? 
                   `${(window as any).vscodeApi ? `<button class="btn-cmp" data-path="${path}" data-prog="${prog.number}">Cmp P${path}</button>` : ''}
                    <button class="btn-upl" data-path="${path}" data-prog="${prog.number}">Pull P${path}</button>` : 
                   ''
@@ -434,9 +450,7 @@ export class NCTransferPanel extends HTMLElement {
           <span>Click a button to select a file from your computer:</span>
           <div class="drop-panels">
             <div class="drop-zone upload-zone" data-path="PA" style="cursor:pointer">Upload PA</div>
-            <div class="drop-zone upload-zone" data-path="1" style="cursor:pointer">Upload P1</div>
-            <div class="drop-zone upload-zone" data-path="2" style="cursor:pointer">Upload P2</div>
-            <div class="drop-zone upload-zone" data-path="3" style="cursor:pointer">Upload P3</div>
+            ${supportedPaths.map(path => `<div class="drop-zone upload-zone" data-path="${path}" style="cursor:pointer">Upload P${path}</div>`).join('')}
           </div>
         </div>
       ` : `
@@ -499,14 +513,29 @@ export class NCTransferPanel extends HTMLElement {
   private attachFilePickerListeners() {
     const zones = this.shadowRoot?.querySelectorAll('.upload-zone');
     
-    // Create a hidden file input element attached to the component
-    let fileInput = this.shadowRoot?.getElementById('hidden-file-input') as HTMLInputElement;
-    if (!fileInput) {
-      fileInput = document.createElement('input');
-      fileInput.type = 'file';
-      fileInput.id = 'hidden-file-input';
-      fileInput.style.display = 'none';
-      this.shadowRoot?.appendChild(fileInput);
+    if (!this.fileInput || !this.shadowRoot?.contains(this.fileInput)) {
+      this.fileInput = document.createElement('input');
+      this.fileInput.type = 'file';
+      this.fileInput.id = 'hidden-file-input';
+      this.fileInput.style.display = 'none';
+      this.fileInput.addEventListener('change', async (e: Event) => {
+        const target = e.target as HTMLInputElement;
+        const selectedPath = this.pendingUploadPath;
+
+        try {
+          if (target.files && target.files.length > 0 && selectedPath) {
+            const file = target.files[0];
+            const content = await file.text();
+            await this.uploadDroppedFile(content, selectedPath);
+          }
+        } catch (err) {
+          alert("Could not read file: " + err);
+        } finally {
+          target.value = '';
+          this.pendingUploadPath = null;
+        }
+      });
+      this.shadowRoot?.appendChild(this.fileInput);
     }
 
     zones?.forEach(zone => {
@@ -515,29 +544,8 @@ export class NCTransferPanel extends HTMLElement {
       zone.addEventListener('mouseleave', () => zone.classList.remove('drag-over'));
       
       zone.addEventListener('click', () => {
-        const pathId = (zone as HTMLElement).getAttribute('data-path');
-        
-        // Temporarily bind the change event to capture this specific click
-        const handleChange = async (e: Event) => {
-           fileInput.removeEventListener('change', handleChange);
-           const target = e.target as HTMLInputElement;
-           
-           if (target.files && target.files.length > 0) {
-             const file = target.files[0];
-             try {
-               const content = await file.text();
-               this.uploadDroppedFile(content, pathId);
-             } catch(err) {
-               alert("Could not read file: " + err);
-             }
-           }
-           
-           // Format reset so clicking the exact same file twice still triggers change
-           fileInput.value = '';
-        };
-        
-        fileInput.addEventListener('change', handleChange);
-        fileInput.click();
+        this.pendingUploadPath = (zone as HTMLElement).getAttribute('data-path');
+        this.fileInput?.click();
       });
     });
   }

@@ -474,7 +474,11 @@ class RealFocasClient(ProtocolClient):
         return "".join(result_text)
 
     def list_programs(self, path_no: int = 0) -> list:
-        self.set_path(path_no)
+        try:
+            self.set_path(path_no)
+        except FocasError as e:
+            logger.warning(f"Skipping list_programs because path {path_no} could not be selected: {e}")
+            return []
         
         MAX_PROG = 10
         prgdir_array = (PRGDIR3 * MAX_PROG)()

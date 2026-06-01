@@ -7,6 +7,7 @@ import { StateService } from '@services/StateService';
 import { MachineService } from '@services/MachineService';
 import { EventBus, EVENT_NAMES } from '@services/EventBus';
 import type { AppConfiguration, IConfigService } from '@services/config/IConfigService';
+import type { IFileManagerService } from '@services/IFileManagerService';
 import './NCChannelPane';
 import './NCSyncControls';
 import './NCStatusIndicator';
@@ -25,6 +26,7 @@ export class NCEditorApp extends HTMLElement {
   private stateService: StateService;
   private machineService: MachineService;
   private eventBus: EventBus;
+  private fileManager: IFileManagerService;
   private configService: IConfigService;
   private activeMobileView: string = 'channel-1';
   private config?: AppConfiguration;
@@ -37,6 +39,7 @@ export class NCEditorApp extends HTMLElement {
     this.stateService = this.registry.get(STATE_SERVICE_TOKEN);
     this.machineService = this.registry.get(MACHINE_SERVICE_TOKEN);
     this.eventBus = this.registry.get(EVENT_BUS_TOKEN);
+    this.fileManager = this.registry.get(FILE_MANAGER_SERVICE_TOKEN);
     this.configService = this.registry.get(CONFIG_SERVICE_TOKEN);
   }
 
@@ -90,6 +93,8 @@ export class NCEditorApp extends HTMLElement {
         this.stateService.setGlobalMachine(machines[0].machineName);
       }
 
+      this.normalizeInitialChannels();
+
       // No need to update selector manually, component handles it
     } catch (error) {
       console.error('Failed to initialize app:', error);
@@ -112,6 +117,16 @@ export class NCEditorApp extends HTMLElement {
     if (transferView) {
       (transferView as HTMLElement).style.display = 'none';
     }
+  }
+
+  private normalizeInitialChannels(): void {
+    if (this.fileManager.getFiles().length > 0) {
+      return;
+    }
+
+    this.stateService.activateChannel('1');
+    this.stateService.deactivateChannel('2');
+    this.stateService.deactivateChannel('3');
   }
 
   private async render(): Promise<void> {

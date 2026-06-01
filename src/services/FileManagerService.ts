@@ -1,5 +1,5 @@
 import { EventBus } from './EventBus';
-import { NCFile, NCProgram } from '../core/types';
+import { ChannelId, NCFile, NCProgram } from '../core/types';
 import { StateService } from './StateService';
 
 import { IFileManagerService } from './IFileManagerService';
@@ -129,6 +129,10 @@ export class FileManagerService implements IFileManagerService {
         }
     });
 
+        if (this.shouldSyncChannelsOnOpen(options)) {
+          this.syncChannelsForFile(parsed);
+        }
+
     this.saveToStorage();
     this.eventBus.publish('file:opened', file);
     this.eventBus.publish('file:active_changed', file);
@@ -176,6 +180,10 @@ export class FileManagerService implements IFileManagerService {
               this.setActiveProgram(channelId, program.id);
           }
       });
+
+      if (file.isMultiChannel || file.channels.length > 1) {
+        this.syncChannelsForFile(file.channels);
+      }
 
       this.eventBus.publish('file:active_changed', file);
     }
@@ -269,6 +277,25 @@ export class FileManagerService implements IFileManagerService {
     } else {
         return [result];
     }
+  }
+
+  private shouldSyncChannelsOnOpen(options: { parseMultiChannel: boolean, channel?: number }): boolean {
+    return options.parseMultiChannel || options.channel !== undefined;
+  }
+
+  private syncChannelsForFile(channels: string[]): void {
+    if (!this.stateService) return;
+
+    (['1', '2', '3'] as ChannelId[]).forEach((channelId, index) => {
+      const channelContent = channels[index];
+      const hasContent = typeof channelContent === 'string' && channelContent.trim() !== '';
+
+      if (hasContent) {
+        this.stateService?.activateChannel(channelId);
+      } else {
+        this.stateService?.deactivateChannel(channelId);
+      }
+    });
   }
 
   private generateId(): string {

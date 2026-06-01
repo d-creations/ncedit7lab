@@ -614,6 +614,10 @@ export class NCEditorApp extends HTMLElement {
       });
     });
 
+    this.eventBus.subscribe(EVENT_NAMES.STATE_CHANGED, () => {
+      this.updateChannelDisplay();
+    });
+
     // Initialize channel display on load
     this.updateChannelDisplay();
 
@@ -910,6 +914,8 @@ export class NCEditorApp extends HTMLElement {
     const channelsContainer = this.querySelector('#channels');
     if (!channelsContainer) return;
 
+    this.syncChannelToggleButtons();
+
     const activeChannels = this.stateService.getActiveChannels();
     const isMobile = window.innerWidth <= 768;
 
@@ -993,6 +999,17 @@ export class NCEditorApp extends HTMLElement {
         }
       });
     }
+  }
+
+  private syncChannelToggleButtons(): void {
+    const toggles = this.querySelectorAll('.app-channel-toggle[data-channel]');
+    toggles.forEach((toggle) => {
+      const button = toggle as HTMLButtonElement;
+      const channelId = button.dataset.channel as ChannelId;
+      const channel = this.stateService.getChannel(channelId);
+
+      button.classList.toggle('inactive', !channel?.active);
+    });
   }
 
   private showError(message: string): void {

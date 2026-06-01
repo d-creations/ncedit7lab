@@ -123,7 +123,8 @@ export class NCFileManager extends HTMLElement {
             const file = files[0];
             const text = await file.text();
             
-            const isMulti = multiCheck.checked;
+        const isPaFile = /\.pa$/i.test(file.name);
+        const isMulti = multiCheck.checked || isPaFile;
             const channel = parseInt(channelSelect.value);
             
             await this.fileManager.openFile(text, file.name, {

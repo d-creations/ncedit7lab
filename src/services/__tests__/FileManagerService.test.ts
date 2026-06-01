@@ -26,6 +26,16 @@ Object.defineProperty(globalThis, 'localStorage', {
 describe('FileManagerService', () => {
   let service: FileManagerService;
   let mockEventBus: EventBus;
+  let mockState: { activeFileId: string | null; globalMachine: undefined; activeProgramIds: Map<string, string> };
+  let mockStateService: {
+    getState: ReturnType<typeof vi.fn>;
+    setActiveFileId: ReturnType<typeof vi.fn>;
+    getActiveProgramId: ReturnType<typeof vi.fn>;
+    setActiveProgramId: ReturnType<typeof vi.fn>;
+    activateChannel: ReturnType<typeof vi.fn>;
+    deactivateChannel: ReturnType<typeof vi.fn>;
+    setGlobalMachine: ReturnType<typeof vi.fn>;
+  };
 
   beforeEach(() => {
     // Clear localStorage before creating service
@@ -34,7 +44,25 @@ describe('FileManagerService', () => {
     mockEventBus = new EventBus();
     // Mock the publish method
     mockEventBus.publish = vi.fn();
-    service = new FileManagerService(mockEventBus);
+    mockState = {
+      activeFileId: null,
+      globalMachine: undefined,
+      activeProgramIds: new Map(),
+    };
+    mockStateService = {
+      getState: vi.fn(() => mockState),
+      setActiveFileId: vi.fn((fileId: string | null) => {
+        mockState.activeFileId = fileId;
+      }),
+      getActiveProgramId: vi.fn((channelId: string) => mockState.activeProgramIds.get(channelId)),
+      setActiveProgramId: vi.fn((channelId: string, programId: string) => {
+        mockState.activeProgramIds.set(channelId, programId);
+      }),
+      activateChannel: vi.fn(),
+      deactivateChannel: vi.fn(),
+      setGlobalMachine: vi.fn(),
+    };
+    service = new FileManagerService(mockEventBus, mockStateService as any, false);
   });
 
   describe('openFile', () => {
@@ -105,6 +133,42 @@ G0 Y20`;
       expect(file.channels).toHaveLength(2);
       expect(file.channels[0]).toBe('');
       expect(file.channels[1]).toBe(content);
+    });
+
+    it('should only sync channel activation for explicit multi-channel opens', async () => {
+      await service.openFile('G0 X0', 'single.mpf', { parseMultiChannel: false });
+
+      expect(mockStateService.activateChannel).not.toHaveBeenCalled();
+      expect(mockStateService.deactivateChannel).not.toHaveBeenCalled();
+
+      await service.openFile('<CHANNEL1.MPF>\nG0 X10\n<CHANNEL2.MPF>\nG0 Y20', 'multi.mpf', { parseMultiChannel: true });
+
+      expect(mockStateService.activateChannel).toHaveBeenCalledWith('1');
+      expect(mockStateService.activateChannel).toHaveBeenCalledWith('2');
+      expect(mockStateService.deactivateChannel).toHaveBeenCalledWith('3');
+    });
+
+    it('should activate the selected target channel when opening a single channel into channel 2', async () => {
+      await service.openFile('M30', 'channel2.mpf', { parseMultiChannel: false, channel: 2 });
+
+      expect(mockStateService.activateChannel).toHaveBeenCalledWith('2');
+      expect(mockStateService.deactivateChannel).toHaveBeenCalledWith('1');
+      expect(mockStateService.deactivateChannel).toHaveBeenCalledWith('3');
+    });
+  });
+
+  describe('selectFile', () => {
+    it('should sync channels from a stored multi-channel file when selected', async () => {
+      const file = await service.openFile('<CHANNEL1.MPF>\nG0 X10\n<CHANNEL2.MPF>\nG0 Y20', 'multi.mpf', { parseMultiChannel: true });
+
+      vi.clearAllMocks();
+      mockState.activeFileId = file.id;
+
+      service.selectFile(file.id);
+
+      expect(mockStateService.activateChannel).toHaveBeenCalledWith('1');
+      expect(mockStateService.activateChannel).toHaveBeenCalledWith('2');
+      expect(mockStateService.deactivateChannel).toHaveBeenCalledWith('3');
     });
   });
 

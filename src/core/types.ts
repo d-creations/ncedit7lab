@@ -114,6 +114,7 @@ export interface FaultDetail {
 export interface ParseArtifacts {
   keywords: KeywordEntry[];
   variableSnapshot: Map<number, number>;
+  namedVariableSnapshot: Map<string, VariableValue>;
   toolRegisters: ToolRegisterEntry[];
   timingMetadata: TimingMetadata[];
 }
@@ -132,10 +133,13 @@ export interface TimingMetadata {
 export interface ExecutedProgramResult {
   executedLines: number[];
   variableSnapshot: Map<number, number>;
+  namedVariableSnapshot: Map<string, VariableValue>;
   timingData: Map<number, number>;
   plotMetadata?: PlotMetadata;
   errors?: FaultDetail[];
 }
+
+export type VariableValue = number | string | boolean;
 
 export interface PlotMetadata {
   points: PlotPoint[];

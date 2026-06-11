@@ -1,3 +1,5 @@
+import type { VariableValue } from '@core/types';
+
 export type WorkbenchTab = 'variables' | 'errors' | 'transfer';
 
 export type WorkbenchBridgeMessage =
@@ -8,6 +10,7 @@ export type WorkbenchBridgeMessage =
         channelId: string;
         result: {
           variableSnapshotEntries: Array<[number, number]>;
+          namedVariableSnapshotEntries?: Array<[string, VariableValue]>;
           errors: unknown[];
         };
       };

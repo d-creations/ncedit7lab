@@ -90,3 +90,25 @@ G3 X2.0344 Y0.4183 I0.4794 J-0.1013 W0.0088 F388.6531
     assert g112_case["point_count"] == xy_case["point_count"]
     _assert_close_tuple(g112_case["x_range"], xy_case["x_range"])
     _assert_close_tuple(g112_case["y_range"], xy_case["y_range"])
+
+
+def test_cgiserver_import_returns_siemens_named_variables_without_motion():
+    payload = {
+        "machinedata": [
+            {
+                "program": "DEF REAL CUSTOM_MC[4]\nCUSTOM_MC[3]=12.5\nANGLE_Z=ATAN2(30,40)",
+                "machineName": "SIEMENS_840D",
+                "canalNr": "1",
+                "toolValues": [],
+                "customVariables": [],
+            }
+        ]
+    }
+
+    body = asyncio.run(api.cgiserver_import(FakeRequest(payload)))
+    canal = body["canal"]["1"]
+
+    assert canal["segments"] == []
+    assert canal["variables"] == {}
+    assert abs(canal["namedVariables"]["CUSTOM_MC[3]"] - 12.5) <= 1e-6
+    assert abs(canal["namedVariables"]["ANGLE_Z"] - 36.869897) <= 1e-5

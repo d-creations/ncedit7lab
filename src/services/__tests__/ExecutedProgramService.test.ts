@@ -282,6 +282,36 @@ describe('ExecutedProgramService', () => {
       expect(result.variableSnapshot.get(100)).toBe(1.005);
     });
 
+    it('should parse Siemens named variables and arrays from the backend response', async () => {
+      const mockResponse: PlotResponse = {
+        canal: {
+          '1': {
+            segments: [],
+            executedLines: [1],
+            variables: {},
+            namedVariables: {
+              ANGLE_Z: 36.869897,
+              'CUSTOM_MC[0]': 20,
+              'CUSTOM_MC[3]': 12.5,
+            },
+            timing: [],
+          },
+        },
+      };
+
+      vi.mocked(mockBackend.requestPlot).mockResolvedValue(mockResponse);
+
+      const result = await service.executeProgram({
+        channelId: '1',
+        program: 'DEF REAL CUSTOM_MC[4]\nANGLE_Z=36.869897',
+        machineName: 'SIEMENS_840D',
+      });
+
+      expect(result.namedVariableSnapshot.get('ANGLE_Z')).toBe(36.869897);
+      expect(result.namedVariableSnapshot.get('CUSTOM_MC[0]')).toBe(20);
+      expect(result.namedVariableSnapshot.get('CUSTOM_MC[3]')).toBe(12.5);
+    });
+
     it('should map timing to segment line numbers instead of all executed lines', async () => {
       const mockResponse: PlotResponse = {
         canal: {

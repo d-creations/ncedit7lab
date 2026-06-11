@@ -1,19 +1,21 @@
 import { ServiceRegistry } from '@core/ServiceRegistry';
 import { EVENT_BUS_TOKEN, STATE_SERVICE_TOKEN } from '@core/ServiceTokens';
 import { EventBus, EVENT_NAMES } from '@services/EventBus';
-import type { ParseArtifacts, NcParseResult, CustomVariable } from '@core/types';
+import type { ParseArtifacts, NcParseResult, CustomVariable, VariableValue } from '@core/types';
 import type { StateService } from '@services/StateService';
 
 interface VariableEntry {
-  register: number;
-  value: number;
+  label: string;
+  sortLabel: string;
+  value: VariableValue;
   modified?: boolean;
-  isCustom?: boolean;
+  isNamed?: boolean;
 }
 
 export class NCVariableList extends HTMLElement {
   private eventBus: EventBus;
   private variables = new Map<number, number>();
+  private namedVariables = new Map<string, VariableValue>();
   private customVariables = new Map<string, number>();
   private channelId: string = '';
   private filterText = '';
@@ -54,6 +56,7 @@ export class NCVariableList extends HTMLElement {
       (data: { channelId: string; result: NcParseResult; artifacts: ParseArtifacts }) => {
         if (data.channelId === this.channelId) {
           this.variables = data.artifacts.variableSnapshot;
+          this.namedVariables = data.artifacts.namedVariableSnapshot || new Map();
           this.updateList();
         }
       },
@@ -69,19 +72,26 @@ export class NCVariableList extends HTMLElement {
     this.eventBus.subscribe(EVENT_NAMES.EXECUTION_COMPLETED, (data: unknown) => {
       const execData = data as {
         channelId: string;
-        result: { variableSnapshot: Map<number, number> };
+        result: { variableSnapshot: Map<number, number>; namedVariableSnapshot?: Map<string, VariableValue> };
       };
       if (execData.channelId === this.channelId && execData.result?.variableSnapshot) {
-        if (execData.result.variableSnapshot.size === 0 && this.variables.size > 0) {
+        const nextNamedVariables = execData.result.namedVariableSnapshot || new Map<string, VariableValue>();
+        if (
+          execData.result.variableSnapshot.size === 0 &&
+          nextNamedVariables.size === 0 &&
+          (this.variables.size > 0 || this.namedVariables.size > 0)
+        ) {
           return;
         }
 
         // Mark modified variables
         const oldVariables = new Map(this.variables);
+        const oldNamedVariables = new Map(this.namedVariables);
         this.variables = execData.result.variableSnapshot;
+        this.namedVariables = nextNamedVariables;
 
         // Update with modification flags
-        this.updateList(oldVariables);
+        this.updateList(oldVariables, oldNamedVariables);
       }
     });
   }
@@ -277,11 +287,18 @@ export class NCVariableList extends HTMLElement {
 
         .variable-register {
           color: var(--vscode-editor-foreground, #abb2bf);
-          min-width: 60px;
+          min-width: 92px;
+          margin-right: 8px;
+        }
+
+        .variable-register.named {
+          color: var(--vscode-textLink-foreground, #61afef);
         }
 
         .variable-value {
           color: var(--vscode-descriptionForeground, #7f848e);
+          overflow-wrap: anywhere;
+          text-align: right;
         }
 
         .empty-message {
@@ -416,25 +433,37 @@ export class NCVariableList extends HTMLElement {
     });
   }
 
-  private updateList(oldVariables?: Map<number, number>) {
+  private updateList(oldVariables?: Map<number, number>, oldNamedVariables?: Map<string, VariableValue>) {
     const list = this.shadowRoot?.getElementById('list');
     if (!list) return;
 
     list.innerHTML = '';
 
-    if (this.variables.size === 0) {
+    if (this.variables.size === 0 && this.namedVariables.size === 0) {
       list.innerHTML = '<div class="empty-message">No variables detected</div>';
       return;
     }
 
-    // Convert to sorted array
-    const entries: VariableEntry[] = Array.from(this.variables.entries())
-      .map(([register, value]) => ({
-        register,
-        value,
-        modified: oldVariables ? oldVariables.get(register) !== value : false,
-      }))
-      .sort((a, b) => a.register - b.register);
+    const prefix = this.variablePrefix || '#';
+    const numericEntries: VariableEntry[] = Array.from(this.variables.entries()).map(([register, value]) => ({
+      label: `${prefix}${register}`,
+      sortLabel: register.toString().padStart(10, '0'),
+      value,
+      modified: oldVariables ? oldVariables.get(register) !== value : false,
+    }));
+
+    const namedEntries: VariableEntry[] = Array.from(this.namedVariables.entries()).map(([name, value]) => ({
+      label: name,
+      sortLabel: name.toUpperCase(),
+      value,
+      modified: oldNamedVariables ? oldNamedVariables.get(name) !== value : false,
+      isNamed: true,
+    }));
+
+    const entries = [...numericEntries, ...namedEntries].sort((a, b) => {
+      if (a.isNamed !== b.isNamed) return a.isNamed ? 1 : -1;
+      return a.sortLabel.localeCompare(b.sortLabel, undefined, { numeric: true });
+    });
 
     // Apply filter
     let filtered = entries;
@@ -442,33 +471,36 @@ export class NCVariableList extends HTMLElement {
       filtered = this.applyFilter(entries, this.filterText);
     }
 
-    // Render items (lazy rendering for large lists)
-    const maxVisible = 100;
-    const toRender = filtered.slice(0, maxVisible);
-
-    const prefix = this.variablePrefix || '#';
-
-    toRender.forEach((entry) => {
+    filtered.forEach((entry) => {
       const item = document.createElement('div');
       item.className = 'variable-item';
       if (entry.modified) {
         item.classList.add('modified');
       }
 
-      item.innerHTML = `
-        <span class="variable-register">${prefix}${entry.register}</span>
-        <span class="variable-value">${entry.value.toFixed(4)}</span>
-      `;
+      const registerSpan = document.createElement('span');
+      registerSpan.className = `variable-register ${entry.isNamed ? 'named' : ''}`;
+      registerSpan.textContent = entry.label;
+
+      const valueSpan = document.createElement('span');
+      valueSpan.className = 'variable-value';
+      valueSpan.textContent = this.formatVariableValue(entry.value);
+
+      item.appendChild(registerSpan);
+      item.appendChild(valueSpan);
 
       list.appendChild(item);
     });
+  }
 
-    if (filtered.length > maxVisible) {
-      const moreMessage = document.createElement('div');
-      moreMessage.className = 'empty-message';
-      moreMessage.textContent = `... and ${filtered.length - maxVisible} more`;
-      list.appendChild(moreMessage);
+  private formatVariableValue(value: VariableValue): string {
+    if (typeof value === 'number') {
+      return value.toFixed(4);
     }
+    if (typeof value === 'boolean') {
+      return value ? 'TRUE' : 'FALSE';
+    }
+    return String(value);
   }
 
   private syncVariablePrefix() {
@@ -510,17 +542,27 @@ export class NCVariableList extends HTMLElement {
     if (rangeMatch) {
       const start = parseInt(rangeMatch[1]);
       const end = parseInt(rangeMatch[2]);
-      return entries.filter((e) => e.register >= start && e.register <= end);
+      return entries.filter((e) => {
+        const register = this.getNumericRegister(e.label);
+        return register !== undefined && register >= start && register <= end;
+      });
     }
 
     const exactMatch = filter.match(/^\d+$/);
     if (exactMatch) {
       const num = parseInt(filter);
-      return entries.filter((e) => e.register === num);
+      return entries.filter((e) => this.getNumericRegister(e.label) === num);
     }
 
     // Text search
-    return entries.filter((e) => e.register.toString().includes(filter));
+    const normalizedFilter = filter.toLowerCase();
+    return entries.filter((e) => e.label.toLowerCase().includes(normalizedFilter));
+  }
+
+  private getNumericRegister(label: string): number | undefined {
+    const match = label.match(/^\D*(\d+)$/);
+    if (!match) return undefined;
+    return parseInt(match[1], 10);
   }
 }
 

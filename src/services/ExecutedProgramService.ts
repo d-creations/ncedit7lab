@@ -8,6 +8,7 @@ import type {
   PlotResponse,
   ToolValue,
   CustomVariable,
+  VariableValue,
 } from '@core/types';
 import { BackendGateway } from './BackendGateway';
 import { EventBus, EVENT_NAMES } from './EventBus';
@@ -137,6 +138,7 @@ export class ExecutedProgramService {
     const result: ExecutedProgramResult = {
       executedLines: [],
       variableSnapshot: new Map(),
+      namedVariableSnapshot: new Map(),
       timingData: new Map(),
       plotMetadata: {
         points: [],
@@ -187,6 +189,7 @@ export class ExecutedProgramService {
           }>;
           executedLines?: number[];
           variables?: Record<string, number>;
+          namedVariables?: Record<string, VariableValue>;
           timing?: number[];
           errors?: Array<{
             type: string;
@@ -230,6 +233,12 @@ export class ExecutedProgramService {
             if (!isNaN(varNum)) {
               result.variableSnapshot.set(varNum, value);
             }
+          }
+        }
+
+        if (canal.namedVariables && typeof canal.namedVariables === 'object') {
+          for (const [key, value] of Object.entries(canal.namedVariables)) {
+            result.namedVariableSnapshot.set(key, value);
           }
         }
 

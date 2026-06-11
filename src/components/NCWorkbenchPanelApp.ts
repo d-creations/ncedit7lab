@@ -3,7 +3,7 @@ import './NCErrorsPanelContent';
 import './NCTransferPanel';
 import { ServiceRegistry } from '@core/ServiceRegistry';
 import { EVENT_BUS_TOKEN, STATE_SERVICE_TOKEN, PARSER_SERVICE_TOKEN, FILE_MANAGER_SERVICE_TOKEN, CONFIG_SERVICE_TOKEN } from '@core/ServiceTokens';
-import type { ChannelId, ExecutedProgramResult } from '@core/types';
+import type { ChannelId, ExecutedProgramResult, VariableValue } from '@core/types';
 import { EventBus, EVENT_NAMES, type EventSubscription } from '@services/EventBus';
 import { ParserService } from '@services/ParserService';
 import type { IFileManagerService } from '@services/IFileManagerService';
@@ -115,7 +115,7 @@ export class NCWorkbenchPanelApp extends HTMLElement {
 
     this.bridgeListener = ((event: Event) => {
       const detail = (event as CustomEvent).detail as
-        | { type: 'WORKBENCH_BRIDGE'; eventType: 'EXECUTION_COMPLETED'; payload: { channelId: string; result: { variableSnapshotEntries: Array<[number, number]>; errors: unknown[] } } }
+        | { type: 'WORKBENCH_BRIDGE'; eventType: 'EXECUTION_COMPLETED'; payload: { channelId: string; result: { variableSnapshotEntries: Array<[number, number]>; namedVariableSnapshotEntries?: Array<[string, VariableValue]>; errors: unknown[] } } }
         | { type: 'WORKBENCH_BRIDGE'; eventType: 'EXECUTION_ERROR'; payload: { channelId: string; error: { message: string } } }
         | { type: 'WORKBENCH_BRIDGE'; eventType: 'PLOT_CLEARED'; payload: Record<string, never> };
 
@@ -129,6 +129,7 @@ export class NCWorkbenchPanelApp extends HTMLElement {
         const result: ExecutedProgramResult = {
           executedLines: [],
           variableSnapshot: new Map(detail.payload.result.variableSnapshotEntries),
+          namedVariableSnapshot: new Map(detail.payload.result.namedVariableSnapshotEntries || []),
           timingData: new Map(),
           plotMetadata: { points: [], segments: [] },
           errors: detail.payload.result.errors as ExecutedProgramResult['errors'],

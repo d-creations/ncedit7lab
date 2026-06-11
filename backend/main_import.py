@@ -336,6 +336,7 @@ def build_segments_from_engine_output(canal_output: Dict[str, Any]) -> Dict[str,
     timing = []
     executed_lines = canal_output.get("programExec", [])
     variables = canal_output.get("variables", {})
+    named_variables = canal_output.get("namedVariables", {})
 
     plot_list = canal_output.get("plot", [])
 
@@ -373,6 +374,7 @@ def build_segments_from_engine_output(canal_output: Dict[str, Any]) -> Dict[str,
         "segments": segments,
         "executedLines": executed_lines,
         "variables": variables if isinstance(variables, dict) else {},
+        "namedVariables": named_variables if isinstance(named_variables, dict) else {},
         "timing": timing,
     }
 
@@ -542,8 +544,28 @@ def mock_parse_nc_program(program: str, machine_name: str) -> Dict[str, Any]:
         "segments": segments,
         "executedLines": list(range(1, len(lines) + 1)),
         "variables": {},
+        "namedVariables": {},
         "timing": [0.1] * len(lines)
     }
+
+
+def engine_output_has_non_plot_data(engine_output: Any) -> bool:
+    """Return True when the real engine produced useful non-geometry data."""
+    if not isinstance(engine_output, list):
+        return False
+
+    for canal in engine_output:
+        if not isinstance(canal, dict):
+            continue
+        if canal.get("programExec"):
+            return True
+        variables = canal.get("variables")
+        if isinstance(variables, dict) and variables:
+            return True
+        named_variables = canal.get("namedVariables")
+        if isinstance(named_variables, dict) and named_variables:
+            return True
+    return False
 
 
 def run_mock_parser(machinedata: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -741,7 +763,7 @@ async def cgiserver_import(request: Request):
             elif isinstance(canal, list):
                 total_points += len(canal)
         
-        if total_points == 0 and any(len(p.strip()) > 0 for p in programs):
+        if total_points == 0 and any(len(p.strip()) > 0 for p in programs) and not engine_output_has_non_plot_data(engine_output):
             logging.info("Real engine returned 0 points for non-empty program. Falling back to mock.")
             use_mock = True
 

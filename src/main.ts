@@ -260,6 +260,7 @@ async function bootstrap() {
 
       const serializeExecutionResult = (result: ExecutedProgramResult) => ({
         variableSnapshotEntries: Array.from(result.variableSnapshot.entries()),
+        namedVariableSnapshotEntries: Array.from(result.namedVariableSnapshot.entries()),
         errors: result.errors || [],
       });
 

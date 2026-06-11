@@ -145,6 +145,7 @@ export class ParserService {
       const artifacts: ParseArtifacts = {
         keywords,
         variableSnapshot,
+        namedVariableSnapshot: new Map(),
         toolRegisters,
         timingMetadata,
       };
@@ -171,6 +172,7 @@ export class ParserService {
         artifacts: {
           keywords: [],
           variableSnapshot: new Map(),
+          namedVariableSnapshot: new Map(),
           toolRegisters: [],
           timingMetadata: [],
         },

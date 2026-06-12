@@ -13,6 +13,9 @@ import {
   FILE_MANAGER_SERVICE_TOKEN,
   CONFIG_SERVICE_TOKEN,
   HOST_BRIDGE_SERVICE_TOKEN,
+  TEMPLATE_REPOSITORY_TOKEN,
+  TEMPLATE_CATALOG_SERVICE_TOKEN,
+  TEMPLATE_INSERTION_SERVICE_TOKEN,
 } from '@core/ServiceTokens';
 import { EventBus } from '@services/EventBus';
 import { StateService } from '@services/StateService';
@@ -27,6 +30,9 @@ import { VsCodeFileManagerService } from '@services/VsCodeFileManagerService';
 import { VsCodeConfigService } from '@services/config/VsCodeConfigService';
 import { WebConfigService } from '@services/config/WebConfigService';
 import { BrowserHostBridgeService, VsCodeHostBridgeService } from '@services/HostBridgeService';
+import { WebTemplateRepository } from '@services/templates/WebTemplateRepository';
+import { TemplateCatalogService } from '@services/templates/TemplateCatalogService';
+import { TemplateInsertionService } from '@services/templates/TemplateInsertionService';
 import type { ExecutedProgramResult } from '@core/types';
 import { EVENT_NAMES } from '@services/EventBus';
 import '@components/NCEditorApp';
@@ -168,6 +174,21 @@ async function bootstrap() {
     // Register services using the tokens directly
     registry.register(EVENT_BUS_TOKEN, () => new EventBus(), ServiceScope.Singleton);
 
+    registry.register(
+      TEMPLATE_REPOSITORY_TOKEN,
+      () => new WebTemplateRepository(initialConfig.templateSeedUrl || '/templates.json'),
+      ServiceScope.Singleton,
+    );
+
+    registry.register(
+      TEMPLATE_CATALOG_SERVICE_TOKEN,
+      () => {
+        const repository = registry.get(TEMPLATE_REPOSITORY_TOKEN);
+        return new TemplateCatalogService(repository);
+      },
+      ServiceScope.Singleton,
+    );
+
     registry.register(BACKEND_GATEWAY_TOKEN, () => new BackendGateway(), ServiceScope.Singleton);
 
     registry.register(
@@ -247,6 +268,16 @@ async function bootstrap() {
       () => {
         const eventBus = registry.get(EVENT_BUS_TOKEN);
         return new PlotService(eventBus);
+      },
+      ServiceScope.Singleton,
+    );
+
+    registry.register(
+      TEMPLATE_INSERTION_SERVICE_TOKEN,
+      () => {
+        const catalog = registry.get(TEMPLATE_CATALOG_SERVICE_TOKEN);
+        const eventBus = registry.get(EVENT_BUS_TOKEN);
+        return new TemplateInsertionService(catalog, eventBus);
       },
       ServiceScope.Singleton,
     );

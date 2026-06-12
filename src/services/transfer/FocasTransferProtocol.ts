@@ -6,7 +6,7 @@ export class FocasTransferProtocol implements ITransferProtocol {
   constructor(private backend: BackendGateway, private driverPath?: string) {}
 
   async ping(ip: string): Promise<boolean> {
-    const res = await this.backend.transferPing(ip);
+    const res = await this.backend.transferPing(ip, 'focas', this.driverPath);
     return res.available;
   }
 

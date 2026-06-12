@@ -39,6 +39,23 @@ Run unit tests with:
 npm run test
 ```
 
+## Transfer Configuration
+
+The transfer panel is configured at runtime through `public/config.json` or the VS Code host configuration.
+
+
+For USB storage transfer:
+
+```json
+{
+	"showTransferPanel": true,
+	"transferProtocol": "usb",
+	"transferDefaultIp": "E:/"
+}
+```
+
+In USB mode, `transferDefaultIp` is interpreted as a filesystem path visible to the backend process. Path 1 uses the selected root folder directly. Optional `PATH2` and `PATH3` subfolders are used when present.
+
 
 
 

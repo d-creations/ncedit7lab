@@ -22,6 +22,7 @@ RUN git clone --depth 1 https://github.com/d-creations/nccode7plot.git /opt/ncpl
 # Copy backend adapter and static assets.
 COPY backend/ ./backend/
 COPY public/favicon/ ./public/favicon/
+COPY public/templates.json ./public/templates.json
 COPY public/images/ ./public/images/
 
 # Copy built frontend from the builder stage

@@ -258,6 +258,15 @@ async def config_json():
     raise HTTPException(status_code=404, detail="config.json not found")
 
 
+@app.get("/templates.json")
+async def templates_json():
+    if STATIC_DIR is not None:
+        templates_file = STATIC_DIR / "templates.json"
+        if templates_file.exists():
+            return FileResponse(str(templates_file), media_type="application/json")
+    raise HTTPException(status_code=404, detail="templates.json not found")
+
+
 @app.get("/favicon.svg")
 async def favicon_svg():
     return RedirectResponse(url="/favicon/favicon.svg", status_code=307)
@@ -855,6 +864,7 @@ async def get_features():
     """Endpoint for frontend to query which backend modules are available."""
     return {
         "transfer_enabled": ENABLE_TRANSFER and TRANSFER_IMPORT_OK,
+        "transfer_protocols": ["focas", "usb"] if ENABLE_TRANSFER and TRANSFER_IMPORT_OK else [],
         "cgi_path": ""  # Only relevant for main.py subprocess
     }
 

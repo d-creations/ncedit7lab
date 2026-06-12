@@ -8,6 +8,9 @@ import { DiagnosticsService } from '../services/DiagnosticsService';
 import { ExecutedProgramService } from '../services/ExecutedProgramService';
 import { PlotService } from '../services/PlotService';
 import { IHostBridgeService } from '../services/HostBridgeService';
+import type { ITemplateRepository } from '../services/templates/ITemplateRepository';
+import { TemplateCatalogService } from '../services/templates/TemplateCatalogService';
+import { TemplateInsertionService } from '../services/templates/TemplateInsertionService';
 
 import { IFileManagerService } from '../services/IFileManagerService';
 import { IConfigService } from '../services/config/IConfigService';
@@ -25,3 +28,6 @@ export const EXECUTED_PROGRAM_SERVICE_TOKEN =
   createServiceToken<ExecutedProgramService>('ExecutedProgramService');
 export const PLOT_SERVICE_TOKEN = createServiceToken<PlotService>('PlotService');
 export const HOST_BRIDGE_SERVICE_TOKEN = createServiceToken<IHostBridgeService>('HostBridgeService');
+export const TEMPLATE_REPOSITORY_TOKEN = createServiceToken<ITemplateRepository>('TemplateRepository');
+export const TEMPLATE_CATALOG_SERVICE_TOKEN = createServiceToken<TemplateCatalogService>('TemplateCatalogService');
+export const TEMPLATE_INSERTION_SERVICE_TOKEN = createServiceToken<TemplateInsertionService>('TemplateInsertionService');

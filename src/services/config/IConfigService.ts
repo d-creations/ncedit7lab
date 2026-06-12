@@ -1,7 +1,9 @@
 export type HostMode = 'web' | 'vscode-editor' | 'vscode-panel';
 
 export type TransferPlacement = 'side-panel' | 'bottom-panel' | 'external-panel' | 'disabled';
-export type TransferProtocol = 'ftp' | 'focas' | 'smb' | 'none';
+export type TransferProtocol = 'ftp' | 'focas' | 'smb' | 'usb' | 'none';
+export type TemplatesPlacement = 'auto' | 'web-tab' | 'workbench-right' | 'workbench-left' | 'disabled';
+export type TemplateStorageMode = 'local' | 'workspace' | 'host';
 
 export interface AppConfiguration {
   transferDefaultIp: string;
@@ -15,6 +17,11 @@ export interface AppConfiguration {
   transferDriverPath?: string;
   showDrawPanel: boolean;
   showTransferPanel: boolean;
+  showTemplatesPanel: boolean;
+  templatesPlacement: TemplatesPlacement;
+  seedDefaultTemplates: boolean;
+  templateStorageMode?: TemplateStorageMode;
+  templateSeedUrl?: string;
 }
 
 export interface IConfigService {

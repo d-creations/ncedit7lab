@@ -11,7 +11,12 @@ export class VsCodeConfigService implements IConfigService {
     transferPlacement: 'external-panel',
     transferProtocol: 'none',
     showDrawPanel: false,
-    showTransferPanel: false,
+    showTransferPanel: true,
+    showTemplatesPanel: true,
+    templatesPlacement: 'workbench-right',
+    seedDefaultTemplates: true,
+    templateStorageMode: 'local',
+    templateSeedUrl: '/templates.json',
   }; // Defaults
   private listeners: ((cfg: AppConfiguration) => void)[] = [];
 

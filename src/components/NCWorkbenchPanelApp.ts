@@ -1,6 +1,7 @@
 import './NCVariablesPanelContent';
 import './NCErrorsPanelContent';
 import './NCTransferPanel';
+import './NCTemplatesPanel';
 import { ServiceRegistry } from '@core/ServiceRegistry';
 import { EVENT_BUS_TOKEN, STATE_SERVICE_TOKEN, PARSER_SERVICE_TOKEN, FILE_MANAGER_SERVICE_TOKEN, CONFIG_SERVICE_TOKEN } from '@core/ServiceTokens';
 import type { ChannelId, ExecutedProgramResult, VariableValue } from '@core/types';
@@ -19,6 +20,7 @@ export class NCWorkbenchPanelApp extends HTMLElement {
   private configService: IConfigService;
   private activeTab: WorkbenchTab = 'variables';
   private showTransferPanel = true;
+  private showTemplatesPanel = true;
   private subscriptions: EventSubscription[] = [];
   private fileSyncListener?: EventListener;
   private bridgeListener?: EventListener;
@@ -38,7 +40,11 @@ export class NCWorkbenchPanelApp extends HTMLElement {
   async connectedCallback(): Promise<void> {
     const config = await this.configService.getConfig();
     this.showTransferPanel = config.showTransferPanel;
+    this.showTemplatesPanel = config.showTemplatesPanel && config.templatesPlacement !== 'disabled';
     if (!this.showTransferPanel && this.activeTab === 'transfer') {
+      this.activeTab = 'variables';
+    }
+    if (!this.showTemplatesPanel && this.activeTab === 'templates') {
       this.activeTab = 'variables';
     }
 
@@ -347,7 +353,8 @@ export class NCWorkbenchPanelApp extends HTMLElement {
 
         nc-variables-panel-content,
         nc-errors-panel-content,
-        nc-transfer-panel {
+        nc-transfer-panel,
+        nc-templates-panel {
           display: block;
           flex: 1;
           min-height: 0;
@@ -362,6 +369,7 @@ export class NCWorkbenchPanelApp extends HTMLElement {
           <div class="tabs">
             <button class="tab-button ${this.activeTab === 'variables' ? 'active' : ''}" data-tab="variables">Variables</button>
             <button class="tab-button ${this.activeTab === 'errors' ? 'active' : ''}" data-tab="errors">Errors</button>
+            ${this.showTemplatesPanel ? `<button class="tab-button ${this.activeTab === 'templates' ? 'active' : ''}" data-tab="templates">Templates</button>` : ''}
             ${this.showTransferPanel ? `<button class="tab-button ${this.activeTab === 'transfer' ? 'active' : ''}" data-tab="transfer">Transfer</button>` : ''}
           </div>
           <div class="channel-switcher">
@@ -379,6 +387,7 @@ export class NCWorkbenchPanelApp extends HTMLElement {
         <div class="tab-panel ${this.activeTab === 'errors' ? 'active' : ''}" data-tab-panel="errors">
           <nc-errors-panel-content channel-id="${selectedChannel}"></nc-errors-panel-content>
         </div>
+        ${this.showTemplatesPanel ? `<div class="tab-panel ${this.activeTab === 'templates' ? 'active' : ''}" data-tab-panel="templates"><nc-templates-panel></nc-templates-panel></div>` : ''}
         ${this.showTransferPanel ? `<div class="tab-panel ${this.activeTab === 'transfer' ? 'active' : ''}" data-tab-panel="transfer"><nc-transfer-panel></nc-transfer-panel></div>` : ''}
       </div>
     `;

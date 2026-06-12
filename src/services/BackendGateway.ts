@@ -67,9 +67,10 @@ export class BackendGateway {
     return q.toString();
   }
 
-  async transferPing(ip: string): Promise<import('@core/types').TransferPingResponse> {
+  async transferPing(ip: string, protocol?: string, driverPath?: string): Promise<import('@core/types').TransferPingResponse> {
     const url = await this.getTransferUrl('ping');
-    const response = await fetch(`${url}?ip_address=${ip}`);
+    const qs = this.buildQuery({ ip_address: ip, protocol, driver_path: driverPath });
+    const response = await fetch(`${url}?${qs}`);
     if (!response.ok) throw new Error(await response.text());
     return response.json();
   }

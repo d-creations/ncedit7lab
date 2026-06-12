@@ -11,6 +11,11 @@ export class WebConfigService implements IConfigService {
     transferProtocol: 'none',
     showDrawPanel: true,
     showTransferPanel: false,
+    showTemplatesPanel: true,
+    templatesPlacement: 'web-tab',
+    seedDefaultTemplates: true,
+    templateStorageMode: 'local',
+    templateSeedUrl: '/templates.json',
     backendTimeout: 10000,
   }; // Defaults
   private listeners: ((cfg: AppConfiguration) => void)[] = [];

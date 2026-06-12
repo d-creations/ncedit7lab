@@ -1,6 +1,6 @@
 import type { VariableValue } from '@core/types';
 
-export type WorkbenchTab = 'variables' | 'errors' | 'transfer';
+export type WorkbenchTab = 'variables' | 'errors' | 'transfer' | 'templates';
 
 export type WorkbenchBridgeMessage =
   | {

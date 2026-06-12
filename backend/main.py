@@ -95,6 +95,14 @@ async def config_json():
             return FileResponse(config_file, media_type="application/json")
     raise HTTPException(status_code=404, detail="config.json not found")
 
+@app.get("/templates.json")
+async def templates_json():
+    if STATIC_DIR is not None:
+        templates_file = STATIC_DIR / "templates.json"
+        if templates_file.exists():
+            return FileResponse(templates_file, media_type="application/json")
+    raise HTTPException(status_code=404, detail="templates.json not found")
+
 @app.get("/api/features")
 async def get_features():
     """Endpoint for frontend to query which backend modules are available."""

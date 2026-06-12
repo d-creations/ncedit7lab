@@ -9,7 +9,9 @@ This folder contains the FastAPI backend used by NC-Edit7. It serves the built f
 - `GET /api/features` reports which backend features are enabled.
 - `GET /api/machines` returns the machine list used by the frontend machine selector.
 - `GET /api/syntax/{control_type}` returns ACE syntax rules for the requested control type.
-- `GET /api/transfer/ping`, `POST /api/transfer/connect`, and `GET /api/transfer/programs/{path_no}` expose the Transfer integration.
+- `GET /api/transfer/ping`, `POST /api/transfer/connect`, `GET /api/transfer/programs/{path_no}`, `GET /api/transfer/upload/{path_no}/{prog_num}`, and `POST /api/transfer/download/{path_no}` expose the Transfer integration.
+
+The transfer backend supports both `focas` and `usb` protocols. In `usb` mode, the `ip_address` field is treated as a filesystem path that the backend can access locally.
 
 ## Run locally
 

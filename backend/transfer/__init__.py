@@ -1,5 +1,6 @@
 from .interface import ProtocolClient, TransferError
 from .focas import get_focas_client, get_demo_focas_client, is_demo_ip, RealFocasClient
+from .usb import UsbTransferClient
 
 def get_transfer_client(protocol: str, dll_path: str = None) -> ProtocolClient:
     """Factory to get the appropriate transfer client based on protocol."""
@@ -16,5 +17,8 @@ def get_transfer_client(protocol: str, dll_path: str = None) -> ProtocolClient:
             return RealFocasClient(dll_path=dll_path)
             
         return get_focas_client()
+
+    if protocol.lower() == "usb":
+        return UsbTransferClient()
     
     raise ValueError(f"Unsupported transfer protocol: {protocol}")

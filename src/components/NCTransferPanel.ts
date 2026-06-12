@@ -26,6 +26,7 @@ export class NCTransferPanel extends HTMLElement {
   private configService: IConfigService;
   private fileInput?: HTMLInputElement;
   private pendingUploadPath: string | null = null;
+  private transferProtocol = 'none';
 
   
   private cncPrograms: Map<number, GroupedProgram> = new Map();
@@ -76,7 +77,8 @@ export class NCTransferPanel extends HTMLElement {
 
   private applyTransferConfig(cfg: Awaited<ReturnType<IConfigService['getConfig']>>) {
     this.transferClient = TransferProtocolFactory.create(cfg.transferProtocol || 'none', this.backend, cfg.transferDriverPath);
-    this.ipAddress = cfg.transferDefaultIp || '192.168.1.1';
+    this.transferProtocol = cfg.transferProtocol || 'none';
+    this.ipAddress = cfg.transferDefaultIp || (this.transferProtocol === 'usb' ? '' : '192.168.1.1');
   }
 
   private async handleConnect() {
@@ -132,6 +134,10 @@ export class NCTransferPanel extends HTMLElement {
       if (paths.length > 0) {
         return Array.from(new Set(paths));
       }
+    }
+
+    if (this.transferProtocol === 'usb') {
+      return [1, 2, 3];
     }
 
     return [1, 2];
@@ -311,6 +317,17 @@ export class NCTransferPanel extends HTMLElement {
     if (!this.shadowRoot) return;
 
     const supportedPaths = this.getSupportedPaths();
+    const isUsbTransfer = this.transferProtocol === 'usb';
+    const locationLabel = isUsbTransfer ? 'USB Storage' : 'CNC Memory';
+    const addressPlaceholder = isUsbTransfer ? 'USB root path' : 'CNC IP';
+    const connectButtonLabel = this.loading ? 'Connecting...' : (this.isConnectedToCnc ? 'Reconnect' : (isUsbTransfer ? 'Open' : 'Connect'));
+    const emptyStateText = isUsbTransfer
+      ? 'Open a USB root path to browse and transfer programs.'
+      : 'Please connect to a machine to browse and transfer programs.';
+    const pushHeading = isUsbTransfer ? 'Store Local File to USB' : 'Push Local File to CNC';
+    const pushHelpText = isUsbTransfer
+      ? 'Click a button to select a file and store it to the USB path:'
+      : 'Click a button to select a file from your computer:';
 
     this.shadowRoot.innerHTML = `
       <style>
@@ -409,13 +426,13 @@ export class NCTransferPanel extends HTMLElement {
       <div class="header">
         <strong>Transfer</strong>
         <span id="ping-indicator" title="Ping Status" style="display:inline-block; width:10px; height:10px; border-radius:50%; background:gray; margin-left:8px; cursor:help;"></span>
-        <input type="text" id="ip-address" value="${this.ipAddress}" placeholder="CNC IP" />
-        <button id="connect-btn">${this.loading ? 'Connecting...' : (this.isConnectedToCnc ? 'Reconnect' : 'Connect')}</button>
+        <input type="text" id="ip-address" value="${this.ipAddress}" placeholder="${addressPlaceholder}" />
+        <button id="connect-btn">${connectButtonLabel}</button>
       </div>
 
       ${this.isConnectedToCnc ? `
         <div class="list">
-          <h3>CNC Memory</h3>
+          <h3>${locationLabel}</h3>
           ${Array.from(this.cncPrograms.values()).sort((a,b)=>a.number-b.number).map(prog => `
             <div class="prog-item" draggable="true" data-drag-prog="${prog.number}" data-drag-pa="${prog.isPA ? 'true' : 'false'}">
               <div class="prog-info">
@@ -446,16 +463,16 @@ export class NCTransferPanel extends HTMLElement {
         </div>
 
         <div class="download-panel">
-          <h3>Push Local File to CNC</h3>
-          <span>Click a button to select a file from your computer:</span>
+          <h3>${pushHeading}</h3>
+          <span>${pushHelpText}</span>
           <div class="drop-panels">
-            <div class="drop-zone upload-zone" data-path="PA" style="cursor:pointer">Upload PA</div>
+            ${isUsbTransfer ? '' : '<div class="drop-zone upload-zone" data-path="PA" style="cursor:pointer">Upload PA</div>'}
             ${supportedPaths.map(path => `<div class="drop-zone upload-zone" data-path="${path}" style="cursor:pointer">Upload P${path}</div>`).join('')}
           </div>
         </div>
       ` : `
         <div class="list">
-          <p>Please connect to a machine to browse and transfer programs.</p>
+          <p>${emptyStateText}</p>
         </div>
       `}
     `;

@@ -6,6 +6,11 @@
   "showDrawPanel": false,
   "transferDefaultIp": "DEMO",
   "showTransferPanel": false,
+  "showTemplatesPanel": true,
+  "templatesPlacement": "web-tab",
+  "seedDefaultTemplates": true,
+  "templateStorageMode": "local",
+  "templateSeedUrl": "/templates.json",
   "transferPlacement": "side-panel",
   "transferProtocol": "none"
 }

@@ -29,7 +29,14 @@ def get_client(protocol: str, driver_path: Optional[str] = None) -> ProtocolClie
         raise HTTPException(status_code=501, detail=f"Transfer protocol error: {e}")
 
 @router.get("/ping")
-async def transfer_ping(ip_address: str):
+async def transfer_ping(ip_address: str, protocol: Optional[str] = None, driver_path: Optional[str] = None):
+    if (protocol or "").lower() == "usb":
+        client = get_client("usb", driver_path)
+        try:
+            return {"status": "success", "available": client.connect(ip_address)}
+        finally:
+            client.disconnect()
+
     is_windows = platform.system().lower() == "windows"
     param_count = "-n" if is_windows else "-c"
     param_wait = "-w" if is_windows else "-W"

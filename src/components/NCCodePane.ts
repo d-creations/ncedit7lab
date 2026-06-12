@@ -5,6 +5,7 @@ import { StateService } from '@services/StateService';
 import { IFileManagerService } from '@services/IFileManagerService';
 import { EventBus, EVENT_NAMES, EventSubscription } from '@services/EventBus';
 import type { ChannelId, ExecutedProgramResult, FaultDetail, NCProgram } from '@core/types';
+import type { TemplateInsertEventPayload } from '@services/templates/TemplateInsertionService';
 // @ts-expect-error - ACE module doesn't export types correctly
 import ace from 'ace-builds/src-noconflict/ace';
 import 'ace-builds/src-noconflict/mode-text';
@@ -29,6 +30,7 @@ export class NCCodePane extends HTMLElement {
   private executionSubscription?: EventSubscription;
   private plotClearedSubscription?: EventSubscription;
   private machineChangedSubscription?: EventSubscription;
+  private templateInsertSubscription?: EventSubscription;
   private themeObserver?: MutationObserver;
   private messageListener?: (event: MessageEvent) => void;
 
@@ -105,6 +107,13 @@ export class NCCodePane extends HTMLElement {
       this.updateSyntaxHighlighting();
     });
 
+    this.templateInsertSubscription = this.eventBus.subscribe(
+      EVENT_NAMES.TEMPLATE_INSERT_REQUEST,
+      (data: unknown) => {
+        this.applyTemplateInsert(data as TemplateInsertEventPayload);
+      },
+    );
+
     this.eventBus.subscribe('program:active_changed', (data: { channelId: string, program: NCProgram | null }) => {
       if (data.channelId === this.channelId) {
         if (data.program) {
@@ -165,6 +174,9 @@ export class NCCodePane extends HTMLElement {
     }
     if (this.machineChangedSubscription) {
       this.machineChangedSubscription.unsubscribe();
+    }
+    if (this.templateInsertSubscription) {
+      this.templateInsertSubscription.unsubscribe();
     }
     if (this.resizeObserver) {
       this.resizeObserver.disconnect();
@@ -507,6 +519,48 @@ export class NCCodePane extends HTMLElement {
 
   getValue(): string {
     return this.editor?.getValue() || '';
+  }
+
+  private applyTemplateInsert(payload: TemplateInsertEventPayload): void {
+    if (!this.editor || payload.channelId !== this.channelId) return;
+
+    if (payload.mode === 'newProgram') {
+      this.fileManager.newProgram(this.channelId, 'Template Program');
+      this.setValue(payload.content);
+      this.syncEditorValue(payload.content);
+      return;
+    }
+
+    if (payload.mode === 'replaceDocument') {
+      this.setValue(payload.content);
+      this.syncEditorValue(payload.content);
+      return;
+    }
+
+    if (payload.mode === 'appendToDocument') {
+      const current = this.editor.getValue();
+      const separator = current.trim().length > 0 && !current.endsWith('\n') ? '\n' : '';
+      const nextValue = `${current}${separator}${payload.content}`;
+      this.setValue(nextValue);
+      this.syncEditorValue(nextValue);
+      return;
+    }
+
+    this.editor.insert(payload.content);
+    this.syncEditorValue(this.editor.getValue());
+  }
+
+  private syncEditorValue(value: string): void {
+    this.fileManager.updateActiveProgramContent(this.channelId, value);
+    this.stateService.updateChannel(this.channelId, { program: value });
+    this.dispatchEvent(
+      new CustomEvent('code-change', {
+        detail: { channelId: this.channelId, code: value },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+    this.triggerParse();
   }
 
   scrollToLine(lineNumber: number): void {

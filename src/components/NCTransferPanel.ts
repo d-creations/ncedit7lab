@@ -65,6 +65,13 @@ export class NCTransferPanel extends HTMLElement {
         const message = event.data;
         if (message.type === 'DO_TRANSFER_UPLOAD') {
             this.uploadDroppedFile(message.content, message.pathId);
+        } else if (message.type === 'USB_DIRECTORY_SELECTED') {
+            const ipInput = this.shadowRoot?.getElementById('ip-address') as HTMLInputElement;
+            if (ipInput) {
+                ipInput.value = message.path;
+                this.ipAddress = message.path;
+            }
+            this.handleConnect();
         }
     });
   }
@@ -78,7 +85,7 @@ export class NCTransferPanel extends HTMLElement {
   private applyTransferConfig(cfg: Awaited<ReturnType<IConfigService['getConfig']>>) {
     this.transferClient = TransferProtocolFactory.create(cfg.transferProtocol || 'none', this.backend, cfg.transferDriverPath);
     this.transferProtocol = cfg.transferProtocol || 'none';
-    this.ipAddress = cfg.transferDefaultIp || (this.transferProtocol === 'usb' ? '' : '192.168.1.1');
+    this.ipAddress = cfg.transferDefaultIp || (String(this.transferProtocol).toLowerCase() === 'usb' ? '' : '192.168.1.1');
   }
 
   private async handleConnect() {
@@ -102,6 +109,7 @@ export class NCTransferPanel extends HTMLElement {
   }
 
   private async checkPing() {
+    if (String(this.transferProtocol).toLowerCase() === 'usb') return;
     const ipInput = this.shadowRoot?.querySelector('#ip-address') as HTMLInputElement;
     if (!ipInput || !ipInput.value) return;
     
@@ -317,12 +325,12 @@ export class NCTransferPanel extends HTMLElement {
     if (!this.shadowRoot) return;
 
     const supportedPaths = this.getSupportedPaths();
-    const isUsbTransfer = this.transferProtocol === 'usb';
+    const isUsbTransfer = String(this.transferProtocol).toLowerCase() === 'usb';
     const locationLabel = isUsbTransfer ? 'USB Storage' : 'CNC Memory';
-    const addressPlaceholder = isUsbTransfer ? 'USB root path' : 'CNC IP';
-    const connectButtonLabel = this.loading ? 'Connecting...' : (this.isConnectedToCnc ? 'Reconnect' : (isUsbTransfer ? 'Open' : 'Connect'));
+    const addressPlaceholder = isUsbTransfer ? 'Local folder path (e.g. D:\\)' : 'CNC IP';
+    const connectButtonLabel = this.loading ? '...' : (this.isConnectedToCnc ? (isUsbTransfer ? 'Reload' : 'Reconnect') : (isUsbTransfer ? 'Open' : 'Connect'));
     const emptyStateText = isUsbTransfer
-      ? 'Open a USB root path to browse and transfer programs.'
+      ? 'Enter a local folder path (like a USB drive) and click Open.'
       : 'Please connect to a machine to browse and transfer programs.';
     const pushHeading = isUsbTransfer ? 'Store Local File to USB' : 'Push Local File to CNC';
     const pushHelpText = isUsbTransfer
@@ -425,8 +433,9 @@ export class NCTransferPanel extends HTMLElement {
       
       <div class="header">
         <strong>Transfer</strong>
-        <span id="ping-indicator" title="Ping Status" style="display:inline-block; width:10px; height:10px; border-radius:50%; background:gray; margin-left:8px; cursor:help;"></span>
-        <input type="text" id="ip-address" value="${this.ipAddress}" placeholder="${addressPlaceholder}" />
+        ${isUsbTransfer ? '' : '<span id="ping-indicator" title="Ping Status" style="display:inline-block; width:10px; height:10px; border-radius:50%; background:gray; margin-left:8px; cursor:help;"></span>'}
+        <input type="text" id="ip-address" value="${this.ipAddress}" placeholder="${addressPlaceholder}" style="${isUsbTransfer ? 'flex: 1;' : ''}" title="${isUsbTransfer ? 'Enter full local path e.g. D:\\' : 'IP Address'}" />
+        ${isUsbTransfer && (window as any).vscodeApi ? '<button id="browse-btn" title="Browse for folder">Browse</button>' : ''}
         <button id="connect-btn">${connectButtonLabel}</button>
       </div>
 
@@ -481,8 +490,14 @@ export class NCTransferPanel extends HTMLElement {
   private attachEventListeners() {
     this.shadowRoot?.getElementById('connect-btn')?.addEventListener('click', () => this.handleConnect());
     
+    this.shadowRoot?.getElementById('browse-btn')?.addEventListener('click', () => {
+      if ((window as any).vscodeApi) {
+        (window as any).vscodeApi.postMessage({ type: 'SELECT_USB_DIRECTORY' });
+      }
+    });
+    
     const ipInput = this.shadowRoot?.getElementById('ip-address') as HTMLInputElement;
-    if (ipInput) {
+    if (ipInput && String(this.transferProtocol).toLowerCase() !== 'usb') {
       ipInput.addEventListener('change', () => this.checkPing());
       ipInput.addEventListener('blur', () => this.checkPing());
     }

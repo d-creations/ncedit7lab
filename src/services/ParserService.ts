@@ -61,7 +61,8 @@ export class ParserService {
 
       try {
         keywordPattern = new RegExp(keywordPatternStr, 'gi');
-      } catch {
+      } catch (e) {
+        console.error("Failed to compile keyword pattern", keywordPatternStr, e);
         keywordPattern = /\b(M30|M0)\b/gi;
       }
 

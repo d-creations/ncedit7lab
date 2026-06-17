@@ -37,6 +37,7 @@ import type { ExecutedProgramResult } from '@core/types';
 import { EVENT_NAMES } from '@services/EventBus';
 import '@components/NCEditorApp';
 import '@components/NCWorkbenchPanelApp';
+import '@components/NCTemplatesPanel';
 
 function applyThemeMode(themeMode: 'vscode' | 'one-dark' | 'light', isVSCode: boolean) {
   const body = document.body;
@@ -331,7 +332,13 @@ async function bootstrap() {
     }
 
     // Initialize the app
-    if (initialConfig.hostMode === 'vscode-panel') {
+    if (initialConfig.hostMode === 'vscode-templates') {
+      const appElement = document.createElement('nc-templates-panel');
+      const appContainer = document.getElementById('app-root') || document.getElementById('app');
+      if (!appContainer) throw new Error('App container not found');
+      appContainer.innerHTML = '';
+      appContainer.appendChild(appElement);
+    } else if (initialConfig.hostMode === 'vscode-panel') {
       const appElement = document.createElement('nc-workbench-panel-app');
       const appContainer = document.getElementById('app-root') || document.getElementById('app');
       if (!appContainer) throw new Error('App container not found');

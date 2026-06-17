@@ -122,7 +122,7 @@ export class MachineService {
         range: { min: 0, max: 9999 },
       },
       keywords: {
-        pattern: '(?:CYCLE|POCKET|HOLES|SLOT)\\d+|MCALL|WORKPIECE|REPEAT|MSG|([A-Z])(\\s*[+-]?\\d+(?:\\.\\d+)?)',
+        pattern: '(?:CYCLE|POCKET|HOLES|SLOT)\\d+|WORKPIECE|([A-Z])(\\s*[+-]?\\d+(?:\\.\\d+)?)',
         description: 'Siemens Keywords and G-codes',
         codes: {
           g_codes: ['G0', 'G1', 'G2', 'G3'],

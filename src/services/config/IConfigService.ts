@@ -1,4 +1,4 @@
-export type HostMode = 'web' | 'vscode-editor' | 'vscode-panel';
+export type HostMode = 'web' | 'vscode-editor' | 'vscode-panel' | 'vscode-templates';
 
 export type TransferPlacement = 'side-panel' | 'bottom-panel' | 'external-panel' | 'disabled';
 export type TransferProtocol = 'ftp' | 'focas' | 'smb' | 'usb' | 'none';

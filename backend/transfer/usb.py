@@ -21,10 +21,13 @@ class UsbTransferClient(ProtocolClient):
         self.root_path: Optional[Path] = None
 
     def connect(self, ip: str, port: Optional[int] = None, timeout: int = 10, **kwargs) -> bool:
+        if not ip or ip.strip() == "" or ip == "DEMO":
+             raise TransferError(USB_ERROR, "Please enter or select a valid local folder path.", "invalid path")
+             
         root_path = Path(ip).expanduser()
         if not root_path.exists() or not root_path.is_dir():
             self.root_path = None
-            return False
+            raise TransferError(USB_ERROR, f"USB Path '{ip}' does not exist or is not a directory.", "invalid path")
         self.root_path = root_path
         return True
 

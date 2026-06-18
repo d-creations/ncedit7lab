@@ -429,12 +429,18 @@ export class NCTransferPanel extends HTMLElement {
           background: var(--vscode-list-hoverBackground, #2a2d2e);
           color: var(--vscode-focusBorder, #007fd4);
         }
+        .push-active-bar {
+          display: flex;
+          gap: 10px;
+          margin-top: 10px;
+          margin-bottom: 5px;
+        }
       </style>
       
       <div class="header">
         <strong>Transfer</strong>
         ${isUsbTransfer ? '' : '<span id="ping-indicator" title="Ping Status" style="display:inline-block; width:10px; height:10px; border-radius:50%; background:gray; margin-left:8px; cursor:help;"></span>'}
-        <input type="text" id="ip-address" value="${this.ipAddress}" placeholder="${addressPlaceholder}" style="${isUsbTransfer ? 'flex: 1;' : ''}" title="${isUsbTransfer ? 'Enter full local path e.g. D:\\' : 'IP Address'}" />
+        <input type="text" id="ip-address" value="${this.ipAddress === 'DEMO' && isUsbTransfer ? '' : this.ipAddress}" placeholder="${addressPlaceholder}" style="${isUsbTransfer ? 'flex: 1;' : ''}" title="${isUsbTransfer ? 'Enter full local path e.g. D:\\' : 'IP Address'}" />
         ${isUsbTransfer && (window as any).vscodeApi ? '<button id="browse-btn" title="Browse for folder">Browse</button>' : ''}
         <button id="connect-btn">${connectButtonLabel}</button>
       </div>
@@ -473,6 +479,11 @@ export class NCTransferPanel extends HTMLElement {
 
         <div class="download-panel">
           <h3>${pushHeading}</h3>
+          <div class="push-active-bar">
+             <span style="align-self: center; font-size: 0.9em; flex: 1;"><strong>Push Open File:</strong></span>
+             ${isUsbTransfer ? '' : '<button class="btn-push-active" data-path="PA">PA</button>'}
+             ${supportedPaths.map(path => `<button class="btn-push-active" data-path="${path}">P${path}</button>`).join('')}
+          </div>
           <span>${pushHelpText}</span>
           <div class="drop-panels">
             ${isUsbTransfer ? '' : '<div class="drop-zone upload-zone" data-path="PA" style="cursor:pointer">Upload PA</div>'}
@@ -535,6 +546,20 @@ export class NCTransferPanel extends HTMLElement {
             dragEvent.dataTransfer.setData('text/plain', `Transfer Program O${progNum.padStart(4, '0')} (${isPA ? 'PA' : 'Multi-path'})`);
             dragEvent.dataTransfer.effectAllowed = 'copy';
           }
+        });
+      });
+
+      const pushActiveBtns = this.shadowRoot?.querySelectorAll('.btn-push-active');
+      pushActiveBtns?.forEach(btn => {
+        btn.addEventListener('click', (e) => {
+           const target = e.target as HTMLElement;
+           const path = target.getAttribute('data-path');
+           if (path && (window as any).vscodeApi) {
+               (window as any).vscodeApi.postMessage({
+                   type: 'REQUEST_ACTIVE_PROGRAM_FOR_UPLOAD',
+                   pathId: path
+               });
+           }
         });
       });
 

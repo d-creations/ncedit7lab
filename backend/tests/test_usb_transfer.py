@@ -1,3 +1,6 @@
+import pytest
+
+from backend.transfer.interface import TransferError
 from backend.transfer.usb import UsbTransferClient
 
 
@@ -30,6 +33,21 @@ def test_usb_transfer_uses_path_subdirectories_when_present(tmp_path):
     assert programs[0]["comment"] == "PATH TWO"
 
 
+def test_usb_transfer_lists_root_and_path_1_subdirectory(tmp_path):
+    root = tmp_path / "usb"
+    path1 = root / "PATH1"
+    path1.mkdir(parents=True)
+    (root / "O1001.P1").write_text("O1001\n(ROOT PROGRAM)\nM30\n", encoding="utf-8")
+    (path1 / "O1002.P1").write_text("O1002\n(PATH ONE PROGRAM)\nM30\n", encoding="utf-8")
+
+    client = UsbTransferClient()
+
+    assert client.connect(str(root)) is True
+    programs = client.list_programs(1)
+
+    assert [program["number"] for program in programs] == [1001, 1002]
+
+
 def test_usb_transfer_download_and_upload_round_trip(tmp_path):
     root = tmp_path / "usb"
     root.mkdir()
@@ -50,4 +68,5 @@ def test_usb_transfer_download_and_upload_round_trip(tmp_path):
 def test_usb_transfer_rejects_missing_root(tmp_path):
     client = UsbTransferClient()
 
-    assert client.connect(str(tmp_path / "missing")) is False
+    with pytest.raises(TransferError, match="does not exist or is not a directory"):
+        client.connect(str(tmp_path / "missing"))

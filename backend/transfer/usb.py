@@ -62,26 +62,44 @@ class UsbTransferClient(ProtocolClient):
         return program_entry["program_text"]
 
     def list_programs(self, path_no: int = 0) -> list:
-        storage_dir = self._get_storage_dir(path_no or 1, allow_missing=True)
-        if storage_dir is None:
+        storage_dirs = self._get_list_dirs(path_no or 1)
+        if not storage_dirs:
             return []
 
         programs: List[Dict[str, Any]] = []
-        for file_path in sorted(storage_dir.iterdir()):
-            if not file_path.is_file() or file_path.suffix.lower() not in ALLOWED_SUFFIXES:
-                continue
+        seen_numbers = set()
+        for storage_dir in storage_dirs:
+            for file_path in sorted(storage_dir.iterdir()):
+                if not file_path.is_file() or file_path.suffix.lower() not in ALLOWED_SUFFIXES:
+                    continue
 
-            program_entry = self._parse_program_file(file_path)
-            if program_entry is None:
-                continue
+                program_entry = self._parse_program_file(file_path)
+                if program_entry is None or program_entry["number"] in seen_numbers:
+                    continue
 
-            programs.append({
-                "number": program_entry["number"],
-                "length": len(program_entry["program_text"].encode("utf-8")),
-                "comment": program_entry["comment"],
-            })
+                seen_numbers.add(program_entry["number"])
+                programs.append({
+                    "number": program_entry["number"],
+                    "length": len(program_entry["program_text"].encode("utf-8")),
+                    "comment": program_entry["comment"],
+                })
 
         return sorted(programs, key=lambda item: item["number"])
+
+    def _get_list_dirs(self, path_no: int) -> List[Path]:
+        root_path = self._require_root_path()
+        normalized_path_no = path_no or 1
+        dirs: List[Path] = []
+
+        if normalized_path_no == 1:
+            dirs.append(root_path)
+
+        for candidate_name in PATH_DIR_CANDIDATES.get(normalized_path_no, ()): 
+            candidate = root_path / candidate_name
+            if candidate.exists() and candidate.is_dir() and candidate not in dirs:
+                dirs.append(candidate)
+
+        return dirs
 
     def _get_storage_dir(self, path_no: int, create: bool = False, allow_missing: bool = False) -> Optional[Path]:
         root_path = self._require_root_path()

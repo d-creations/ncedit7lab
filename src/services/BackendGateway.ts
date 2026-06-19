@@ -104,10 +104,11 @@ export class BackendGateway {
 
   async transferDownload(ip: string, pathNo: number, programText: string, port: number, protocol: string, driverPath?: string): Promise<TransferDownloadResponse> {
     const url = await this.getTransferUrl(`download/${pathNo}`);
-    const response = await fetch(url, {
+    const qs = this.buildQuery({ ip_address: ip });
+    const response = await fetch(`${url}?${qs}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ip_address: ip, port, program_text: programText, protocol, driver_path: driverPath })
+      body: JSON.stringify({ port, program_text: programText, protocol, driver_path: driverPath })
     });
     if (!response.ok) throw new Error(await response.text());
     return response.json();

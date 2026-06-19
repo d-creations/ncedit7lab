@@ -481,12 +481,12 @@ export class NCTransferPanel extends HTMLElement {
           <h3>${pushHeading}</h3>
           <div class="push-active-bar">
              <span style="align-self: center; font-size: 0.9em; flex: 1;"><strong>Push Open File:</strong></span>
-             ${isUsbTransfer ? '' : '<button class="btn-push-active" data-path="PA">PA</button>'}
+             <button class="btn-push-active" data-path="PA">PA</button>
              ${supportedPaths.map(path => `<button class="btn-push-active" data-path="${path}">P${path}</button>`).join('')}
           </div>
           <span>${pushHelpText}</span>
           <div class="drop-panels">
-            ${isUsbTransfer ? '' : '<div class="drop-zone upload-zone" data-path="PA" style="cursor:pointer">Upload PA</div>'}
+            <div class="drop-zone upload-zone" data-path="PA" style="cursor:pointer">Upload PA</div>
             ${supportedPaths.map(path => `<div class="drop-zone upload-zone" data-path="${path}" style="cursor:pointer">Upload P${path}</div>`).join('')}
           </div>
         </div>

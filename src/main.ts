@@ -147,8 +147,16 @@ async function bootstrap() {
     const registry = ServiceRegistry.getInstance();
 
     // Determine environment
-    // @ts-ignore
-    const isVSCode =(typeof acquireVsCodeApi !== 'undefined' || window.acquireVsCodeApi !== undefined);
+    const vscodeWindow = window as typeof window & {
+      acquireVsCodeApi?: unknown;
+      vscodeConfig?: unknown;
+      ncedit7labHostMode?: unknown;
+    };
+    const isVSCode =
+      typeof (globalThis as { acquireVsCodeApi?: unknown }).acquireVsCodeApi !== 'undefined' ||
+      vscodeWindow.acquireVsCodeApi !== undefined ||
+      vscodeWindow.vscodeConfig !== undefined ||
+      vscodeWindow.ncedit7labHostMode !== undefined;
 
     // Register Config Service early (Factory/Strategy pattern based on environment)
     registry.register(
@@ -170,7 +178,31 @@ async function bootstrap() {
       applyThemeMode(config.themeMode, isVSCode);
     };
     syncTheme(initialConfig);
-    configService.onConfigChanged(syncTheme);
+
+    let renderedHostMode = '';
+    const renderAppForHostMode = (hostMode: string) => {
+      if (renderedHostMode === hostMode) {
+        return;
+      }
+
+      const appContainer = document.getElementById('app-root') || document.getElementById('app');
+      if (!appContainer) throw new Error('App container not found');
+
+      const tagName = hostMode === 'vscode-templates'
+        ? 'nc-templates-panel'
+        : hostMode === 'vscode-panel'
+          ? 'nc-workbench-panel-app'
+          : 'nc-editor-app';
+
+      appContainer.innerHTML = '';
+      appContainer.appendChild(document.createElement(tagName));
+      renderedHostMode = hostMode;
+    };
+
+    configService.onConfigChanged((config) => {
+      syncTheme(config);
+      renderAppForHostMode(config.hostMode);
+    });
 
     // Register services using the tokens directly
     registry.register(EVENT_BUS_TOKEN, () => new EventBus(), ServiceScope.Singleton);
@@ -196,8 +228,6 @@ async function bootstrap() {
       STATE_SERVICE_TOKEN,
       () => {
         const eventBus = registry.get(EVENT_BUS_TOKEN);
-        // @ts-ignore
-        const isVSCode = window.acquireVsCodeApi !== undefined ;
         // Turn off local storage persistence for StateService in VS Code
         return new StateService(eventBus, !isVSCode);
       },
@@ -212,9 +242,6 @@ async function bootstrap() {
         
         // CLEAN ARCHITECTURE: Detect if we are running inside VS Code / Theia
         // If so, inject the VsCodeFileManagerService, otherwise fallback to the web FileManagerService
-        // @ts-ignore
-        const isVSCode = (typeof acquireVsCodeApi !== 'undefined' || window.acquireVsCodeApi !== undefined);
-        
         if (isVSCode) {
             console.log("Running in Desktop/IDE Mode: Injecting VsCodeFileManagerService");
             return new VsCodeFileManagerService(eventBus, stateService);
@@ -332,25 +359,7 @@ async function bootstrap() {
     }
 
     // Initialize the app
-    if (initialConfig.hostMode === 'vscode-templates') {
-      const appElement = document.createElement('nc-templates-panel');
-      const appContainer = document.getElementById('app-root') || document.getElementById('app');
-      if (!appContainer) throw new Error('App container not found');
-      appContainer.innerHTML = '';
-      appContainer.appendChild(appElement);
-    } else if (initialConfig.hostMode === 'vscode-panel') {
-      const appElement = document.createElement('nc-workbench-panel-app');
-      const appContainer = document.getElementById('app-root') || document.getElementById('app');
-      if (!appContainer) throw new Error('App container not found');
-      appContainer.innerHTML = '';
-      appContainer.appendChild(appElement);
-    } else {
-      const appElement = document.createElement('nc-editor-app');
-      const appContainer = document.getElementById('app');
-      if (!appContainer) throw new Error('App container not found');
-      appContainer.innerHTML = '';
-      appContainer.appendChild(appElement);
-    }
+    renderAppForHostMode(initialConfig.hostMode);
 
     console.log('NC-Edit7 application initialized successfully');
   } catch (error) {

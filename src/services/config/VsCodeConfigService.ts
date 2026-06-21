@@ -28,10 +28,17 @@ export class VsCodeConfigService implements IConfigService {
     if ((window as any).transferDefaultIp) {
       this.config.transferDefaultIp = (window as any).transferDefaultIp;
     }
+    if ((window as any).ncedit7labHostMode) {
+      this.config.hostMode = (window as any).ncedit7labHostMode;
+    }
     
     // VS Code passes some settings initially via the webview HTML
     if ((window as any).vscodeConfig) {
       this.config = { ...this.config, ...(window as any).vscodeConfig };
+    }
+
+    if ((window as any).ncedit7labHostMode) {
+      this.config.hostMode = (window as any).ncedit7labHostMode;
     }
 
     // We can also listen for live config updates from the extension

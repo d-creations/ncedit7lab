@@ -614,7 +614,14 @@ export class NCTransferPanel extends HTMLElement {
       this.loading = true;
       this.render();
       if (targetPath === 'PA') {
-        const pathContents: Record<number, string> = {};
+          if (String(this.transferProtocol).toLowerCase() === 'usb') {
+            let cleanContent = content.trim();
+            if (cleanContent.startsWith('%')) cleanContent = cleanContent.slice(1).trimStart();
+            if (cleanContent.endsWith('%')) cleanContent = cleanContent.slice(0, -1).trimEnd();
+            const finalContent = `\n${cleanContent}\n%`;
+            await this.transferClient.downloadProgram(this.ipAddress, 0, finalContent);
+            alert(`PA file pushed successfully (as a single .PA file)!`);
+          } else {
         const tagRegex = /<[^>]*P(\d+)>/g;
         let match;
         let lastIndex = 0;
@@ -665,13 +672,7 @@ export class NCTransferPanel extends HTMLElement {
         } else {
           alert(`PA File pushed to Paths ${uploadedPaths.join(', ')} successfully!`);
         }
-      } else {
-        const pathNo = parseInt(targetPath, 10);
-        
-        let cleanContent = content.trim();
-        if (cleanContent.startsWith('%')) cleanContent = cleanContent.slice(1).trimStart();
-        if (cleanContent.endsWith('%')) cleanContent = cleanContent.slice(0, -1).trimEnd();
-        
+          }
         const finalContent = `\n${cleanContent}\n%`;
         
         await this.transferClient.downloadProgram(this.ipAddress, pathNo, finalContent);

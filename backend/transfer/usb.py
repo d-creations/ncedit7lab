@@ -39,24 +39,25 @@ class UsbTransferClient(ProtocolClient):
 
     def delete_program(self, prog_num: int, path_no: int = 0):
         storage_dir = self._get_storage_dir(path_no or 1)
-        program_entry = self._find_program_entry(storage_dir, prog_num)
+        program_entry = self._find_program_entry(storage_dir, prog_num, path_no or 1)
         if not program_entry:
             raise TransferError(USB_ERROR, f"Program O{prog_num} not found on USB path {path_no or 1}", "not found")
         program_entry["file_path"].unlink()
 
     def download_program(self, program_text: str, path_no: int = 0):
-        storage_dir = self._get_storage_dir(path_no or 1, create=True)
+        storage_dir = self._require_root_path()
         normalized = self._normalize_program_text(program_text)
         program_number = self._extract_program_number(normalized)
         if program_number is None:
             raise TransferError(USB_ERROR, "USB upload requires an O-number in the program header", "missing program number")
 
-        target_file = storage_dir / f"O{program_number:04d}.P{path_no or 1}"
+        ext = f"P{path_no}" if path_no > 0 else "PA"
+        target_file = storage_dir / f"O{program_number:04d}.{ext}"
         target_file.write_text(normalized, encoding="utf-8", newline="\n")
 
     def upload_program(self, prog_num: int, path_no: int = 0) -> str:
         storage_dir = self._get_storage_dir(path_no or 1)
-        program_entry = self._find_program_entry(storage_dir, prog_num)
+        program_entry = self._find_program_entry(storage_dir, prog_num, path_no or 1)
         if not program_entry:
             raise TransferError(USB_ERROR, f"Program O{prog_num} not found on USB path {path_no or 1}", "not found")
         return program_entry["program_text"]
@@ -87,58 +88,28 @@ class UsbTransferClient(ProtocolClient):
         return sorted(programs, key=lambda item: item["number"])
 
     def _get_list_dirs(self, path_no: int) -> List[Path]:
-        root_path = self._require_root_path()
-        normalized_path_no = path_no or 1
-        dirs: List[Path] = []
-
-        if normalized_path_no == 1:
-            dirs.append(root_path)
-
-        for candidate_name in PATH_DIR_CANDIDATES.get(normalized_path_no, ()): 
-            candidate = root_path / candidate_name
-            if candidate.exists() and candidate.is_dir() and candidate not in dirs:
-                dirs.append(candidate)
-
-        return dirs
+        return [self._require_root_path()]
 
     def _get_storage_dir(self, path_no: int, create: bool = False, allow_missing: bool = False) -> Optional[Path]:
-        root_path = self._require_root_path()
-        normalized_path_no = path_no or 1
-
-        for candidate_name in PATH_DIR_CANDIDATES.get(normalized_path_no, ()): 
-            candidate = root_path / candidate_name
-            if candidate.exists() and candidate.is_dir():
-                return candidate
-
-        if normalized_path_no == 1:
-            return root_path
-
-        if allow_missing:
-            return None
-
-        target_dir = root_path / f"PATH{normalized_path_no}"
-        if create:
-            target_dir.mkdir(parents=True, exist_ok=True)
-            return target_dir
-
-        if target_dir.exists() and target_dir.is_dir():
-            return target_dir
-
-        raise TransferError(USB_ERROR, f"USB path folder PATH{normalized_path_no} does not exist", "missing path directory")
+        return self._require_root_path()
 
     def _require_root_path(self) -> Path:
         if self.root_path is None:
             raise TransferError(USB_ERROR, "USB storage is not connected", "not connected")
         return self.root_path
 
-    def _find_program_entry(self, storage_dir: Path, prog_num: int) -> Optional[Dict[str, Any]]:
+    def _find_program_entry(self, storage_dir: Path, prog_num: int, path_no: int) -> Optional[Dict[str, Any]]:
+        target_ext = f".p{path_no}".lower()
+        fallback_entry = None
         for file_path in sorted(storage_dir.iterdir()):
             if not file_path.is_file() or file_path.suffix.lower() not in ALLOWED_SUFFIXES:
                 continue
             program_entry = self._parse_program_file(file_path)
             if program_entry and program_entry["number"] == prog_num:
-                return program_entry
-        return None
+                if file_path.suffix.lower() == target_ext or (path_no == 0 and file_path.suffix.lower() == ".pa"):
+                    return program_entry
+                fallback_entry = program_entry
+        return fallback_entry
 
     def _parse_program_file(self, file_path: Path) -> Optional[Dict[str, Any]]:
         try:

@@ -626,6 +626,7 @@ export class NCTransferPanel extends HTMLElement {
         let match;
         let lastIndex = 0;
         let lastPath = -1;
+        const pathContents: Record<number, string> = {};
 
         while ((match = tagRegex.exec(content)) !== null) {
           if (lastPath !== -1) {
@@ -649,7 +650,7 @@ export class NCTransferPanel extends HTMLElement {
         for (const [pStr, partContent] of Object.entries(pathContents)) {
           const p = parseInt(pStr, 10);
           
-          let cleanContent = partContent.trim();
+          let cleanContent = String(partContent).trim();
           if (cleanContent.startsWith('%')) cleanContent = cleanContent.slice(1).trimStart();
           if (cleanContent.endsWith('%')) cleanContent = cleanContent.slice(0, -1).trimEnd();
           
@@ -673,6 +674,11 @@ export class NCTransferPanel extends HTMLElement {
           alert(`PA File pushed to Paths ${uploadedPaths.join(', ')} successfully!`);
         }
           }
+      } else {
+        const pathNo = parseInt(targetPath.replace('path', ''), 10);
+        let cleanContent = content.trim();
+        if (cleanContent.startsWith('%')) cleanContent = cleanContent.slice(1).trimStart();
+        if (cleanContent.endsWith('%')) cleanContent = cleanContent.slice(0, -1).trimEnd();
         const finalContent = `\n${cleanContent}\n%`;
         
         await this.transferClient.downloadProgram(this.ipAddress, pathNo, finalContent);

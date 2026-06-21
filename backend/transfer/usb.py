@@ -6,6 +6,8 @@ from .interface import ProtocolClient, TransferError
 
 USB_ERROR = 1
 PROGRAM_NUMBER_RE = re.compile(r"(?:^|\n)\s*O(\d+)\b", re.IGNORECASE)
+PA_MARKER_PROGRAM_RE = re.compile(r"<\s*O(\d+)\.P[1-3]\s*>", re.IGNORECASE)
+PA_FILE_ASSIGNMENT_RE = re.compile(r"&F=/O(\d+)/", re.IGNORECASE)
 COMMENT_RE = re.compile(r"\(([^)]*)\)")
 FILE_NUMBER_RE = re.compile(r"O(\d+)", re.IGNORECASE)
 PATH_DIR_CANDIDATES = {
@@ -144,6 +146,10 @@ class UsbTransferClient(ProtocolClient):
     @staticmethod
     def _extract_program_number(program_text: str) -> Optional[int]:
         match = PROGRAM_NUMBER_RE.search(program_text)
+        if not match:
+            match = PA_MARKER_PROGRAM_RE.search(program_text)
+        if not match:
+            match = PA_FILE_ASSIGNMENT_RE.search(program_text)
         if not match:
             return None
         return int(match.group(1))

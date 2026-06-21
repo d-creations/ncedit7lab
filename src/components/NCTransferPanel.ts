@@ -614,29 +614,33 @@ export class NCTransferPanel extends HTMLElement {
       this.loading = true;
       this.render();
       if (targetPath === 'PA') {
-          if (String(this.transferProtocol).toLowerCase() === 'usb') {
-            let cleanContent = content.trim();
-            if (cleanContent.startsWith('%')) cleanContent = cleanContent.slice(1).trimStart();
-            if (cleanContent.endsWith('%')) cleanContent = cleanContent.slice(0, -1).trimEnd();
-            const finalContent = `\n${cleanContent}\n%`;
-            await this.transferClient.downloadProgram(this.ipAddress, 0, finalContent);
-            alert(`PA file pushed successfully (as a single .PA file)!`);
-          } else {
-        const tagRegex = /<[^>]*P(\d+)>/g;
+        if (String(this.transferProtocol).toLowerCase() === 'usb') {
+          let cleanContent = content.trim();
+          if (cleanContent.startsWith('%')) cleanContent = cleanContent.slice(1).trimStart();
+          if (cleanContent.endsWith('%')) cleanContent = cleanContent.slice(0, -1).trimEnd();
+          const finalContent = `\n${cleanContent}\n%`;
+          await this.transferClient.downloadProgram(this.ipAddress, 0, finalContent);
+          alert('PA file pushed successfully as one .PA file.');
+          return;
+        }
+
+        const tagRegex = /<\s*(O[A-Za-z0-9_]+)\.P(\d+)\s*>/gi;
         let match;
         let lastIndex = 0;
         let lastPath = -1;
-        const pathContents: Record<number, string> = {};
+        let lastProgramName = '';
+        const pathContents: Record<number, { programName: string; content: string }> = {};
 
         while ((match = tagRegex.exec(content)) !== null) {
           if (lastPath !== -1) {
-            pathContents[lastPath] = content.substring(lastIndex, match.index).trim();
+            pathContents[lastPath] = { programName: lastProgramName, content: content.substring(lastIndex, match.index).trim() };
           }
-          lastPath = parseInt(match[1], 10);
+          lastProgramName = match[1];
+          lastPath = parseInt(match[2], 10);
           lastIndex = tagRegex.lastIndex;
         }
         if (lastPath !== -1) {
-          pathContents[lastPath] = content.substring(lastIndex).trim();
+          pathContents[lastPath] = { programName: lastProgramName, content: content.substring(lastIndex).trim() };
         }
 
         if (Object.keys(pathContents).length === 0) {
@@ -647,12 +651,15 @@ export class NCTransferPanel extends HTMLElement {
         const uploadedPaths: number[] = [];
         const errors: string[] = [];
         
-        for (const [pStr, partContent] of Object.entries(pathContents)) {
+        for (const [pStr, part] of Object.entries(pathContents)) {
           const p = parseInt(pStr, 10);
           
-          let cleanContent = String(partContent).trim();
+          let cleanContent = String(part.content).trim();
           if (cleanContent.startsWith('%')) cleanContent = cleanContent.slice(1).trimStart();
           if (cleanContent.endsWith('%')) cleanContent = cleanContent.slice(0, -1).trimEnd();
+          if (part.programName && !new RegExp(`^${part.programName}\\b`, 'i').test(cleanContent)) {
+            cleanContent = `${part.programName}\n${cleanContent}`.trimEnd();
+          }
           
           // Transfer format: Must start with LF and end with % (no leading %)
           const finalContent = `\n${cleanContent}\n%`;
@@ -673,7 +680,6 @@ export class NCTransferPanel extends HTMLElement {
         } else {
           alert(`PA File pushed to Paths ${uploadedPaths.join(', ')} successfully!`);
         }
-          }
       } else {
         const pathNo = parseInt(targetPath.replace('path', ''), 10);
         let cleanContent = content.trim();

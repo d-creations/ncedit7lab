@@ -63,6 +63,24 @@ def test_usb_transfer_download_and_upload_round_trip(tmp_path):
     assert "(SAVED TO USB)" in uploaded
 
 
+def test_usb_transfer_downloads_pa_container_as_single_file(tmp_path):
+    root = tmp_path / "usb"
+    root.mkdir()
+    pa_content = "%\n&F=/O1000/\n<O1000.P1>\n(WERKSTUCK)\nM99\n<O1000.P2>\nG0G40G80\nM99\n<O1000.P3>\nG28U0.\nM99\n%"
+
+    client = UsbTransferClient()
+
+    assert client.connect(str(root)) is True
+    client.download_program(pa_content, 0)
+
+    stored = root / "O1000.PA"
+    assert stored.exists()
+    stored_content = stored.read_text(encoding="utf-8")
+    assert "<O1000.P1>" in stored_content
+    assert "<O1000.P2>" in stored_content
+    assert "<O1000.P3>" in stored_content
+
+
 def test_usb_transfer_rejects_missing_root(tmp_path):
     client = UsbTransferClient()
 

@@ -57,17 +57,9 @@ export class NCWorkbenchPanelApp extends HTMLElement {
     this.attachHostListeners();
 
     // Initialize machine service so NCTransferPanel can read fileExtensions from machine config.
-    // Fire-and-forget: failures are handled inside init() with a fallback.
-    this.machineService.init().then(() => {
-      const machines = this.machineService.getMachines();
-      if (machines.length > 0) {
-        this.stateService.setMachines(machines);
-        // Only set a default machine if none has been selected yet
-        if (!this.stateService.getState().globalMachine) {
-          this.stateService.setGlobalMachine(machines[0].machineName);
-        }
-      }
-    }).catch(() => { /* init() already handles errors internally */ });
+    // Fire-and-forget: do NOT fire setGlobalMachine here — it emits MACHINE_CHANGED which
+    // re-renders NCTransferPanel mid-connect and causes the connect flow to break.
+    this.machineService.init().catch(() => { /* init() already handles errors internally */ });
   }
 
   disconnectedCallback() {

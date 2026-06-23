@@ -156,11 +156,17 @@ export class NCTransferPanel extends HTMLElement {
 
   // --- Machine file-extension helpers ---
 
-  /** Returns the FileExtensionConfig for the currently selected machine, or undefined. */
+  /** Returns the FileExtensionConfig for the currently selected machine, or undefined.
+   * Falls back to the first loaded machine when no machine has been explicitly selected
+   * (common in the VS Code workbench panel where globalMachine is not persisted). */
   private getCurrentMachineFileExtensions(): FileExtensionConfig | undefined {
     const { globalMachine } = this.stateService.getState();
-    if (!globalMachine) return undefined;
-    return this.machineService.getMachine(globalMachine)?.fileExtensions;
+    if (globalMachine) {
+      return this.machineService.getMachine(globalMachine)?.fileExtensions;
+    }
+    // Fallback: use the first available machine from the service
+    const machines = this.machineService.getMachines();
+    return machines.length > 0 ? machines[0].fileExtensions : undefined;
   }
 
   /**

@@ -304,7 +304,7 @@ describe('ExecutedProgramService', () => {
       const result = await service.executeProgram({
         channelId: '1',
         program: 'DEF REAL CUSTOM_MC[4]\nANGLE_Z=36.869897',
-        machineName: 'SIEMENS_840D',
+        machineName: 'SIEMENS_840DI',
       });
 
       expect(result.namedVariableSnapshot.get('ANGLE_Z')).toBe(36.869897);

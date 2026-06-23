@@ -4,7 +4,7 @@ import './NCTransferPanel';
 import './NCTemplatesPanel';
 import { ServiceRegistry } from '@core/ServiceRegistry';
 import { EVENT_BUS_TOKEN, STATE_SERVICE_TOKEN, PARSER_SERVICE_TOKEN, FILE_MANAGER_SERVICE_TOKEN, CONFIG_SERVICE_TOKEN, MACHINE_SERVICE_TOKEN } from '@core/ServiceTokens';
-import type { ChannelId, ExecutedProgramResult, VariableValue } from '@core/types';
+import type { ChannelId, ExecutedProgramResult, VariableValue, MachineType } from '@core/types';
 import { EventBus, EVENT_NAMES, type EventSubscription } from '@services/EventBus';
 import { ParserService } from '@services/ParserService';
 import type { IFileManagerService } from '@services/IFileManagerService';
@@ -27,6 +27,8 @@ export class NCWorkbenchPanelApp extends HTMLElement {
   private fileSyncListener?: EventListener;
   private bridgeListener?: EventListener;
   private panelCommandListener?: EventListener;
+  /** Machine name received from editor bridge before machines were loaded. */
+  private pendingMachineName?: string;
 
   constructor() {
     super();
@@ -59,7 +61,18 @@ export class NCWorkbenchPanelApp extends HTMLElement {
     // Initialize machine service so NCTransferPanel can read fileExtensions from machine config.
     // Fire-and-forget: do NOT fire setGlobalMachine here — it emits MACHINE_CHANGED which
     // re-renders NCTransferPanel mid-connect and causes the connect flow to break.
-    this.machineService.init().catch(() => { /* init() already handles errors internally */ });
+    this.machineService.init().then(() => {
+      const machines = this.machineService.getMachines();
+      if (machines.length > 0) {
+        // Populate state.machines so setGlobalMachine() can find machines by name
+        this.stateService.setMachines(machines);
+        // Apply any machine the editor relayed before our machines were loaded
+        if (this.pendingMachineName) {
+          this.stateService.setGlobalMachine(this.pendingMachineName as MachineType);
+          this.pendingMachineName = undefined;
+        }
+      }
+    }).catch(() => { /* init() already handles errors internally */ });
   }
 
   disconnectedCallback() {
@@ -131,9 +144,25 @@ export class NCWorkbenchPanelApp extends HTMLElement {
       const detail = (event as CustomEvent).detail as
         | { type: 'WORKBENCH_BRIDGE'; eventType: 'EXECUTION_COMPLETED'; payload: { channelId: string; result: { variableSnapshotEntries: Array<[number, number]>; namedVariableSnapshotEntries?: Array<[string, VariableValue]>; errors: unknown[] } } }
         | { type: 'WORKBENCH_BRIDGE'; eventType: 'EXECUTION_ERROR'; payload: { channelId: string; error: { message: string } } }
-        | { type: 'WORKBENCH_BRIDGE'; eventType: 'PLOT_CLEARED'; payload: Record<string, never> };
+        | { type: 'WORKBENCH_BRIDGE'; eventType: 'PLOT_CLEARED'; payload: Record<string, never> }
+        | { type: 'WORKBENCH_BRIDGE'; eventType: 'MACHINE_CHANGED'; payload: { machineName: string } };
 
       if (!detail || detail.type !== 'WORKBENCH_BRIDGE') return;
+
+      if (detail.eventType === 'MACHINE_CHANGED') {
+        const { machineName } = detail.payload;
+        if (machineName) {
+          const machines = this.stateService.getState().machines;
+          if (machines.find(m => m.machineName === machineName)) {
+            // Machines already loaded — apply immediately
+            this.stateService.setGlobalMachine(machineName as MachineType);
+          } else {
+            // Machines not yet loaded — queue and apply after machineService.init() completes
+            this.pendingMachineName = machineName;
+          }
+        }
+        return;
+      }
 
       if (detail.eventType === 'EXECUTION_COMPLETED') {
         if (['1', '2', '3'].includes(detail.payload.channelId)) {

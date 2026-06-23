@@ -29,6 +29,11 @@ export type WorkbenchBridgeMessage =
       type: 'WORKBENCH_BRIDGE';
       eventType: 'PLOT_CLEARED';
       payload: Record<string, never>;
+    }
+  | {
+      type: 'WORKBENCH_BRIDGE';
+      eventType: 'MACHINE_CHANGED';
+      payload: { machineName: string };
     };
 
 export interface IHostBridgeService {

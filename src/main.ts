@@ -356,6 +356,19 @@ async function bootstrap() {
           payload: {},
         });
       });
+
+      // Relay machine selection changes so the workbench panel's transfer panel
+      // uses the correct channels/extensions for the currently selected machine.
+      eventBus.subscribe(EVENT_NAMES.MACHINE_CHANGED, (data: unknown) => {
+        const machineData = data as { machine: { machineName: string } };
+        if (machineData?.machine?.machineName) {
+          hostBridge.relayToWorkbench({
+            type: 'WORKBENCH_BRIDGE',
+            eventType: 'MACHINE_CHANGED',
+            payload: { machineName: machineData.machine.machineName },
+          });
+        }
+      });
     }
 
     // Initialize the app

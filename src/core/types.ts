@@ -49,6 +49,7 @@ export interface MachineProfile {
   availableChannels: number;
   regexPatterns?: MachineRegexPatterns;
   variablePrefix?: string;
+  fileExtensions?: FileExtensionConfig;
 }
 
 export interface ToolInfo {
@@ -200,11 +201,23 @@ export interface ServerMachineListRequest {
   action: 'list_machines' | 'get_machines';
 }
 
+export interface FileExtensionConfig {
+  /** Whether this machine uses multi-file / multi-channel programs (PA concept). */
+  multifile: boolean;
+  /** File extensions for main programs, e.g. [".PA", ".txt", ""]. */
+  main: string[];
+  /** File extensions for subprograms, e.g. [".SPF"]. */
+  subprogram: string[];
+  /** Per-channel file extensions keyed by channel number string, e.g. {"1": [".PA",".P1"], "2": [".P2"]}. */
+  channels: Record<string, string[]>;
+}
+
 export interface ServerMachineData {
   machineName: MachineType;
   controlType: string;
   variablePrefix?: string;
   regexPatterns?: MachineRegexPatterns;
+  fileExtensions?: FileExtensionConfig;
 }
 
 export interface ServerMachineListResponse {

@@ -98,7 +98,7 @@ async def transfer_download(path_no: int, ip_address: str, data: TransferDownloa
     try:
         if not client.connect(ip_address, data.port):
             raise HTTPException(status_code=500, detail="Failed to connect to CNC before download")
-        client.download_program(data.program_text, path_no)
+        client.download_program(data.program_text, path_no, data.file_extension)
         print(f"[VSCODE_NOTIFICATION] SUCCESS: Program successfully pushed to CNC ({ip_address})", flush=True)
         return {"status": "success", "message": "Download to CNC completed successfully"}
     except TransferError as e:

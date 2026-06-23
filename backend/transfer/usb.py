@@ -46,15 +46,25 @@ class UsbTransferClient(ProtocolClient):
             raise TransferError(USB_ERROR, f"Program O{prog_num} not found on USB path {path_no or 1}", "not found")
         program_entry["file_path"].unlink()
 
-    def download_program(self, program_text: str, path_no: int = 0):
+    def download_program(self, program_text: str, path_no: int = 0, file_extension: Optional[str] = None):
         storage_dir = self._require_root_path()
         normalized = self._normalize_program_text(program_text)
         program_number = self._extract_program_number(normalized)
         if program_number is None:
             raise TransferError(USB_ERROR, "USB upload requires an O-number in the program header", "missing program number")
 
-        ext = f"P{path_no}" if path_no > 0 else "PA"
-        target_file = storage_dir / f"O{program_number:04d}.{ext}"
+        if file_extension is not None:
+            # Use the machine-config-derived extension supplied by the client
+            stripped = file_extension.lstrip(".")
+            target_file = (
+                storage_dir / f"O{program_number:04d}.{stripped}"
+                if stripped
+                else storage_dir / f"O{program_number:04d}"
+            )
+        else:
+            # Legacy fallback
+            ext = f"P{path_no}" if path_no > 0 else "PA"
+            target_file = storage_dir / f"O{program_number:04d}.{ext}"
         target_file.write_text(normalized, encoding="utf-8", newline="\n")
 
     def upload_program(self, prog_num: int, path_no: int = 0) -> str:

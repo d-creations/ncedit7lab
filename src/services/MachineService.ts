@@ -58,6 +58,7 @@ export class MachineService {
       availableChannels: 3,
       regexPatterns: data.regexPatterns,
       variablePrefix: data.variablePrefix,
+      fileExtensions: data.fileExtensions,
     };
   }
 

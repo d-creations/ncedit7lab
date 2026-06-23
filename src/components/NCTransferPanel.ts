@@ -1,12 +1,15 @@
 import { ServiceRegistry } from '@core/ServiceRegistry';
-import { BACKEND_GATEWAY_TOKEN, FILE_MANAGER_SERVICE_TOKEN, CONFIG_SERVICE_TOKEN } from '@core/ServiceTokens';
+import { BACKEND_GATEWAY_TOKEN, FILE_MANAGER_SERVICE_TOKEN, CONFIG_SERVICE_TOKEN, MACHINE_SERVICE_TOKEN, STATE_SERVICE_TOKEN, EVENT_BUS_TOKEN } from '@core/ServiceTokens';
 import { ITransferProtocol } from '../services/transfer/ITransferProtocol';
 import { TransferProtocolFactory } from '../services/transfer/TransferProtocolFactory';
 import { BackendGateway } from '@services/BackendGateway';
 import { IFileManagerService } from '@services/IFileManagerService';
 import { IConfigService } from '@services/config/IConfigService';
+import { MachineService } from '@services/MachineService';
+import { StateService } from '@services/StateService';
+import { EventBus, EVENT_NAMES } from '@services/EventBus';
 
-import { TransferProgram } from '@core/types';
+import type { TransferProgram, FileExtensionConfig } from '@core/types';
 
 interface GroupedProgram {
   number: number;
@@ -24,6 +27,9 @@ export class NCTransferPanel extends HTMLElement {
   private transferClient!: ITransferProtocol;
   private fileManager: IFileManagerService;
   private configService: IConfigService;
+  private machineService: MachineService;
+  private stateService: StateService;
+  private eventBus: EventBus;
   private fileInput?: HTMLInputElement;
   private pendingUploadPath: string | null = null;
   private transferProtocol = 'none';
@@ -40,6 +46,9 @@ export class NCTransferPanel extends HTMLElement {
     this.backend = ServiceRegistry.getInstance().get(BACKEND_GATEWAY_TOKEN);
     this.fileManager = ServiceRegistry.getInstance().get(FILE_MANAGER_SERVICE_TOKEN);
     this.configService = ServiceRegistry.getInstance().get(CONFIG_SERVICE_TOKEN);
+    this.machineService = ServiceRegistry.getInstance().get(MACHINE_SERVICE_TOKEN);
+    this.stateService = ServiceRegistry.getInstance().get(STATE_SERVICE_TOKEN);
+    this.eventBus = ServiceRegistry.getInstance().get(EVENT_BUS_TOKEN);
     
     // Asynchronously load the default IP address from our configuration factory
     this.configService.getConfig().then(cfg => {
@@ -58,6 +67,12 @@ export class NCTransferPanel extends HTMLElement {
       if (this.isConnectedToCnc) {
         void this.checkPing();
       }
+    });
+
+    // Re-render when machine selection changes (channels / extensions may change)
+    this.eventBus.subscribe(EVENT_NAMES.MACHINE_CHANGED, () => {
+      this.render();
+      this.attachEventListeners();
     });
 
     // Listen for file drops fetched via Extension
@@ -135,24 +150,91 @@ export class NCTransferPanel extends HTMLElement {
     }
   }
 
-  private getSupportedPaths(): Array<1 | 2 | 3> {
-    const configuredPaths = (window as { ncedit7labSupportedTransferPaths?: unknown }).ncedit7labSupportedTransferPaths;
-    if (Array.isArray(configuredPaths)) {
-      const paths = configuredPaths.filter((path): path is 1 | 2 | 3 => path === 1 || path === 2 || path === 3);
-      if (paths.length > 0) {
-        return Array.from(new Set(paths));
-      }
-    }
+  private getSupportedPaths(): number[] {
+    return this.getSupportedChannels();
+  }
 
-    if (this.transferProtocol === 'usb') {
-      return [1, 2, 3];
-    }
+  // --- Machine file-extension helpers ---
 
-    return [1, 2];
+  /** Returns the FileExtensionConfig for the currently selected machine, or undefined. */
+  private getCurrentMachineFileExtensions(): FileExtensionConfig | undefined {
+    const { globalMachine } = this.stateService.getState();
+    if (!globalMachine) return undefined;
+    return this.machineService.getMachine(globalMachine)?.fileExtensions;
+  }
+
+  /**
+   * Returns the sorted channel numbers supported by the current machine.
+   * Falls back to [1,2,3] for USB or [1,2] for FOCAS when no machine config is available.
+   */
+  private getSupportedChannels(): number[] {
+    const ext = this.getCurrentMachineFileExtensions();
+    if (!ext) {
+      return this.transferProtocol === 'usb' ? [1, 2, 3] : [1, 2];
+    }
+    if (!ext.multifile) {
+      // Single-file machine (e.g. Siemens): only one "channel"
+      return [1];
+    }
+    const channels = Object.keys(ext.channels)
+      .map(Number)
+      .filter(n => !isNaN(n))
+      .sort((a, b) => a - b);
+    return channels.length > 0 ? channels : [1];
+  }
+
+  /** Returns true when the current machine supports PA / multi-channel assembly files. */
+  private isMultifileSupported(): boolean {
+    const ext = this.getCurrentMachineFileExtensions();
+    if (ext === undefined) return true; // default: assume multifile
+    return ext.multifile;
+  }
+
+  /**
+   * Returns the preferred file extension for a given channel number.
+   * Uses the first non-empty extension from machine config, falling back to `.P{n}`.
+   */
+  private getChannelFileExtension(channelNo: number): string {
+    const ext = this.getCurrentMachineFileExtensions();
+    if (!ext) return `.P${channelNo}`;
+    const channelExts = ext.channels[channelNo.toString()];
+    if (!channelExts || channelExts.length === 0) return ext.main[0] ?? '';
+    // Prefer non-empty extension; "" means no extension (bare filename)
+    return channelExts.find(e => e !== '') ?? channelExts[0] ?? '';
+  }
+
+  /** Returns the file extension used for PA (multi-channel assembly) programs. */
+  private getPAFileExtension(): string {
+    const ext = this.getCurrentMachineFileExtensions();
+    return ext?.main?.[0] ?? '.PA';
+  }
+
+  /**
+   * Returns a human-readable label for a channel button, derived from its file extension.
+   * e.g. channelNo=1 with ext ".P1" → "P1"; ext ".p-2" → "P-2"; ext "" → "P2"
+   */
+  private getChannelLabel(channelNo: number): string {
+    const extension = this.getChannelFileExtension(channelNo);
+    if (!extension || extension === '') return `P${channelNo}`;
+    const displayExt = extension.startsWith('.') ? extension.slice(1) : extension;
+    return displayExt.toUpperCase() || `P${channelNo}`;
+  }
+
+  /** Build a save-file name for a channel program, e.g. "O0001.P1" or "O0001" or "O0001.p-2". */
+  private buildChannelFileName(progNum: number, channelNo: number): string {
+    const ext = this.getChannelFileExtension(channelNo);
+    return `O${progNum.toString().padStart(4, '0')}${ext}`;
+  }
+
+  /** Build a save-file name for a PA program, e.g. "O0001.PA". */
+  private buildPAFileName(progNum: number): string {
+    const ext = this.getPAFileExtension();
+    return `O${progNum.toString().padStart(4, '0')}${ext}`;
   }
 
   private async fetchPrograms() {
     const paths = this.getSupportedPaths();
+    const multifile = this.isMultifileSupported();
     this.cncPrograms.clear();
 
     for (const path of paths) {
@@ -172,10 +254,10 @@ export class NCTransferPanel extends HTMLElement {
           // @ts-ignore
           group.paths[path as keyof typeof group.paths] = prog;
           
-          // Check if PA (common across at least paths 1 & 2)
-          group.isPA = !!(group.paths[1] && group.paths[2]);
+          // PA means the program exists in multiple channels AND the machine supports multifile
+          group.isPA = multifile && !!(group.paths[1] && group.paths[2]);
           if (!group.comment && prog.comment) {
-            group.comment = prog.comment; // Inherit comment if missing
+            group.comment = prog.comment;
           }
         }
       } catch (e) {
@@ -196,7 +278,7 @@ export class NCTransferPanel extends HTMLElement {
         combinedContent += `&F=/O${progNum.toString().padStart(4, '0')}(${prog.comment || 'PA_PROG'})/\n`;
 
         for (const p of this.getSupportedPaths()) {
-            if (prog.paths[p]) {
+            if (prog.paths[p as 1|2|3]) {
                 const resp = await this.transferClient.uploadProgram(this.ipAddress, p, progNum);
                 this.fileManager.updateActiveProgramContent(p.toString(), resp);
                 
@@ -223,7 +305,7 @@ export class NCTransferPanel extends HTMLElement {
         
         combinedContent += "%\n";
 
-        const fileName = `O${progNum.toString().padStart(4, '0')}.PA`;
+        const fileName = this.buildPAFileName(progNum);
         if ((window as any).vscodeApi) {
           (window as any).vscodeApi.postMessage({
                 type: 'SAVE_TRANSFER_FILE',
@@ -241,7 +323,7 @@ export class NCTransferPanel extends HTMLElement {
         const channelId = pNum.toString();
         this.fileManager.updateActiveProgramContent(channelId, resp);
         
-        const fileName = `O${progNum.toString().padStart(4, '0')}.P${pNum}`;
+        const fileName = this.buildChannelFileName(progNum, pNum);
         if ((window as any).vscodeApi) {
           (window as any).vscodeApi.postMessage({
                 type: 'SAVE_TRANSFER_FILE',
@@ -269,7 +351,7 @@ export class NCTransferPanel extends HTMLElement {
         combinedContent += `&F=/O${progNum.toString().padStart(4, '0')}(${prog.comment || 'PA_PROG'})/\n`;
 
         for (const p of this.getSupportedPaths()) {
-            if (prog.paths[p]) {
+            if (prog.paths[p as 1|2|3]) {
                 const resp = await this.transferClient.uploadProgram(this.ipAddress, p, progNum);
                 
                 // Format block with <> XML-like tags matching the specified standard
@@ -294,7 +376,7 @@ export class NCTransferPanel extends HTMLElement {
         
         combinedContent += "%\n";
 
-        const fileName = `O${progNum.toString().padStart(4, '0')}.PA`;
+        const fileName = this.buildPAFileName(progNum);
         if ((window as any).vscodeApi) {
           (window as any).vscodeApi.postMessage({
                 type: 'COMPARE_TRANSFER_FILE',
@@ -307,7 +389,7 @@ export class NCTransferPanel extends HTMLElement {
         const pNum = parseInt(pathNo, 10);
         const resp = await this.transferClient.uploadProgram(this.ipAddress, pNum, progNum);
         
-        const fileName = `O${progNum.toString().padStart(4, '0')}.P${pNum}`;
+        const fileName = this.buildChannelFileName(progNum, pNum);
         if ((window as any).vscodeApi) {
           (window as any).vscodeApi.postMessage({
                 type: 'COMPARE_TRANSFER_FILE',
@@ -325,6 +407,7 @@ export class NCTransferPanel extends HTMLElement {
     if (!this.shadowRoot) return;
 
     const supportedPaths = this.getSupportedPaths();
+    const multifileSupported = this.isMultifileSupported();
     const isUsbTransfer = String(this.transferProtocol).toLowerCase() === 'usb';
     const locationLabel = isUsbTransfer ? 'USB Storage' : 'CNC Memory';
     const addressPlaceholder = isUsbTransfer ? 'Local folder path (e.g. D:\\)' : 'CNC IP';
@@ -453,22 +536,22 @@ export class NCTransferPanel extends HTMLElement {
               <div class="prog-info">
                 <div>
                   <span class="prog-num">O${prog.number.toString().padStart(4, '0')}</span>
-                  ${prog.isPA 
-                    ? '<span class="pa-badge">PA Program</span>' 
-                    : `<span class="single-badge">Path ${supportedPaths.filter(p => prog.paths[p]).join(', ')}</span>`
+                  ${prog.isPA && multifileSupported
+                    ? '<span class="pa-badge">PA Program</span>'
+                    : `<span class="single-badge">${supportedPaths.filter(p => prog.paths[p as 1|2|3]).map(p => this.getChannelLabel(p)).join(', ')}</span>`
                   }
                 </div>
                 <small>${prog.comment}</small>
               </div>
               <div class="actions">
-                ${prog.isPA ? 
+                ${prog.isPA && multifileSupported ?
                   `${(window as any).vscodeApi ? `<button class="btn-cmp" data-path="PA" data-prog="${prog.number}">Cmp PA</button>` : ''}
-                   <button class="btn-upl" data-path="PA" data-prog="${prog.number}">Pull PA</button>` : 
+                   <button class="btn-upl" data-path="PA" data-prog="${prog.number}">Pull PA</button>` :
                   ''
                 }
-                ${supportedPaths.map(path => prog.paths[path] ? 
-                  `${(window as any).vscodeApi ? `<button class="btn-cmp" data-path="${path}" data-prog="${prog.number}">Cmp P${path}</button>` : ''}
-                   <button class="btn-upl" data-path="${path}" data-prog="${prog.number}">Pull P${path}</button>` : 
+                ${supportedPaths.map(path => prog.paths[path as 1|2|3] ?
+                  `${(window as any).vscodeApi ? `<button class="btn-cmp" data-path="${path}" data-prog="${prog.number}">Cmp ${this.getChannelLabel(path)}</button>` : ''}
+                   <button class="btn-upl" data-path="${path}" data-prog="${prog.number}">Pull ${this.getChannelLabel(path)}</button>` :
                   ''
                 ).join('')}
               </div>
@@ -481,13 +564,13 @@ export class NCTransferPanel extends HTMLElement {
           <h3>${pushHeading}</h3>
           <div class="push-active-bar">
              <span style="align-self: center; font-size: 0.9em; flex: 1;"><strong>Push Open File:</strong></span>
-             <button class="btn-push-active" data-path="PA">PA</button>
-             ${supportedPaths.map(path => `<button class="btn-push-active" data-path="${path}">P${path}</button>`).join('')}
+             ${multifileSupported ? `<button class="btn-push-active" data-path="PA">PA</button>` : ''}
+             ${supportedPaths.map(path => `<button class="btn-push-active" data-path="${path}">${this.getChannelLabel(path)}</button>`).join('')}
           </div>
           <span>${pushHelpText}</span>
           <div class="drop-panels">
-            <div class="drop-zone upload-zone" data-path="PA" style="cursor:pointer">Upload PA</div>
-            ${supportedPaths.map(path => `<div class="drop-zone upload-zone" data-path="${path}" style="cursor:pointer">Upload P${path}</div>`).join('')}
+            ${multifileSupported ? `<div class="drop-zone upload-zone" data-path="PA" style="cursor:pointer">Upload PA</div>` : ''}
+            ${supportedPaths.map(path => `<div class="drop-zone upload-zone" data-path="${path}" style="cursor:pointer">Upload ${this.getChannelLabel(path)}</div>`).join('')}
           </div>
         </div>
       ` : `
@@ -619,7 +702,7 @@ export class NCTransferPanel extends HTMLElement {
           if (cleanContent.startsWith('%')) cleanContent = cleanContent.slice(1).trimStart();
           if (cleanContent.endsWith('%')) cleanContent = cleanContent.slice(0, -1).trimEnd();
           const finalContent = `\n${cleanContent}\n%`;
-          await this.transferClient.downloadProgram(this.ipAddress, 0, finalContent);
+          await this.transferClient.downloadProgram(this.ipAddress, 0, finalContent, undefined, this.getPAFileExtension());
           alert('PA file pushed successfully as one .PA file.');
           return;
         }
@@ -665,7 +748,7 @@ export class NCTransferPanel extends HTMLElement {
           const finalContent = `\n${cleanContent}\n%`;
           
           try {
-            await this.transferClient.downloadProgram(this.ipAddress, p, finalContent);
+            await this.transferClient.downloadProgram(this.ipAddress, p, finalContent, undefined, this.getChannelFileExtension(p));
             uploadedPaths.push(p);
           } catch(e) {
             console.warn(`Failed to push to Path ${p}`, e);
@@ -687,7 +770,7 @@ export class NCTransferPanel extends HTMLElement {
         if (cleanContent.endsWith('%')) cleanContent = cleanContent.slice(0, -1).trimEnd();
         const finalContent = `\n${cleanContent}\n%`;
         
-        await this.transferClient.downloadProgram(this.ipAddress, pathNo, finalContent);
+        await this.transferClient.downloadProgram(this.ipAddress, pathNo, finalContent, undefined, this.getChannelFileExtension(pathNo));
         alert(`File pushed to Path ${pathNo} successfully!`);
       }
     } catch(e) {

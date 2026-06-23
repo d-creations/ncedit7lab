@@ -220,6 +220,63 @@ async def index():
 # --- Existing CGI Route ---
 
 
+@app.get("/api/machines")
+async def get_machines():
+    """Return available machines with their configurations including file extension info."""
+    config_path = resolve_machines_config_path()
+    machines = []
+
+    try:
+        if config_path is not None and config_path.exists():
+            with open(config_path, "r") as f:
+                machines_data = json.load(f)
+
+            # First pass: collect base machine configs
+            base_configs: dict = {}
+            for key, config in machines_data.items():
+                if isinstance(config, dict):
+                    base_configs[key] = config
+                    machines.append({
+                        "machineName": key,
+                        "controlType": config.get("control_type", "FANUC"),
+                        "channels": config.get("channels", 1),
+                        "machineType": config.get("machine_type", "MILL"),
+                        "fileExtensions": config.get("file_extensions", {}),
+                    })
+
+            # Second pass: resolve aliases
+            for key, config in machines_data.items():
+                if isinstance(config, str) and config in base_configs:
+                    base_cfg = base_configs[config]
+                    machines.append({
+                        "machineName": key,
+                        "controlType": base_cfg.get("control_type", "FANUC"),
+                        "channels": base_cfg.get("channels", 1),
+                        "machineType": base_cfg.get("machine_type", "MILL"),
+                        "fileExtensions": base_cfg.get("file_extensions", {}),
+                    })
+    except Exception as e:
+        logging.error("Failed to read machines.json for /api/machines: %s", e)
+
+    if not machines:
+        machines = [
+            {
+                "machineName": "FANUC_MILL",
+                "controlType": "FANUC",
+                "channels": 1,
+                "machineType": "MILL",
+                "fileExtensions": {
+                    "multifile": True,
+                    "main": [".PA", ".txt"],
+                    "subprogram": [],
+                    "channels": {"1": [".PA", ""], "2": [".p-2"], "3": [".p-3"]},
+                },
+            },
+        ]
+
+    return {"machines": machines, "success": True}
+
+
 @app.post("/cgiserver")
 async def cgiserver(request: Request):
     try:

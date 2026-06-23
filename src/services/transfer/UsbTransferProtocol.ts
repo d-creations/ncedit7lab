@@ -24,7 +24,7 @@ export class UsbTransferProtocol implements ITransferProtocol {
     return res.program_text;
   }
 
-  async downloadProgram(rootPath: string, pathNo: number, programText: string): Promise<void> {
-    await this.backend.transferDownload(rootPath, pathNo, programText, 0, 'usb');
+  async downloadProgram(rootPath: string, pathNo: number, programText: string, _port?: number, fileExtension?: string): Promise<void> {
+    await this.backend.transferDownload(rootPath, pathNo, programText, 0, 'usb', undefined, fileExtension);
   }
 }

@@ -22,7 +22,7 @@ class ProtocolClient:
     def delete_program(self, prog_num: int, path_no: int = 0):
         raise NotImplementedError
         
-    def download_program(self, program_text: str, path_no: int = 0):
+    def download_program(self, program_text: str, path_no: int = 0, file_extension: Optional[str] = None):
         raise NotImplementedError
         
     def upload_program(self, prog_num: int, path_no: int = 0) -> str:

@@ -24,7 +24,7 @@ export class FocasTransferProtocol implements ITransferProtocol {
     return res.program_text;
   }
 
-  async downloadProgram(ip: string, pathNo: number, programText: string, port: number = 8193): Promise<void> {
+  async downloadProgram(ip: string, pathNo: number, programText: string, port: number = 8193, _fileExtension?: string): Promise<void> {
     await this.backend.transferDownload(ip, pathNo, programText, port, 'focas', this.driverPath);
   }
 }

@@ -3,7 +3,6 @@
 import type {
   MachineProfile,
   MachineType,
-  MachineRegexPatterns,
   ServerMachineData,
 } from '@core/types';
 import { BackendGateway } from './BackendGateway';
@@ -64,73 +63,7 @@ export class MachineService {
 
   private getDefaultMachines(): MachineProfile[] {
     return [
-      {
-        machineName: 'FANUC_MILL',
-        controlType: 'FANUC',
-        axes: ['X', 'Y', 'Z'],
-        feedLimits: { min: 0, max: 20000 },
-        defaultTools: [],
-        availableChannels: 1,
-        regexPatterns: this.getFanucRegexPatterns(),
-        variablePrefix: '#',
-      },
-      {
-        machineName: 'SIEMENS_840D',
-        controlType: 'SIEMENS',
-        axes: ['X', 'Y', 'Z'],
-        feedLimits: { min: 0, max: 20000 },
-        defaultTools: [],
-        availableChannels: 1,
-        regexPatterns: this.getSiemensRegexPatterns(),
-        variablePrefix: 'R',
-      }
     ];
-  }
-
-  private getFanucRegexPatterns(): MachineRegexPatterns {
-    return {
-      tools: {
-        pattern: 'T([1-9]|[1-9][0-9]{1,3})(?!\\d)',
-        description: 'Tools T1-T9999',
-        range: { min: 1, max: 9999 },
-      },
-      variables: {
-        pattern: '#(\\d+)',
-        description: 'Variables #1 - #9999',
-        range: { min: 1, max: 9999 },
-      },
-      keywords: {
-        pattern: '([A-Z])(\\s*[+-]?\\d+(?:\\.\\d+)?)',
-        description: 'Standard Fanuc Keywords',
-        codes: {
-          g_codes: ['G0', 'G1', 'G2', 'G3'],
-          program_control: ['M0', 'M1', 'M3', 'M5', 'M30'],
-        },
-      },
-    };
-  }
-
-  private getSiemensRegexPatterns(): MachineRegexPatterns {
-    return {
-      tools: {
-        pattern: 'T([1-9]|[1-9][0-9]{1,3})(?!\\d)',
-        description: 'Tools T1-T9999',
-        range: { min: 1, max: 9999 },
-      },
-      variables: {
-        pattern: 'R(\\d+)',
-        description: 'R Parameters',
-        range: { min: 0, max: 9999 },
-      },
-      keywords: {
-        pattern: '(?:CYCLE|POCKET|HOLES|SLOT)\\d+|WORKPIECE|([A-Z])(\\s*[+-]?\\d+(?:\\.\\d+)?)',
-        description: 'Siemens Keywords and G-codes',
-        codes: {
-          g_codes: ['G0', 'G1', 'G2', 'G3'],
-          program_control: ['M0', 'M1', 'M3', 'M5', 'M30', 'M17'],
-        },
-      },
-    };
   }
 }
 

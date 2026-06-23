@@ -21,6 +21,7 @@ class TransferDownloadData(BaseModel):
     protocol: str
     port: Optional[int] = None
     driver_path: Optional[str] = None
+    file_extension: Optional[str] = None  # Machine-config-derived file extension (e.g. ".P1", ".p-2", ".PA", "")
 
 def get_client(protocol: str, driver_path: Optional[str] = None) -> ProtocolClient:
     try:

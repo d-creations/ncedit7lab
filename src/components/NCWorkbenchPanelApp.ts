@@ -3,17 +3,19 @@ import './NCErrorsPanelContent';
 import './NCTransferPanel';
 import './NCTemplatesPanel';
 import { ServiceRegistry } from '@core/ServiceRegistry';
-import { EVENT_BUS_TOKEN, STATE_SERVICE_TOKEN, PARSER_SERVICE_TOKEN, FILE_MANAGER_SERVICE_TOKEN, CONFIG_SERVICE_TOKEN } from '@core/ServiceTokens';
+import { EVENT_BUS_TOKEN, STATE_SERVICE_TOKEN, PARSER_SERVICE_TOKEN, FILE_MANAGER_SERVICE_TOKEN, CONFIG_SERVICE_TOKEN, MACHINE_SERVICE_TOKEN } from '@core/ServiceTokens';
 import type { ChannelId, ExecutedProgramResult, VariableValue } from '@core/types';
 import { EventBus, EVENT_NAMES, type EventSubscription } from '@services/EventBus';
 import { ParserService } from '@services/ParserService';
 import type { IFileManagerService } from '@services/IFileManagerService';
 import { StateService } from '@services/StateService';
+import { MachineService } from '@services/MachineService';
 import type { IConfigService } from '@services/config/IConfigService';
 import type { WorkbenchTab } from '@services/HostBridgeService';
 
 export class NCWorkbenchPanelApp extends HTMLElement {
   private stateService: StateService;
+  private machineService: MachineService;
   private eventBus: EventBus;
   private parserService: ParserService;
   private fileManager: IFileManagerService;
@@ -30,6 +32,7 @@ export class NCWorkbenchPanelApp extends HTMLElement {
     super();
     const registry = ServiceRegistry.getInstance();
     this.stateService = registry.get(STATE_SERVICE_TOKEN);
+    this.machineService = registry.get(MACHINE_SERVICE_TOKEN);
     this.eventBus = registry.get(EVENT_BUS_TOKEN);
     this.parserService = registry.get(PARSER_SERVICE_TOKEN);
     this.fileManager = registry.get(FILE_MANAGER_SERVICE_TOKEN);
@@ -52,6 +55,19 @@ export class NCWorkbenchPanelApp extends HTMLElement {
     this.attachEventListeners();
     this.subscribeToState();
     this.attachHostListeners();
+
+    // Initialize machine service so NCTransferPanel can read fileExtensions from machine config.
+    // Fire-and-forget: failures are handled inside init() with a fallback.
+    this.machineService.init().then(() => {
+      const machines = this.machineService.getMachines();
+      if (machines.length > 0) {
+        this.stateService.setMachines(machines);
+        // Only set a default machine if none has been selected yet
+        if (!this.stateService.getState().globalMachine) {
+          this.stateService.setGlobalMachine(machines[0].machineName);
+        }
+      }
+    }).catch(() => { /* init() already handles errors internally */ });
   }
 
   disconnectedCallback() {

@@ -321,12 +321,13 @@ def list_machines() -> Dict[str, Any]:
 
     machines = get_available_machines()
 
-    # Add regex patterns to each machine
+    # Add regex patterns and file extensions to each machine
     for machine in machines:
         if get_machine_regex_patterns:
             machine["regexPatterns"] = get_machine_regex_patterns(machine["controlType"])
         config = get_machine_config(machine["machineName"])
         machine["variablePrefix"] = config.variable_prefix
+        machine["fileExtensions"] = config.file_extensions if isinstance(config.file_extensions, dict) else {}
 
     return {
         "machines": machines,

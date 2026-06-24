@@ -259,21 +259,7 @@ async def get_machines():
         logging.error("Failed to read machines.json for /api/machines: %s", e)
 
     if not machines:
-        machines = [
-            {
-                "machineName": "FANUC_MILL",
-                "controlType": "FANUC",
-                "channels": 1,
-                "machineType": "MILL",
-                "fileExtensions": {
-                    "multifile": True,
-                    "main": [".PA", ".txt"],
-                    "subprogram": [],
-                    "channels": {"1": [".PA", ""], "2": [".p-2"], "3": [".p-3"]},
-                },
-            },
-        ]
-
+        return {"machines": [], "success": False}
     return {"machines": machines, "success": True}
 
 

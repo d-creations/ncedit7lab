@@ -326,8 +326,9 @@ def list_machines() -> Dict[str, Any]:
         if get_machine_regex_patterns:
             machine["regexPatterns"] = get_machine_regex_patterns(machine["controlType"])
         config = get_machine_config(machine["machineName"])
-        machine["variablePrefix"] = config.variable_prefix
-        machine["fileExtensions"] = config.file_extensions if isinstance(config.file_extensions, dict) else {}
+        machine["variablePrefix"] = getattr(config, "variable_prefix", "")
+        file_extensions = getattr(config, "file_extensions", {})
+        machine["fileExtensions"] = file_extensions if isinstance(file_extensions, dict) else {}
 
     return {
         "machines": machines,
@@ -719,15 +720,7 @@ async def cgiserver_import(request: Request):
     # Determine control type based on machine name
     # Default to SIEMENS_MILL (Siemens-style) when no machine is specified
     first_machine = machine_names[0] if machine_names else ""
-    is_siemens_mill = "SIEMENS" in first_machine.upper()
-    is_fanuc_mill = "FANUC_MILL" in first_machine.upper()
-    
-    # If no machine specified, default to Siemens mill
-    if not first_machine:
-        is_siemens_mill = True
-
-    if not is_siemens_mill and not is_fanuc_mill:
-        apply_turn_axis_defaults(init_states, first_machine)
+    apply_turn_axis_defaults(init_states, first_machine)
 
     # Create a control that can handle multiple canals and run the engine.
     engine_output = None

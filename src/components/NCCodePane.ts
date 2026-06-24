@@ -422,7 +422,7 @@ export class NCCodePane extends HTMLElement {
     if (activeMachine && activeMachine.controlType) {
         this.applySyntaxRules(activeMachine.controlType);
     } else {
-        this.applySyntaxRules("FANUC_MILL");
+      return
     }
   }
 

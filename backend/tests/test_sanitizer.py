@@ -14,10 +14,11 @@ def test_duplicate_axis_removal():
             assert len(matches) <= 1, f"axis {axis} appears {len(matches)} times in '{p}'"
 
 
-def test_strip_parentheses():
+def test_strip_parentheses_disabled():
+    # Parentheses stripping is disabled because Siemens uses them for parameters
     program = "G1 X10 (this is a comment) Y20"
     sanitized = mi.sanitize_program(program)
-    assert "(" not in sanitized and ")" not in sanitized
+    assert "(" in sanitized and ")" in sanitized
 
 
 def test_semicolon_split():
@@ -25,3 +26,14 @@ def test_semicolon_split():
     sanitized = mi.sanitize_program(program)
     assert "G1 X10" in sanitized
     assert "G1 Y20" in sanitized
+
+def test_variable_assignment_preservation():
+    # Make sure we don't treat variables starting with axis letters as axes!
+    program = "Z_POS = Z_POS - ZINKREMENT"
+    sanitized = mi.sanitize_program(program)
+    assert "Z_POS = Z_POS - ZINKREMENT" in sanitized
+
+    program2 = "DEF REAL ENDZ = 10"
+    sanitized2 = mi.sanitize_program(program2)
+    assert "ENDZ = 10" in sanitized2 or "DEF REAL ENDZ = 10" in sanitized2
+

@@ -431,7 +431,7 @@ def sanitize_program(program: str) -> str:
 
     def sanitize_subcmd(sub: str) -> str:
         parts = [p for p in sub.strip().split() if p != ""]
-        axis_re = re.compile(r'^([XYZIJKxyzijk])')
+        axis_re = re.compile(r'^([A-Z])(?![A-Za-z_])', re.IGNORECASE)
         last_axis = {}
         others = []
         # record last index for axis tokens and keep others with position
@@ -659,7 +659,8 @@ async def cgiserver_import(request: Request):
 
     for entry in machinedata:
         prog = entry.get("program", "")
-        prog_sanitized = sanitize_program(prog)
+        # Bypass sanitizing for testing @todo check nessessary 
+        prog_sanitized = prog
         programs.append(prog_sanitized)
         canal_names.append(str(entry.get("canalNr", "1")))
         machine_names.append(str(entry.get("machineName", "SIEMENS_MILL")))

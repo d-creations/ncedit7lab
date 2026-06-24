@@ -1,6 +1,6 @@
 {
   "name": "ncedit7lab",
-  "version": "0.1.0",
+  "version": "1.0.1",
   "description": "Multi-channel CNC NC code editor with plot interface focus on Star CNC machines",
   "type": "module",
   "engines": {

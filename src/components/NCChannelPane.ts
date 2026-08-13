@@ -271,6 +271,7 @@ export class NCChannelPane extends HTMLElement {
           font-family: 'Consolas', monospace;
           font-size: 13px;
           font-weight: 700;
+          white-space: nowrap;
         }
         .channel-content {
           display: flex;
@@ -354,6 +355,9 @@ export class NCChannelPane extends HTMLElement {
             padding: 6px 12px !important;
             font-size: 13px !important;
             min-height: 32px !important;
+          }
+          .alignment-button {
+            padding: 2px !important;
           }
         }
       </style>

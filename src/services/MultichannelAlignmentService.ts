@@ -44,14 +44,20 @@ export class MultichannelAlignmentService {
     }
 
     const insertedByChannel = linesByChannel.map(() => 0);
+    const firstAnchorIndexes = anchorsByChannel.map(
+      (anchors) => anchors.get(commonMarkers[0])!,
+    );
     let insertedLineCount = 0;
-    commonMarkers.forEach((marker) => {
+    commonMarkers.slice(1).forEach((marker) => {
       const currentIndexes = anchorsByChannel.map(
         (anchors, channelIndex) => anchors.get(marker)! + insertedByChannel[channelIndex],
       );
-      const targetIndex = Math.max(...currentIndexes);
+      const relativeIndexes = currentIndexes.map(
+        (lineIndex, channelIndex) => lineIndex - firstAnchorIndexes[channelIndex],
+      );
+      const targetIndex = Math.max(...relativeIndexes);
       currentIndexes.forEach((lineIndex, channelIndex) => {
-        const paddingCount = targetIndex - lineIndex;
+        const paddingCount = targetIndex - relativeIndexes[channelIndex];
         if (paddingCount === 0) return;
         linesByChannel[channelIndex].splice(lineIndex, 0, ...Array(paddingCount).fill('  '));
         insertedByChannel[channelIndex] += paddingCount;

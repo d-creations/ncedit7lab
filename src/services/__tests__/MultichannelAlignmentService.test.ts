@@ -20,7 +20,7 @@ describe('MultichannelAlignmentService', () => {
     });
   });
 
-  it('adds two-space padding lines to align API-defined synchronization markers', async () => {
+  it('adds two-space padding lines between API-defined synchronization markers', async () => {
     const result = await service.alignPrograms(
       [
         { channelId: '1', program: 'G0 X0\nSYNC1\nG1 X1\nG1 X2\nSYNC2' },
@@ -30,9 +30,9 @@ describe('MultichannelAlignmentService', () => {
     );
 
     expect(getLineAlignmentSyntax).toHaveBeenCalledOnce();
-    expect(result.alignmentCount).toBe(4);
+    expect(result.alignmentCount).toBe(2);
     expect(result.programs.map(({ program }) => program)).toEqual([
-      'G0 X0\n  \n  \nSYNC1\nG1 X1\nG1 X2\nSYNC2',
+      'G0 X0\nSYNC1\nG1 X1\nG1 X2\nSYNC2',
       'G0 Z0\nG1 Z1\nG1 Z2\nSYNC1\n  \n  \nSYNC2',
     ]);
   });
@@ -90,11 +90,11 @@ describe('MultichannelAlignmentService', () => {
       'FANUC',
     );
 
-    expect(result.alignmentCount).toBe(4);
+    expect(result.alignmentCount).toBe(2);
     expect(result.programs.map(({ program }) => program)).toEqual([
-      '  \nM200P123\nG1 X1\nM202P123',
+      'M200P123\nG1 X1\nM202P123',
       'G1 Z1\nM200P123\n  \nM202P123',
-      '  \nM200P123\n  \nM202P123',
+      'M200P123\n  \nM202P123',
     ]);
   });
 });

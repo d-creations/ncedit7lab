@@ -38,6 +38,18 @@ export interface ProgramToolDefinition {
   cutting?: CuttingPart[];
   orientation?: Vector3;
 }
+export interface ProgramToolOffsetDefinition {
+  offsetNumber: number;
+  toolNumber?: ToolIdentifier;
+  qValue?: number;
+  rValue?: number;
+  lengthValue?: number;
+  edgeNumber?: number;
+}
+export interface ProgramOffsetsDefinition {
+  offsetScope: 'global' | 'tool';
+  offsets: ProgramToolOffsetDefinition[];
+}
 /** Material position is its centre in the initial program work-coordinate system. */
 export type ProgramMaterialDefinition = PartTransform &
   (
@@ -119,6 +131,51 @@ export function validateToolIdentifier(value: unknown): asserts value is ToolIde
 export function validateCompensation(value: { Q?: unknown; R?: unknown }): void {
   if (value.Q !== undefined) finite(value.Q, 'Q');
   if (value.R !== undefined) finite(value.R, 'R');
+}
+export function validateProgramOffsets(value: unknown): ProgramOffsetsDefinition {
+  const definition = record(value);
+  keys(definition, ['offsetScope', 'offsets']);
+  if (definition.offsetScope !== 'global' && definition.offsetScope !== 'tool') {
+    fail('Offset scope must be global or tool');
+  }
+  if (!Array.isArray(definition.offsets) || definition.offsets.length > METADATA_LIMITS.blocks) {
+    fail('Invalid offset table');
+  }
+  const seen = new Set<string>();
+  const offsets = definition.offsets.map((candidate) => {
+    const offset = record(candidate);
+    keys(offset, ['offsetNumber', 'toolNumber', 'qValue', 'rValue', 'lengthValue', 'edgeNumber']);
+    if (!Number.isSafeInteger(offset.offsetNumber) || (offset.offsetNumber as number) < 0) {
+      fail('Offset number must be a nonnegative safe integer');
+    }
+    if (definition.offsetScope === 'tool') {
+      validateToolIdentifier(offset.toolNumber);
+    } else if (offset.toolNumber !== undefined) {
+      fail('Global offsets must not include a tool identifier');
+    }
+    for (const [name, field] of [
+      ['Q', offset.qValue], ['R', offset.rValue], ['length', offset.lengthValue],
+    ] as const) {
+      if (field !== undefined) finite(field, `${name} offset`);
+    }
+    if (offset.edgeNumber !== undefined &&
+      (!Number.isSafeInteger(offset.edgeNumber) || (offset.edgeNumber as number) < 0)) {
+      fail('Edge number must be a nonnegative safe integer');
+    }
+    if (offset.qValue === undefined && offset.rValue === undefined &&
+      offset.lengthValue === undefined && offset.edgeNumber === undefined) {
+      fail('An offset record needs Q, R, length or edge data');
+    }
+    const duplicateKey = JSON.stringify([
+      definition.offsetScope === 'tool' ? typeof offset.toolNumber : 'global',
+      definition.offsetScope === 'tool' ? offset.toolNumber : null,
+      offset.offsetNumber,
+    ]);
+    if (seen.has(duplicateKey)) fail('Duplicate tool-offset assignment');
+    seen.add(duplicateKey);
+    return offset as unknown as ProgramToolOffsetDefinition;
+  });
+  return { offsetScope: definition.offsetScope, offsets };
 }
 function validateHolder(value: unknown, index: number): void {
   const part = record(value);

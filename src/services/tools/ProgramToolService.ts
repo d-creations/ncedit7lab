@@ -1,10 +1,10 @@
-import type { ChannelId, ToolValue } from '@core/types';
+import type { ChannelId, ToolOffsetValue, ToolSelectionPolicy, ToolValue } from '@core/types';
 import { SimulationCommentCodec } from './SimulationCommentCodec';
 import type {
   SimulationCommentSyntax,
   SimulationMetadataParseResult,
 } from './SimulationCommentCodec';
-import { freezeMetadata, MetadataValidationError, METADATA_LIMITS } from './SimulationMetadata';
+import { freezeMetadata, MetadataValidationError, METADATA_LIMITS, validateToolIdentifier } from './SimulationMetadata';
 import type { DeepReadonly, ToolIdentifier } from './SimulationMetadata';
 import { toToolValues } from './toToolValues';
 import type { EventBus, EventSubscription } from '../EventBus';
@@ -42,6 +42,7 @@ export type ProgramToolSnapshot = DeepReadonly<
 /** Read-only capture of the exact supplied revision. No parse cache, catalog, document writer or network. */
 export class ProgramToolService {
   private temporaryValues = new Map<string, ToolValue[]>();
+  private temporaryOffsets = new Map<string, ToolOffsetValue[]>();
   private closeSubscription?: EventSubscription;
 
   constructor(private readonly codec: SimulationCommentCodec, eventBus?: EventBus) {
@@ -49,12 +50,16 @@ export class ProgramToolService {
       for (const key of this.temporaryValues.keys()) {
         if (JSON.parse(key)[1] === data.programId) this.temporaryValues.delete(key);
       }
+      for (const key of this.temporaryOffsets.keys()) {
+        if (JSON.parse(key)[1] === data.programId) this.temporaryOffsets.delete(key);
+      }
     });
   }
 
   dispose(): void {
     this.closeSubscription?.unsubscribe();
     this.temporaryValues.clear();
+    this.temporaryOffsets.clear();
   }
 
   /** Transitional Q/R inputs are program-scoped, never persisted as geometry or comments. */
@@ -72,6 +77,77 @@ export class ProgramToolService {
 
   getTemporaryToolValues(identity: ProgramIdentity): ToolValue[] {
     return (this.temporaryValues.get(programIdentityKey(identity)) ?? []).map((value) => ({ ...value }));
+  }
+
+  /** Offset registers are independent from physical tool defaults and remain program-scoped. */
+  setTemporaryToolOffsets(
+    identity: ProgramIdentity,
+    policy: ToolSelectionPolicy,
+    offsets: ToolOffsetValue[],
+  ): void {
+    const validated = this.validateToolOffsets(policy, offsets);
+    const key = programIdentityKey(identity);
+    if (validated.length) this.temporaryOffsets.set(key, validated);
+    else this.temporaryOffsets.delete(key);
+  }
+
+  getTemporaryToolOffsets(identity: ProgramIdentity): ToolOffsetValue[] {
+    return structuredClone(this.temporaryOffsets.get(programIdentityKey(identity)) ?? []);
+  }
+
+  getExecutionToolOffsets(
+    identity: ProgramIdentity,
+    policy?: ToolSelectionPolicy,
+  ): ToolOffsetValue[] | undefined {
+    const offsets = this.getTemporaryToolOffsets(identity);
+    if (!offsets.length) return undefined;
+    if (!policy) throw new MetadataValidationError('Selected machine has no tool-offset policy');
+    return this.validateToolOffsets(policy, offsets);
+  }
+
+  private validateToolOffsets(
+    policy: ToolSelectionPolicy,
+    offsets: ToolOffsetValue[],
+  ): ToolOffsetValue[] {
+    const seen = new Set<string>();
+    return offsets.map((offset) => {
+      if (!Number.isSafeInteger(offset.offsetNumber) || offset.offsetNumber < 0) {
+        throw new MetadataValidationError('Offset number must be a nonnegative integer');
+      }
+      if (policy.offsetScope === 'tool') {
+        if (offset.toolNumber === undefined) {
+          throw new MetadataValidationError('This machine requires a tool identifier for each offset');
+        }
+        validateToolIdentifier(offset.toolNumber);
+      } else if (offset.toolNumber !== undefined) {
+        throw new MetadataValidationError('Global offsets must not include a tool identifier');
+      }
+      for (const [name, value] of Object.entries({
+        Q: offset.qValue,
+        R: offset.rValue,
+        length: offset.lengthValue,
+      })) {
+        if (value !== undefined && !Number.isFinite(value)) {
+          throw new MetadataValidationError(`${name} offset must be finite`);
+        }
+      }
+      if (offset.edgeNumber !== undefined &&
+        (!Number.isSafeInteger(offset.edgeNumber) || offset.edgeNumber < 0)) {
+        throw new MetadataValidationError('Edge number must be a nonnegative integer');
+      }
+      if (offset.qValue === undefined && offset.rValue === undefined &&
+        offset.lengthValue === undefined && offset.edgeNumber === undefined) {
+        throw new MetadataValidationError('An offset record needs Q, R, length or edge data');
+      }
+      const key = JSON.stringify([
+        policy.offsetScope === 'tool' ? typeof offset.toolNumber : 'global',
+        policy.offsetScope === 'tool' ? offset.toolNumber : null,
+        offset.offsetNumber,
+      ]);
+      if (seen.has(key)) throw new MetadataValidationError('Duplicate tool-offset assignment');
+      seen.add(key);
+      return { ...offset };
+    });
   }
 
   /** A managed assignment owns its entire Q/R record; no hidden temporary fallback for it. */

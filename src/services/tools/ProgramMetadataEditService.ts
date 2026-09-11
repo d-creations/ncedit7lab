@@ -1,4 +1,8 @@
-import type { ProgramToolDefinition, ToolIdentifier } from './SimulationMetadata';
+import type {
+  ProgramOffsetsDefinition,
+  ProgramToolDefinition,
+  ToolIdentifier,
+} from './SimulationMetadata';
 import { MetadataValidationError } from './SimulationMetadata';
 import { SimulationCommentCodec } from './SimulationCommentCodec';
 import type { SimulationCommentSyntax } from './SimulationCommentCodec';
@@ -27,6 +31,17 @@ export interface ProgramToolUpdateResult {
   message: string;
 }
 
+export interface ProgramOffsetsUpdateRequest {
+  requestId: string;
+  channelId: string;
+  documentId: string;
+  programId: string;
+  expectedRevision: string | number;
+  expectedText: string;
+  syntax: SimulationCommentSyntax;
+  offsets: ProgramOffsetsDefinition;
+}
+
 function sameIdentifier(left: ToolIdentifier, right: ToolIdentifier): boolean {
   return typeof left === typeof right && left === right;
 }
@@ -44,6 +59,28 @@ export class ProgramMetadataEditService {
     if (matches.length > 1) throw new MetadataValidationError('Conflicting managed tool blocks');
     const eol = text.includes('\r\n') ? '\r\n' : '\n';
     const encoded = this.codec.encodeTool(tool, syntax, eol);
+    const existing = matches[0];
+    if (existing) {
+      const trailingEol = /\r\n$/.test(existing.raw) ? '\r\n' : /[\r\n]$/.test(existing.raw) ? '\n' : '';
+      return { startOffset: existing.startOffset, endOffset: existing.endOffset, text: encoded + trailingEol };
+    }
+    const separator = text.length === 0 || /(?:\r\n|\n|\r)$/.test(text) ? '' : eol;
+    return { startOffset: text.length, endOffset: text.length, text: `${separator}${encoded}${eol}` };
+  }
+
+  planOffsetsUpdate(
+    text: string,
+    offsets: ProgramOffsetsDefinition,
+    syntax: SimulationCommentSyntax,
+  ): ProgramTextEdit {
+    const parsed = this.codec.parse(text, syntax);
+    if (parsed.diagnostics.length) {
+      throw new MetadataValidationError(parsed.diagnostics.map((diagnostic) => diagnostic.message).join('; '));
+    }
+    const matches = parsed.blocks.filter((block) => block.kind === 'OFFSETS');
+    if (matches.length > 1) throw new MetadataValidationError('Conflicting managed offset blocks');
+    const eol = text.includes('\r\n') ? '\r\n' : '\n';
+    const encoded = this.codec.encodeOffsets(offsets, syntax, eol);
     const existing = matches[0];
     if (existing) {
       const trailingEol = /\r\n$/.test(existing.raw) ? '\r\n' : /[\r\n]$/.test(existing.raw) ? '\n' : '';

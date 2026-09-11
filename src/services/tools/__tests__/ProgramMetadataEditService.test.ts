@@ -48,4 +48,23 @@ describe('ProgramMetadataEditService', () => {
       toolNumber: 1, description: '', cutting: [{ type: 'endMill', diameter: 0, length: 10 }],
     }, semicolon)).toThrow();
   });
+
+  it('appends and replaces one managed offset table without changing NC code', () => {
+    const source = 'T1\r\nG1 X1\r\n';
+    const first = service.planOffsetsUpdate(source, {
+      offsetScope: 'global', offsets: [{ offsetNumber: 2, rValue: 0.4 }],
+    }, semicolon);
+    const withOffsets = apply(source, first);
+    expect(withOffsets.startsWith(source)).toBe(true);
+    expect(withOffsets).toContain('; @NCE-SIM:1 BEGIN OFFSETS\r\n');
+    const second = service.planOffsetsUpdate(withOffsets, {
+      offsetScope: 'global', offsets: [{ offsetNumber: 3, lengthValue: 12 }],
+    }, semicolon);
+    const updated = apply(withOffsets, second);
+    expect(updated.match(/BEGIN OFFSETS/g)).toHaveLength(1);
+    expect(codec.parse(updated, semicolon).offsets).toEqual({
+      offsetScope: 'global', offsets: [{ offsetNumber: 3, lengthValue: 12 }],
+    });
+    expect(updated).toContain('T1\r\nG1 X1\r\n');
+  });
 });

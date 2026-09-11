@@ -19,6 +19,18 @@ describe('ExecutedProgramService', () => {
   });
 
   describe('centre-mode request boundary', () => {
+    it('passes independent offset records without coercing tool identifiers', async () => {
+      vi.mocked(mockBackend.requestPlot).mockResolvedValue({ canal: {} });
+      const toolOffsets = [
+        { toolNumber: '1', offsetNumber: 2, rValue: 0.4 },
+        { toolNumber: '1', offsetNumber: 3, rValue: 0.8 },
+        { toolNumber: 1, offsetNumber: 2, rValue: 2 },
+      ];
+      await service.executeProgram({ channelId: '1', program: 'T="1"\nD2',
+        machineName: 'SIEMENS_840DI', toolOffsets });
+      expect(vi.mocked(mockBackend.requestPlot).mock.calls[0][0].machinedata[0].toolOffsets)
+        .toEqual(toolOffsets);
+    });
     it.each([undefined, 'effective', 'center'] as const)(
       'enforces centre mode for single and multi-channel requests with legacy mode %s',
       async (mode: ToolPathMode | undefined) => {

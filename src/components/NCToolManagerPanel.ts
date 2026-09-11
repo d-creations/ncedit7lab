@@ -1,4 +1,4 @@
-import type { ChannelId, ParseArtifacts } from '@core/types';
+import type { ChannelId, ParseArtifacts, ToolOffsetValue } from '@core/types';
 import { ServiceRegistry } from '@core/ServiceRegistry';
 import {
   EVENT_BUS_TOKEN,
@@ -32,7 +32,7 @@ import type {
 const CHANNELS: ChannelId[] = ['1', '2', '3'];
 const INSERT_SHAPES: InsertShape[] = ['C', 'D', 'V', 'W', 'T', 'S', 'R', 'E', 'H', 'O', 'P', 'L', 'A', 'B', 'K'];
 
-type ManagerTab = 'library' | 'program';
+type ManagerTab = 'library' | 'program' | 'offsets';
 
 function exactKey(value: ToolIdentifier): string {
   return JSON.stringify([typeof value, value]);
@@ -74,6 +74,7 @@ export class NCToolManagerPanel extends HTMLElement {
   private detectedIdentifiers: ToolIdentifier[] = [];
   private selectedProgramKey?: string;
   private programDraft?: ProgramToolDefinition;
+  private offsetDrafts: ToolOffsetValue[] = [];
   private pendingRequestId?: string;
   private status = '';
   private statusKind: 'info' | 'success' | 'error' = 'info';
@@ -150,6 +151,7 @@ export class NCToolManagerPanel extends HTMLElement {
       machine?.simulationCommentSyntax,
     );
     this.programDefinitions = structuredClone(this.programSnapshot.tools) as ProgramToolDefinition[];
+    this.offsetDrafts = this.programTools.getTemporaryToolOffsets(this.programSource.identity);
     const parse = await this.parserService.parse(this.programSource.text, this.channelId, {
       regexPatterns: machine?.regexPatterns,
     });
@@ -226,9 +228,11 @@ export class NCToolManagerPanel extends HTMLElement {
         <nav class="manager-tabs" aria-label="Tool manager views">
           <button class="manager-tab ${this.activeTab === 'library' ? 'active' : ''}" data-manager-tab="library">Library</button>
           <button class="manager-tab ${this.activeTab === 'program' ? 'active' : ''}" data-manager-tab="program">Program Tools</button>
+          <button class="manager-tab ${this.activeTab === 'offsets' ? 'active' : ''}" data-manager-tab="offsets">Offsets</button>
         </nav>
         <div class="manager-body">
-          ${this.activeTab === 'library' ? this.renderLibrary() : this.renderProgram()}
+          ${this.activeTab === 'library' ? this.renderLibrary() :
+            this.activeTab === 'program' ? this.renderProgram() : this.renderOffsets()}
         </div>
         <div id="manager-status" class="status ${this.statusKind}" role="status" aria-live="polite">${this.escape(this.status)}</div>
       </div>
@@ -300,6 +304,48 @@ export class NCToolManagerPanel extends HTMLElement {
           ${this.renderToolForm(this.programDraft, 'program')}
         ` : '<div class="empty">Select a detected tool or create an assignment.</div>'}
       </main>`;
+  }
+
+  private renderOffsets(): string {
+    const policy = this.stateService.getState().activeMachine?.toolSelection;
+    if (!this.programSource) {
+      return '<main class="offset-editor-pane"><div class="empty">Open a program before editing offsets.</div></main>';
+    }
+    if (!policy) {
+      return '<main class="offset-editor-pane"><div class="notice warning">The selected machine does not advertise a tool-offset policy. Offset editing is disabled.</div></main>';
+    }
+    const address = policy.offsetAddress ?? 'offset';
+    const scopeText = policy.offsetScope === 'tool'
+      ? `${address} records are keyed by exact tool identifier and offset number.`
+      : `${address} records are shared by this channel and do not contain a tool identifier.`;
+    return `<main class="offset-editor-pane">
+      <div class="offset-header">
+        <div><h3>Program Offset Table</h3><p>${this.escape(scopeText)}</p></div>
+        <button class="button" id="add-offset" type="button">+ Add Offset</button>
+      </div>
+      <div class="offset-table" role="table" aria-label="Program offsets">
+        ${this.offsetDrafts.length ? this.offsetDrafts.map((offset, index) =>
+          this.renderOffsetRow(offset, index, policy.offsetScope === 'tool')).join('') :
+          '<div class="empty">No explicit offsets. Tool defaults remain available until an offset table is saved.</div>'}
+      </div>
+      <div class="notice warning">Offsets are temporary execution data for this open program. They are not library geometry and are not written to NC comments yet.</div>
+      <div class="form-actions"><button class="button primary" id="save-offsets" type="button">Save Offset Table</button></div>
+    </main>`;
+  }
+
+  private renderOffsetRow(offset: ToolOffsetValue, index: number, toolScoped: boolean): string {
+    return `<div class="offset-row" data-offset-row="${index}" role="row">
+      ${toolScoped ? `<label>Identifier type<select data-offset-field="tool-kind">
+        <option value="number" ${typeof offset.toolNumber === 'number' ? 'selected' : ''}>Number</option>
+        <option value="name" ${typeof offset.toolNumber === 'string' ? 'selected' : ''}>Name</option>
+      </select></label><label>Tool<input data-offset-field="tool" value="${this.escape(String(offset.toolNumber ?? ''))}"></label>` : ''}
+      <label>Offset<input data-offset-field="number" type="number" min="0" step="1" value="${offset.offsetNumber}"></label>
+      <label>Q<input data-offset-field="q" type="number" step="any" value="${offset.qValue ?? ''}" placeholder="Optional"></label>
+      <label>R<input data-offset-field="r" type="number" step="any" value="${offset.rValue ?? ''}" placeholder="Optional"></label>
+      <label>Length<input data-offset-field="length" type="number" step="any" value="${offset.lengthValue ?? ''}" placeholder="Optional"></label>
+      <label>Edge<input data-offset-field="edge" type="number" min="0" step="1" value="${offset.edgeNumber ?? ''}" placeholder="Optional"></label>
+      <button class="icon-button" data-remove-offset="${index}" type="button" title="Remove offset" aria-label="Remove offset">×</button>
+    </div>`;
   }
 
   private renderToolForm(tool: LibraryToolDefinition | ProgramToolDefinition, mode: ManagerTab): string {
@@ -478,6 +524,17 @@ export class NCToolManagerPanel extends HTMLElement {
     this.shadowRoot?.querySelector<HTMLSelectElement>('#holder-type')?.addEventListener('change', () => this.updateGeometryVisibility());
     this.shadowRoot?.querySelector<HTMLSelectElement>('#cutting-type')?.addEventListener('change', () => this.updateGeometryVisibility());
     this.shadowRoot?.querySelector<HTMLButtonElement>('#export-library')?.addEventListener('click', () => void this.exportLibrary());
+    this.shadowRoot?.querySelector<HTMLButtonElement>('#add-offset')?.addEventListener('click', () => {
+      this.offsetDrafts.push(this.newOffset());
+      this.render();
+    });
+    this.shadowRoot?.querySelectorAll<HTMLButtonElement>('[data-remove-offset]').forEach((button) => {
+      button.addEventListener('click', () => {
+        this.offsetDrafts.splice(Number(button.dataset.removeOffset), 1);
+        this.render();
+      });
+    });
+    this.shadowRoot?.querySelector<HTMLButtonElement>('#save-offsets')?.addEventListener('click', () => this.saveOffsets());
     const fileInput = this.shadowRoot?.querySelector<HTMLInputElement>('#library-file');
     this.shadowRoot?.querySelector<HTMLButtonElement>('#import-library')?.addEventListener('click', () => fileInput?.click());
     fileInput?.addEventListener('change', () => void this.importLibrary(fileInput));
@@ -714,6 +771,72 @@ export class NCToolManagerPanel extends HTMLElement {
     }
   }
 
+  private newOffset(): ToolOffsetValue {
+    const used = new Set(this.offsetDrafts.map((offset) => offset.offsetNumber));
+    let offsetNumber = 1;
+    while (used.has(offsetNumber)) offsetNumber++;
+    const policy = this.stateService.getState().activeMachine?.toolSelection;
+    return {
+      offsetNumber,
+      ...(policy?.offsetScope === 'tool'
+        ? { toolNumber: this.selectedProgramIdentifier ?? this.detectedIdentifiers[0] ?? 1 }
+        : {}),
+      rValue: 0,
+    };
+  }
+
+  private readOffsets(): ToolOffsetValue[] {
+    const policy = this.stateService.getState().activeMachine?.toolSelection;
+    if (!policy) throw new Error('Selected machine has no tool-offset policy');
+    return Array.from(this.shadowRoot?.querySelectorAll<HTMLElement>('[data-offset-row]') ?? []).map((row) => {
+      const input = (field: string) => row.querySelector<HTMLInputElement>(`[data-offset-field="${field}"]`);
+      const offsetNumber = requiredNumber(input('number'));
+      const qValue = optionalNumber(input('q'));
+      const rValue = optionalNumber(input('r'));
+      const lengthValue = optionalNumber(input('length'));
+      const edgeNumber = optionalNumber(input('edge'));
+      let toolNumber: ToolIdentifier | undefined;
+      if (policy.offsetScope === 'tool') {
+        const raw = input('tool')?.value.trim() ?? '';
+        if (!raw) throw new Error('Tool identifier is required for this machine');
+        const kind = row.querySelector<HTMLSelectElement>('[data-offset-field="tool-kind"]')?.value;
+        if (kind === 'number') {
+          const numeric = Number(raw);
+          if (!Number.isSafeInteger(numeric) || numeric < 0) {
+            throw new Error('Numeric tool identifier must be a nonnegative integer');
+          }
+          toolNumber = numeric;
+        } else toolNumber = raw;
+      }
+      return {
+        offsetNumber,
+        ...(toolNumber === undefined ? {} : { toolNumber }),
+        ...optionalField('qValue', qValue),
+        ...optionalField('rValue', rValue),
+        ...optionalField('lengthValue', lengthValue),
+        ...optionalField('edgeNumber', edgeNumber),
+      };
+    });
+  }
+
+  private saveOffsets(): void {
+    try {
+      if (!this.programSource) throw new Error('No active program owns this offset table');
+      const policy = this.stateService.getState().activeMachine?.toolSelection;
+      if (!policy) throw new Error('Selected machine has no tool-offset policy');
+      const offsets = this.readOffsets();
+      this.programTools.setTemporaryToolOffsets(this.programSource.identity, policy, offsets);
+      this.offsetDrafts = this.programTools.getTemporaryToolOffsets(this.programSource.identity);
+      this.eventBus.publish(EVENT_NAMES.PROGRAM_TOOL_OFFSETS_CHANGED, {
+        identity: this.programSource.identity,
+        offsets: structuredClone(this.offsetDrafts),
+      });
+      this.setStatus(`${this.offsetDrafts.length} offset record(s) saved for Plot`, 'success');
+    } catch (cause) {
+      this.setStatus(cause instanceof Error ? cause.message : String(cause), 'error');
+    }
+  }
+
   private setStatus(message: string, kind: 'info' | 'success' | 'error', render = true): void {
     this.status = message;
     this.statusKind = kind;
@@ -770,6 +893,11 @@ export class NCToolManagerPanel extends HTMLElement {
       .tool-meta,.section-label { color:var(--vscode-descriptionForeground,#57606a); font-size:10px; }
       .tool-meta.complete { color:#2f8f4e; }
       .tool-form { display:flex; flex-direction:column; gap:0; }
+      .offset-editor-pane { grid-column:1 / -1; min-height:0; overflow:auto; display:flex; flex-direction:column; }
+      .offset-header { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:12px; border-bottom:1px solid var(--vscode-editorGroup-border,#d0d7de); }
+      .offset-table { display:grid; gap:1px; background:var(--vscode-editorGroup-border,#d0d7de); }
+      .offset-row { display:grid; grid-template-columns:repeat(auto-fit,minmax(90px,1fr)) 32px; gap:8px; align-items:end; padding:9px; background:var(--vscode-editor-background,#fff); }
+      .icon-button { width:30px; height:30px; border:1px solid var(--vscode-widget-border,#d0d7de); border-radius:3px; color:inherit; background:var(--vscode-button-secondaryBackground,#eaeef2); cursor:pointer; font-size:18px; }
       section { display:grid; gap:9px; padding:12px; border-bottom:1px solid var(--vscode-editorGroup-border,#d0d7de); }
       .section-heading { display:flex; justify-content:space-between; align-items:baseline; gap:8px; }
       .field-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }

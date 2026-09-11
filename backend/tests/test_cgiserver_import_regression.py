@@ -5,8 +5,39 @@ import hashlib
 import hmac
 import json
 from types import SimpleNamespace
+import pytest
 
 from backend import main_import as api
+
+
+def test_api_loads_channel_scoped_offsets_and_preserves_named_ids(monkeypatch):
+    loaded = []
+    original_loader = api.load_tool_data
+
+    def capture(state, tools, offsets):
+        original_loader(state, tools, offsets)
+        loaded.append(state.extra)
+
+    monkeypatch.setattr(api, "load_tool_data", capture)
+    payload = {"machinedata": [
+        {"machineName": "SIEMENS_840DI", "canalNr": "1", "program": "G0 X1",
+         "toolValues": [{"toolNumber": 1}, {"toolNumber": "1"}],
+         "toolOffsets": [{"toolNumber": "1", "offsetNumber": 2, "rValue": 0.4}]},
+        {"machineName": "SIEMENS_840DI", "canalNr": "2", "program": "G0 X2",
+         "toolOffsets": [{"toolNumber": "1", "offsetNumber": 2, "rValue": 0.8}]},
+    ]}
+    asyncio.run(api.cgiserver_import(FakeRequest(payload)))
+    assert set(loaded[0]["tool_compensation_data"]) == {1, "1"}
+    assert loaded[0]["tool_offset_data"][("1", 2)]["rValue"] == 0.4
+    assert loaded[1]["tool_offset_data"][("1", 2)]["rValue"] == 0.8
+
+
+def test_api_rejects_invalid_offset_data():
+    payload = {"machinedata": [{"machineName": "FANUC_MILL", "program": "T1",
+                               "toolOffsets": [{"offsetNumber": -1}]}]}
+    with pytest.raises(api.HTTPException) as error:
+        asyncio.run(api.cgiserver_import(FakeRequest(payload)))
+    assert error.value.status_code == 400
 
 
 class FakeRequest:
@@ -204,6 +235,7 @@ def test_cgiserver_import_returns_line_alignment_syntax():
 
 def test_list_machines_uses_configured_control_family(monkeypatch):
     machine = {"machineName": "FANUC_MILL", "controlType": "FANUC_MILL"}
+    requested_regex_profiles = []
     config = SimpleNamespace(
         control_type="FANUC",
         machine_type="MILL",
@@ -211,7 +243,11 @@ def test_list_machines_uses_configured_control_family(monkeypatch):
         file_extensions={},
     )
     monkeypatch.setattr(api, "get_available_machines", lambda: [machine])
-    monkeypatch.setattr(api, "get_machine_regex_patterns", lambda _control_type: {})
+    monkeypatch.setattr(
+        api,
+        "get_machine_regex_patterns",
+        lambda machine_name: requested_regex_profiles.append(machine_name) or {},
+    )
     monkeypatch.setattr(api, "get_machine_config", lambda _machine_name: config)
 
     body = api.list_machines()
@@ -221,6 +257,7 @@ def test_list_machines_uses_configured_control_family(monkeypatch):
     assert body["machines"][0]["simulationCommentSyntax"] == {
         "kind": "block", "open": "(", "close": ")",
     }
+    assert requested_regex_profiles == ["FANUC_MILL"]
 
 
 def test_simulation_comment_capabilities_are_explicit_and_bounded():

@@ -43,6 +43,24 @@ export interface MachineRegexPatterns {
   keywords: KeywordPatternDefinition;
 }
 
+export interface ToolSelectionPolicy {
+  mode: 'direct' | 'packed' | 'station';
+  namedTools: boolean;
+  offsetScope: 'global' | 'tool';
+  offsetAddress?: string;
+  offsetDigits?: number;
+  subtoolCodes?: number[];
+}
+
+export interface ServerToolSelectionPolicy {
+  mode: ToolSelectionPolicy['mode'];
+  named_tools?: boolean;
+  offset_scope?: ToolSelectionPolicy['offsetScope'];
+  offset_address?: string;
+  offset_digits?: number;
+  subtool_codes?: number[];
+}
+
 export interface MachineProfile {
   /** Explicit read capability only; does not authorize header insertion or conversion. */
   simulationCommentSyntax?: SimulationCommentSyntax;
@@ -55,6 +73,7 @@ export interface MachineProfile {
   kinematics?: unknown;
   availableChannels: number;
   regexPatterns?: MachineRegexPatterns;
+  toolSelection?: ToolSelectionPolicy;
   variablePrefix?: string;
   fileExtensions?: FileExtensionConfig;
 }
@@ -180,6 +199,17 @@ export interface ToolValue {
   toolNumber: number | string;
   qValue?: number;
   rValue?: number;
+  lengthValue?: number;
+  edgeNumber?: number;
+}
+
+export interface ToolOffsetValue {
+  offsetNumber: number;
+  toolNumber?: number | string;
+  qValue?: number;
+  rValue?: number;
+  lengthValue?: number;
+  edgeNumber?: number;
 }
 
 export interface CustomVariable {
@@ -194,6 +224,7 @@ export interface PlotRequest {
     machineName: MachineType;
     canalNr: string | number;
     toolValues?: ToolValue[];
+    toolOffsets?: ToolOffsetValue[];
     customVariables?: CustomVariable[];
   }>;
 }
@@ -256,6 +287,7 @@ export interface ServerMachineData {
   machineType?: string;
   variablePrefix?: string;
   regexPatterns?: MachineRegexPatterns;
+  toolSelection?: ServerToolSelectionPolicy;
   fileExtensions?: FileExtensionConfig;
 }
 

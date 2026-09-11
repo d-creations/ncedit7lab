@@ -1,4 +1,4 @@
-import type { CustomVariable, MachineProfile, PlotMetadata, ToolValue } from '@core/types';
+import type { CustomVariable, MachineProfile, PlotMetadata, ToolValue, ToolOffsetValue } from '@core/types';
 import type { ProgramToolSnapshot } from './ProgramToolService';
 import type { DeepReadonly } from './SimulationMetadata';
 
@@ -7,6 +7,7 @@ export interface PlotRunInput {
   machineName: string;
   machineProfile?: MachineProfile;
   toolValues: ToolValue[];
+  toolOffsets?: ToolOffsetValue[];
   customVariables: CustomVariable[];
 }
 

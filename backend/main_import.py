@@ -94,6 +94,7 @@ try:
         get_machine_config,
     )
     from ncplot7py.domain.cnc_state import CNCState
+    from ncplot7py.domain.tool_compensation import load_tool_data
     from ncplot7py.domain.exceptions import ExceptionNode
 except Exception as e:
     logging.error(f"Failed to import ncplot7py: {e}")
@@ -420,8 +421,9 @@ def list_machines() -> Dict[str, Any]:
     # Add regex patterns and file extensions to each machine
     for machine in machines:
         if get_machine_regex_patterns:
-            machine["regexPatterns"] = get_machine_regex_patterns(machine["controlType"])
+            machine["regexPatterns"] = get_machine_regex_patterns(machine["machineName"])
         config = get_machine_config(machine["machineName"])
+        machine["toolSelection"] = getattr(config, "tool_selection", {})
         machine["controlType"] = getattr(config, "control_type", machine["controlType"])
         machine["machineType"] = getattr(config, "machine_type", "")
         machine["variablePrefix"] = getattr(config, "variable_prefix", "")
@@ -862,20 +864,10 @@ async def cgiserver_import(request: Request):
             
             # Store tool Q/R values in state extra for later use by tool compensation handlers
             tool_vals = tool_values_list[idx] if idx < len(tool_values_list) else []
-            tool_data = {}
-            for tv in tool_vals:
-                t_num = tv.get("toolNumber")
-                if t_num is not None:
-                    try:
-                        key = int(t_num)
-                    except ValueError:
-                        key = str(t_num)
-
-                    tool_data[key] = {
-                        "qValue": tv.get("qValue"),  # Quadrant Q1-Q9
-                        "rValue": tv.get("rValue"),  # Tool radius R
-                    }
-            state.extra["tool_compensation_data"] = tool_data
+            try:
+                load_tool_data(state, tool_vals, machinedata[idx].get("toolOffsets", []))
+            except ValueError as error:
+                raise HTTPException(status_code=400, detail=str(error)) from error
             init_states.append(state)
         else:
             init_states.append(None)

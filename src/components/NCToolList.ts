@@ -3,7 +3,7 @@ import { EVENT_BUS_TOKEN, PROGRAM_TOOL_SERVICE_TOKEN, FILE_MANAGER_SERVICE_TOKEN
 import { EventBus, EVENT_NAMES, type EventSubscription } from '@services/EventBus';
 import type { ParseArtifacts, NcParseResult, ToolRegisterEntry, ToolValue, ChannelId } from '@core/types';
 import type { IFileManagerService } from '@services/IFileManagerService';
-import type { ProgramToolService, ProgramIdentity } from '@services/tools/ProgramToolService';
+import { programIdentityKey, type ProgramToolService, type ProgramIdentity } from '@services/tools/ProgramToolService';
 
 interface ToolWithValues extends ToolRegisterEntry {
   qValue?: number;
@@ -17,6 +17,7 @@ export class NCToolList extends HTMLElement {
   private programTools: ProgramToolService;
   private fileManager: IFileManagerService;
   private subscriptions: EventSubscription[] = [];
+  private offsetCount = 0;
 
   static get observedAttributes() {
     return ['channel-id'];
@@ -45,8 +46,18 @@ export class NCToolList extends HTMLElement {
     this.subscriptions.push(this.eventBus.subscribe('program:active_changed', (data: { channelId: string }) => {
       if (data.channelId !== this.channelId) return;
       this.tools = [];
+      this.offsetCount = 0;
       this.updateList();
     }));
+    this.subscriptions.push(this.eventBus.subscribe(
+      EVENT_NAMES.PROGRAM_TOOL_OFFSETS_CHANGED,
+      (data: { identity: ProgramIdentity; offsets: unknown[] }) => {
+        const identity = this.getProgramIdentity();
+        if (!identity || programIdentityKey(identity) !== programIdentityKey(data.identity)) return;
+        this.offsetCount = data.offsets.length;
+        this.updateList();
+      },
+    ));
     // Listen for parse results
     this.subscriptions.push(this.eventBus.subscribe(
       EVENT_NAMES.PARSE_COMPLETED,
@@ -55,6 +66,7 @@ export class NCToolList extends HTMLElement {
           // Preserve existing Q and R values for tools that still exist
           const existingToolValues = new Map<number | string, { qValue?: number; rValue?: number }>();
           const identity = this.getProgramIdentity();
+          this.offsetCount = identity ? this.programTools.getTemporaryToolOffsets(identity).length : 0;
           (identity ? this.programTools.getTemporaryToolValues(identity) : []).forEach((tool) => {
             if (tool.qValue !== undefined || tool.rValue !== undefined) {
               existingToolValues.set(tool.toolNumber, {
@@ -124,6 +136,14 @@ export class NCToolList extends HTMLElement {
           border-bottom: 1px solid var(--vscode-editorGroup-border, #181a1f);
           font-weight: bold;
           color: var(--vscode-textLink-foreground, #61afef);
+          display: flex;
+          justify-content: space-between;
+          gap: 8px;
+        }
+
+        .offset-summary {
+          color: var(--vscode-descriptionForeground, #7f848e);
+          font-weight: normal;
         }
 
         .tool-list {
@@ -208,7 +228,9 @@ export class NCToolList extends HTMLElement {
         }
       </style>
 
-      <div class="tool-header" title="Temporary overrides; managed program metadata takes precedence">Tools (temporary Q/R values)</div>
+      <div class="tool-header" title="Tool defaults and offset registers are stored separately">
+        <span>Program Tools</span><span id="offset-summary" class="offset-summary"></span>
+      </div>
       <div class="tool-list" id="list"></div>
     `;
   }
@@ -216,6 +238,10 @@ export class NCToolList extends HTMLElement {
   private updateList() {
     const list = this.shadowRoot?.getElementById('list');
     if (!list) return;
+    const offsetSummary = this.shadowRoot?.getElementById('offset-summary');
+    if (offsetSummary) {
+      offsetSummary.textContent = `${this.offsetCount} offset${this.offsetCount === 1 ? '' : 's'}`;
+    }
 
     list.innerHTML = '';
 

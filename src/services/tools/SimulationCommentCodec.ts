@@ -1,10 +1,15 @@
 import {
   METADATA_LIMITS,
   MetadataValidationError,
+  validateProgramOffsets,
   validateProgramSetup,
   validateProgramTool,
 } from './SimulationMetadata';
-import type { ProgramSetupDefinition, ProgramToolDefinition } from './SimulationMetadata';
+import type {
+  ProgramOffsetsDefinition,
+  ProgramSetupDefinition,
+  ProgramToolDefinition,
+} from './SimulationMetadata';
 
 /** Explicit caller-verified standalone comment syntax. Never inferred from highlighting regexes.
  * This is NOT a header placement or machine-conversion capability declaration.
@@ -27,11 +32,12 @@ export interface MetadataSourceBlock {
   endLine: number;
   version: string;
   kind: string;
-  value?: ProgramSetupDefinition | ProgramToolDefinition;
+  value?: ProgramSetupDefinition | ProgramToolDefinition | ProgramOffsetsDefinition;
 }
 export interface SimulationMetadataParseResult {
   setup?: ProgramSetupDefinition;
   tools: ProgramToolDefinition[];
+  offsets?: ProgramOffsetsDefinition;
   blocks: MetadataSourceBlock[];
   diagnostics: MetadataDiagnostic[];
 }
@@ -168,6 +174,14 @@ export class SimulationCommentCodec {
       eol,
     );
   }
+  encodeOffsets(
+    offsets: ProgramOffsetsDefinition,
+    syntax: SimulationCommentSyntax,
+    eol: '\n' | '\r\n' = '\n',
+  ): string {
+    const validated = validateProgramOffsets(offsets);
+    return this.encode('OFFSETS', validated, ['offsetScope', 'offsets'], syntax, eol);
+  }
   private encode(
     kind: string,
     value: object,
@@ -271,7 +285,7 @@ export class SimulationCommentCodec {
         kind,
       };
       result.blocks.push(block);
-      if (version !== '1' || !['SETUP', 'TOOL'].includes(kind)) {
+      if (version !== '1' || !['SETUP', 'TOOL', 'OFFSETS'].includes(kind)) {
         result.diagnostics.push({
           code: 'unsupported',
           message: `Unsupported metadata ${version}/${kind}`,
@@ -297,12 +311,17 @@ export class SimulationCommentCodec {
           if (result.setup) error('Duplicate SETUP block');
           block.value = setup;
           result.setup = setup;
-        } else {
+        } else if (kind === 'TOOL') {
           const tool = validateProgramTool(value);
           if (seenTools.has(tool.toolNumber)) error('Duplicate tool definition');
           seenTools.add(tool.toolNumber);
           block.value = tool;
           result.tools.push(tool);
+        } else {
+          const offsets = validateProgramOffsets(value);
+          if (result.offsets) error('Duplicate OFFSETS block');
+          block.value = offsets;
+          result.offsets = offsets;
         }
       } catch (cause) {
         result.diagnostics.push({

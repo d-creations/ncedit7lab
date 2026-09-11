@@ -7,6 +7,7 @@ import type {
   PlotRequest,
   PlotResponse,
   ToolValue,
+  ToolOffsetValue,
   ToolPathMode,
   CustomVariable,
   BackendPlotChannel,
@@ -22,6 +23,7 @@ export interface ExecutionRequest {
   program: string;
   machineName: MachineType;
   toolValues?: ToolValue[];
+  toolOffsets?: ToolOffsetValue[];
   customVariables?: CustomVariable[];
 }
 
@@ -61,6 +63,7 @@ export class ExecutedProgramService {
       program: executionProgram(input.snapshot),
       machineName: input.machineName,
       toolValues: structuredClone(input.toolValues),
+      toolOffsets: structuredClone(input.toolOffsets),
       customVariables: structuredClone(input.customVariables),
     }));
     freezeMetadata(captured);
@@ -213,6 +216,7 @@ export class ExecutedProgramService {
         machineName: request.machineName,
         canalNr: request.channelId,
         toolValues: request.toolValues,
+        ...(request.toolOffsets !== undefined ? { toolOffsets: request.toolOffsets } : {}),
         customVariables: request.customVariables,
       })),
     };

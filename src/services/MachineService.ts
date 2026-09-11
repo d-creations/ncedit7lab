@@ -4,9 +4,26 @@ import type {
   MachineProfile,
   MachineType,
   ServerMachineData,
+  ServerToolSelectionPolicy,
+  ToolSelectionPolicy,
 } from '@core/types';
 import { BackendGateway } from './BackendGateway';
 import { EventBus, EVENT_NAMES } from './EventBus';
+
+function toToolSelectionPolicy(
+  source?: ServerToolSelectionPolicy,
+): ToolSelectionPolicy | undefined {
+  if (!source) return undefined;
+
+  return {
+    mode: source.mode,
+    namedTools: source.named_tools ?? false,
+    offsetScope: source.offset_scope ?? 'global',
+    offsetAddress: source.offset_address,
+    offsetDigits: source.offset_digits,
+    subtoolCodes: source.subtool_codes,
+  };
+}
 
 export class MachineService {
   private machines: MachineProfile[] = [];
@@ -57,6 +74,7 @@ export class MachineService {
       defaultTools: [],
       availableChannels: 3,
       regexPatterns: data.regexPatterns,
+      toolSelection: toToolSelectionPolicy(data.toolSelection),
       variablePrefix: data.variablePrefix,
       fileExtensions: data.fileExtensions,
       simulationCommentSyntax: data.simulationCommentSyntax,

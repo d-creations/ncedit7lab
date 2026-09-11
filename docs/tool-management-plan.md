@@ -4,6 +4,17 @@ Status: tool-management design proposed; backend/frontend execution metadata and
 
 ### Implementation progress — editor Plot actions
 
+Backend tool/offset contract update (2026-09-11): machine `tool_selection` policy
+now generates tool-detection metadata and drives existing execution-chain tool
+handlers. Optional `machinedata[].toolOffsets` records separate compensation
+registers from physical tool IDs; FANUC registers are global per channel,
+Siemens records include the exact numeric/named tool ID. `ExecutionRequest` and
+immutable `PlotRunInput` can carry these records. Existing UI/program TOOL
+comments still provide one Q/R default per tool; offset-table editing and
+comment persistence remain pending. Explicit offset tables do not merge with
+or fall back to defaults when a selected record is missing. This is not a claim
+of implemented turning nose, tool-length, M6 sequencing or TCP simulation.
+
 - Channel-header and global Plot capture the exact pending ACE text, document/program/channel identity and editor-instance revision before execution. Editor revisions are local read tokens, not extension-host acknowledgment/edit contracts. Without an editor, the file-manager source is used and exact text is also checked for staleness; empty editor text never falls back to old state.
 - Optional holder/cutting length and edge data are parsed from program comments only when Plot starts, and retained in the immutable run. No library or geometry network fetch occurs on editing/cursor movement. Missing geometry and Q/R-only tools remain valid; no meshes or accurate placement are claimed.
 - Machine profiles carry optional explicit `simulationCommentSyntax` from `/api/machines`. Nothing is inferred from machine names or highlighting regexes. The deployed backend must advertise this capability to enable embedded metadata; its current local profile adapter does not manufacture it. Metadata with missing/invalid syntax or diagnostics blocks the request visibly. Header writing/conversion and automatic setup-machine restoration remain pending; a setup/selected-machine conflict is rejected.

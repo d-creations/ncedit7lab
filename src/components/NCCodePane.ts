@@ -7,7 +7,12 @@ import { EventBus, EVENT_NAMES, EventSubscription } from '@services/EventBus';
 import type { ChannelId, ExecutedProgramResult, FaultDetail, NCProgram } from '@core/types';
 import type { TemplateInsertEventPayload } from '@services/templates/TemplateInsertionService';
 import type { ProgramSource } from '@services/tools/ProgramToolService';
-import type { ProgramMetadataEditService, ProgramToolUpdateRequest, ProgramToolUpdateResult } from '@services/tools/ProgramMetadataEditService';
+import type {
+  ProgramMetadataEditService,
+  ProgramOffsetsUpdateRequest,
+  ProgramToolUpdateRequest,
+  ProgramToolUpdateResult,
+} from '@services/tools/ProgramMetadataEditService';
 // @ts-expect-error - ACE module doesn't export types correctly
 import ace from 'ace-builds/src-noconflict/ace';
 import 'ace-builds/src-noconflict/mode-text';
@@ -39,6 +44,7 @@ export class NCCodePane extends HTMLElement {
   private scrollSyncSubscription?: EventSubscription;
   private editorScrollSubscription?: EventSubscription;
   private toolUpdateSubscription?: EventSubscription;
+  private offsetsUpdateSubscription?: EventSubscription;
   private metadataEdits: ProgramMetadataEditService;
   private scrollSyncEnabled = false;
   private isApplyingSyncedScroll = false;
@@ -129,6 +135,10 @@ export class NCCodePane extends HTMLElement {
     this.toolUpdateSubscription = this.eventBus.subscribe(
       EVENT_NAMES.PROGRAM_TOOL_UPDATE_REQUEST,
       (data: unknown) => this.applyProgramToolUpdate(data as ProgramToolUpdateRequest),
+    );
+    this.offsetsUpdateSubscription = this.eventBus.subscribe(
+      EVENT_NAMES.PROGRAM_OFFSETS_UPDATE_REQUEST,
+      (data: unknown) => this.applyProgramOffsetsUpdate(data as ProgramOffsetsUpdateRequest),
     );
 
     this.scrollSyncSubscription = this.eventBus.subscribe(
@@ -233,6 +243,7 @@ export class NCCodePane extends HTMLElement {
       this.editorScrollSubscription.unsubscribe();
     }
     this.toolUpdateSubscription?.unsubscribe();
+    this.offsetsUpdateSubscription?.unsubscribe();
     if (this.resizeObserver) {
       this.resizeObserver.disconnect();
     }
@@ -640,6 +651,29 @@ export class NCCodePane extends HTMLElement {
         message: cause instanceof Error ? cause.message : String(cause) };
     }
     this.eventBus.publish(EVENT_NAMES.PROGRAM_TOOL_UPDATE_RESULT, result);
+  }
+
+  private applyProgramOffsetsUpdate(request: ProgramOffsetsUpdateRequest): void {
+    if (request.channelId !== this.channelId) return;
+    let result: ProgramToolUpdateResult;
+    try {
+      const source = this.getProgramSource();
+      if (!source || source.identity.documentId !== request.documentId ||
+        source.identity.programId !== request.programId ||
+        source.revision !== request.expectedRevision || source.text !== request.expectedText) {
+        throw new Error('Program changed; reload Offsets before applying');
+      }
+      const edit = this.metadataEdits.planOffsetsUpdate(source.text, request.offsets, request.syntax);
+      const nextText = source.text.slice(0, edit.startOffset) + edit.text + source.text.slice(edit.endOffset);
+      this.setValue(nextText);
+      this.syncEditorValue(nextText);
+      result = { requestId: request.requestId, channelId: this.channelId, success: true,
+        message: `Applied ${request.offsets.offsets.length} offset record(s) to the program` };
+    } catch (cause) {
+      result = { requestId: request.requestId, channelId: this.channelId, success: false,
+        message: cause instanceof Error ? cause.message : String(cause) };
+    }
+    this.eventBus.publish(EVENT_NAMES.PROGRAM_OFFSETS_UPDATE_RESULT, result);
   }
 
   private applyTemplateInsert(payload: TemplateInsertEventPayload): void {

@@ -102,6 +102,21 @@ describe('SimulationCommentCodec', () => {
     }
   });
 
+  it('round-trips one exact typed offset table independently from tool geometry', () => {
+    const offsets = {
+      offsetScope: 'tool' as const,
+      offsets: [
+        { toolNumber: 1, offsetNumber: 2, rValue: 0.4 },
+        { toolNumber: '1', offsetNumber: 2, qValue: 0, lengthValue: 12, edgeNumber: 3 },
+      ],
+    };
+    const encoded = codec.encodeOffsets(offsets, semicolon);
+    const parsed = codec.parse(`${codec.encodeTool(drill, semicolon)}\n${encoded}`, semicolon);
+    expect(parsed.diagnostics).toEqual([]);
+    expect(parsed.offsets).toEqual(offsets);
+    expect(parsed.tools).toEqual([drill]);
+  });
+
   it('preserves unsupported versions and geometry verbatim with diagnostics', () => {
     for (const raw of [
       block(['toolNumber=1', 'description="future"'], 'TOOL', '2'),

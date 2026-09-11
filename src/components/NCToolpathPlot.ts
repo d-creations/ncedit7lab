@@ -110,7 +110,8 @@ export class NCToolpathPlot extends HTMLElement {
       this.refreshStaleness();
     }));
     for (const name of ['program:content_changed', 'program:active_changed', EVENT_NAMES.MACHINE_CHANGED,
-      EVENT_NAMES.PROGRAM_TOOL_VALUES_CHANGED, EVENT_NAMES.CUSTOM_VARIABLES_CHANGED, EVENT_NAMES.PARSE_COMPLETED]) {
+      EVENT_NAMES.PROGRAM_TOOL_VALUES_CHANGED, EVENT_NAMES.PROGRAM_TOOL_OFFSETS_CHANGED,
+      EVENT_NAMES.CUSTOM_VARIABLES_CHANGED, EVENT_NAMES.PARSE_COMPLETED]) {
       this.subscriptions.push(this.eventBus.subscribe(name, () => this.refreshStaleness()));
     }
 
@@ -465,6 +466,10 @@ export class NCToolpathPlot extends HTMLElement {
           machineName,
           machineProfile: state.activeMachine,
           toolValues: this.programTools.getExecutionToolValues(snapshot),
+          toolOffsets: this.programTools.getExecutionToolOffsets(
+            snapshot.identity,
+            state.activeMachine?.toolSelection,
+          ),
           customVariables: this.readCustomVariables(channel.id),
         };
       });
@@ -513,6 +518,10 @@ export class NCToolpathPlot extends HTMLElement {
         state.globalMachine !== input.machineName ||
         JSON.stringify(state.activeMachine) !== JSON.stringify(input.machineProfile) ||
         JSON.stringify(this.programTools.getExecutionToolValues(snapshot)) !== JSON.stringify(input.toolValues) ||
+        JSON.stringify(this.programTools.getExecutionToolOffsets(
+          snapshot.identity,
+          state.activeMachine?.toolSelection,
+        )) !== JSON.stringify(input.toolOffsets) ||
         JSON.stringify(this.readCustomVariables(snapshot.identity.channelId)) !== JSON.stringify(input.customVariables);
     });
     if (this.stale) {

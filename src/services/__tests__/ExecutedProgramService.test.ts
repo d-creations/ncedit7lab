@@ -58,7 +58,11 @@ describe('ExecutedProgramService', () => {
         channelId: '1',
         program: 'G0 X10 Y10\nG1 X60',
         machineName: 'SIEMENS_MILL',
-      });
+      }, 'center');
+
+      expect(mockBackend.requestPlot).toHaveBeenCalledWith(
+        expect.objectContaining({ toolPathMode: 'center' }),
+      );
 
       expect(result.plotMetadata).toBeDefined();
       expect(result.plotMetadata?.segments).toHaveLength(2);
@@ -406,9 +410,11 @@ describe('ExecutedProgramService', () => {
           { channelId: '1', program: 'N10 G0 X0\nN20 G1 X1', machineName: 'CUSTOM_MACHINE' },
           { channelId: '2', program: 'N10 G0 Z0\nN20 G1 Z1', machineName: 'CUSTOM_MACHINE' },
         ],
+        'center',
       );
 
       expect(mockBackend.getLineAlignmentSyntax).not.toHaveBeenCalled();
+      expect(vi.mocked(mockBackend.requestPlot).mock.calls[0][0].toolPathMode).toBe('center');
       expect(vi.mocked(mockBackend.requestPlot).mock.calls[0][0].machinedata).toEqual([
         expect.objectContaining({ program: 'N10 G0 X0\nN20 G1 X1' }),
         expect.objectContaining({ program: 'N10 G0 Z0\nN20 G1 Z1' }),

@@ -10,6 +10,8 @@ export type ChannelId = '1' | '2' | '3';
 
 export type MachineType = string;
 
+export type ToolPathMode = 'effective' | 'center';
+
 export interface PatternRange {
   min: number;
   max: number;
@@ -175,6 +177,7 @@ export interface CustomVariable {
 }
 
 export interface PlotRequest {
+  toolPathMode: ToolPathMode;
   machinedata: Array<{
     program: string;
     machineName: MachineType;

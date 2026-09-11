@@ -1,6 +1,6 @@
 // StateService for central application state management
 
-import type { ChannelId, ChannelState, MachineProfile, MachineType } from '@core/types';
+import type { ChannelId, ChannelState, MachineProfile, MachineType, ToolPathMode } from '@core/types';
 import { EventBus, EVENT_NAMES } from './EventBus';
 
 export interface AppState {
@@ -8,6 +8,7 @@ export interface AppState {
   channels: Map<ChannelId, ChannelState>;
   activeMachine?: MachineProfile;
   globalMachine?: MachineType;
+  toolPathMode: ToolPathMode;
   uiSettings: UISettings;
   workbenchSelectedChannel: ChannelId;
   activeFileId?: string | null;
@@ -135,6 +136,7 @@ export class StateService {
       ]),
       activeProgramIds: new Map(),
       workbenchSelectedChannel: '1',
+      toolPathMode: 'effective',
       uiSettings: {
         timeGutterPosition: 'left',
         keywordListPosition: 'left',
@@ -212,6 +214,15 @@ export class StateService {
       this.persistState();
       this.eventBus.publish(EVENT_NAMES.MACHINE_CHANGED, { machine });
     }
+  }
+
+  setToolPathMode(toolPathMode: ToolPathMode): void {
+    if (this.state.toolPathMode === toolPathMode) return;
+
+    this.saveStateToHistory();
+    this.state.toolPathMode = toolPathMode;
+    this.persistState();
+    this.eventBus.publish(EVENT_NAMES.STATE_CHANGED, { toolPathMode });
   }
 
   updateUISettings(settings: Partial<UISettings>): void {

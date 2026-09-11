@@ -7,6 +7,7 @@ import type {
   PlotRequest,
   PlotResponse,
   ToolValue,
+  ToolPathMode,
   CustomVariable,
   VariableValue,
 } from '@core/types';
@@ -31,13 +32,17 @@ export class ExecutedProgramService {
     this.eventBus = eventBus;
   }
 
-  async executeProgram(request: ExecutionRequest): Promise<ExecutedProgramResult> {
+  async executeProgram(
+    request: ExecutionRequest,
+    toolPathMode: ToolPathMode = 'effective',
+  ): Promise<ExecutedProgramResult> {
     try {
       // Preprocess program: remove () {} characters as per server requirements
       const cleanProgram = this.preprocessProgram(request.program);
 
       // Build plot request
       const plotRequest: PlotRequest = {
+        toolPathMode,
         machinedata: [
           {
             program: cleanProgram,
@@ -78,7 +83,10 @@ export class ExecutedProgramService {
     }
   }
 
-  async executeMultipleChannels(requests: ExecutionRequest[]): Promise<ExecutedProgramResult[]> {
+  async executeMultipleChannels(
+    requests: ExecutionRequest[],
+    toolPathMode: ToolPathMode = 'effective',
+  ): Promise<ExecutedProgramResult[]> {
     try {
       // Preprocess all programs
       const machinedata = requests.map((req) => ({
@@ -90,7 +98,7 @@ export class ExecutedProgramService {
       }));
 
       // Build plot request
-      const plotRequest: PlotRequest = { machinedata };
+      const plotRequest: PlotRequest = { toolPathMode, machinedata };
 
       // Make server request
       const response: PlotResponse = await this.backend.requestPlot(plotRequest);

@@ -398,6 +398,7 @@ export class NCToolpathPlot extends HTMLElement {
       const activeChannels = this.stateService.getActiveChannels();
       const state = this.stateService.getState();
       const machineName = state.globalMachine || 'SIEMENS_MILL';
+      const toolPathMode = state.toolPathMode || 'effective';
 
       if (activeChannels.length === 0) {
         throw new Error('No active channels');
@@ -453,8 +454,8 @@ export class NCToolpathPlot extends HTMLElement {
 
       // Channel-header Plot requests must remain single-channel backend requests.
       const results = targetChannelId
-        ? [await this.executedProgramService.executeProgram(requests[0])]
-        : await this.executedProgramService.executeMultipleChannels(requests);
+        ? [await this.executedProgramService.executeProgram(requests[0], toolPathMode)]
+        : await this.executedProgramService.executeMultipleChannels(requests, toolPathMode);
 
       // Clear existing plot before adding new ones
       // Note: If we are plotting a single channel, we might want to keep others?

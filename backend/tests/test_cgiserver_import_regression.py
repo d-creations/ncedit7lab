@@ -76,6 +76,40 @@ def test_build_segments_does_not_infer_motion_from_timing():
     assert segment["traversal"] is None
 
 
+def test_build_segments_preserves_execution_occurrences_and_active_tools():
+    # Repeated lines are distinct occurrences; cycle primitives share a step.
+    entries = [
+        {"lineNumber": 10, "executionStep": 0, "toolNumber": 0},
+        {"lineNumber": 20, "executionStep": 5, "toolNumber": 2},
+        {"lineNumber": 20, "executionStep": 5, "toolNumber": 2},
+        {"lineNumber": 10, "executionStep": 9, "toolNumber": "DRILL_8"},
+        {"lineNumber": 30, "executionStep": 10, "toolNumber": "unknown"},
+        {"lineNumber": 40},
+        {"lineNumber": 50, "executionStep": None, "toolNumber": None},
+    ]
+    converted = api.build_segments_from_engine_output({
+        "plot": [
+            {"x": [0, 1], "y": [0, 0], "z": [0, 0], "t": 0.5, **entry}
+            for entry in entries
+        ],
+    })
+
+    assert [s["toolNumber"] for s in converted["segments"]] == [
+        0, 2, 2, "DRILL_8", "unknown", "unknown", None,
+    ]
+    assert [s["executionStep"] for s in converted["segments"]] == [
+        0, 5, 5, 9, 10, None, None,
+    ]
+    assert converted["executedLines"] == [10, 20, 20, 10, 30, 40, 50]
+    assert converted["timing"] == [0.5] * len(entries)
+    assert converted["lineTiming"]["20"] == 1.0
+
+    # A separate conversion must not inherit a previous channel's last tool.
+    other = api.build_segments_from_engine_output({"plot": [{"x": [0, 1]}]})
+    assert other["segments"][0]["toolNumber"] == "unknown"
+    assert other["segments"][0]["executionStep"] is None
+
+
 def test_nc_request_telemetry_uses_identity_without_program_content(monkeypatch):
     hmac_key = bytes(range(32))
     monkeypatch.setenv("TELEMETRY_USER_HMAC_KEY", base64.b64encode(hmac_key).decode("ascii"))

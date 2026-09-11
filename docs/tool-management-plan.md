@@ -1,6 +1,6 @@
 # Tool management and portable simulation metadata
 
-Status: proposed design, not implemented. Updated: 2026-09-11.
+Status: tool-management design proposed; local backend forwarding of active tool and execution-step metadata implemented and regression-tested. Remaining frontend/setup features are not implemented. Updated: 2026-09-11.
 
 ## 1. Main decision
 
@@ -122,7 +122,7 @@ Use degrees with fixed extrinsic X-then-Y-then-Z rotations (column-vector equiva
 
 ## 4. Machine information in the program
 
-Store only the exact backend `machineName` in the setup block, not a display label, repeated units or control type. The surrounding metadata marker carries the schema version. Resolve control/comment capabilities through that machine profile; metadata geometry is always mm by schema convention.
+Store the exact backend `machineName` and optional `material` in the setup block, not a display label, repeated units or control type. The surrounding metadata marker carries the schema version. Resolve control/comment capabilities through that machine profile; metadata geometry is always mm by schema convention.
 
 On open:
 
@@ -135,6 +135,69 @@ On open:
 The machine name is enough to select an installed profile. It is **not** a complete machine model: exact future reproduction also needs profile/engine versions and, eventually, kinematics and setup data. A profile revision/hash can later detect drift without copying the whole machine configuration into every NC file.
 
 Place the header near the top at a dialect-approved position, respecting mandatory `%`, program-number or Siemens file headers. Do not blindly prepend ahead of required syntax. For separate channel files, each must carry enough setup metadata to reopen independently. Verify multi-channel split/join round trips before choosing placement in combined containers.
+
+### Material in the program header
+
+Add one optional typed `material` object beside `machineName`. It is the **initial unmachined material**, not a tool, holder, fixture or evolving simulation result. Store the complete definition in the program so reopening needs no external setup file.
+
+| Type | Required size fields | Meaning |
+| --- | --- | --- |
+| `box` | `width`, `depth`, `height` | Rectangular material, sized along local X, Y and Z. |
+| `cylinder` | `diameter`, `length` | Solid round bar, with its axis along local Z before rotation; UI label: Round Bar. |
+
+Both support `position:[x,y,z]` and optional `rotation:[rx,ry,rz]` using the same degree/rotation-order convention as tool parts. Zero position and identity rotation are schema defaults and may be omitted. Do not store a redundant radius alongside bar diameter. Tubular material with an inner diameter is a possible later extension, not part of the initial solid-bar type.
+
+Define placement unambiguously: `position` locates the **centre of the material** in the program's initial work-coordinate system, not its minimum corner or a tool-local frame. Before rotation, a box occupies ±width/2, ±depth/2, ±height/2; a bar runs from -length/2 to +length/2 along Z. Rotation acts about this centre, then position translates it. No per-record `units` or `frame` field is needed because the versioned schema defines both conventions.
+
+Examples for the setup block (alternative material definitions, not two simultaneous workpieces):
+
+```text
+; material={"type":"box","width":100,"depth":60,"height":20,"position":[50,30,-10]}
+```
+
+This box spans X=0..100, Y=0..60 and Z=-20..0: the program origin is at a corner of its top face.
+
+```text
+; material={"type":"cylinder","diameter":40,"length":100,"position":[0,0,-50]}
+```
+
+This bar is centred on X=Y=0 and extends from Z=-100 to Z=0: useful when the turning origin is at the front face. These are metadata examples, not machining instructions. Line wrapping must use the same safe continuation codec as tool records.
+
+For future simulation, resolve the initial work-coordinate system to a fixed simulation/world transform at setup time. Subsequent G54/G55, G92 or other coordinate changes affect the toolpath interpretation, not the physical material position. Do not treat program coordinates as machine coordinates implicitly. If work-offset/kinematic transforms are unavailable, label the material preview as program-coordinate-only rather than claiming machine-space collision accuracy. All dimensions/positions remain mm, including lathe X placement: diameter-programming conventions must not double the physical material size or position.
+
+The setup UI gains a **Material** section: None / Box / Round Bar, type-specific dimensions, XYZ centre position, optional rotation and a preview showing the origin/axes. A top-face/front-face placement helper can calculate centre position instead of requiring the user to calculate half-dimensions. Validate positive finite sizes, finite transforms and sensible bounds; missing material means no material-removal setup, not an automatically guessed workpiece. Material name/alloy and physical machining properties are deferred.
+
+Committing the setup emits a proposed `PROGRAM_MATERIAL_UPDATE_REQUEST`, following the same revision-checked EventBus → metadata edit → reparse flow as tools and machines. Update only `material` in the managed SETUP block, preserving machine and tool data, in one undoable operation. Removing material removes that field; opening, plotting or restoring undo must not write it back. Machine comment-style conversion includes this field automatically. Existing backend requests stay unchanged until material support is explicitly implemented; storing/rendering a material box is not material-removal simulation.
+
+Initial scope is one material definition per program. In combined multi-channel simulation, channel programs may contain copies of the same physical material for portability; do not render/remove material from duplicate copies independently without an explicit shared-material setup decision. Conflicting channel material definitions require review, never silent merging or duplication.
+
+Tests: box/cylinder serialization, fixed-mm validation, centred bounds, rotations, front/top-face helpers, missing/removal behavior, preservation during machine-style conversion, manual edit and undo/redo synchronization, and conflicting multi-channel material. Later execution tests must cover work-offset transforms and turning diameter-mode conversion before material/tool intersections are considered accurate.
+
+### Geometry naming and Three.js adapter conventions
+
+Use plain, versioned JSON with a `type` discriminator, lower camelCase field/type names and named dimensions. Do not use `form`, `shapeType` and `type` interchangeably. Reserve `shape` for the insert outline code (C/D/V/etc.), while `type` identifies the geometry family (`insert`, `box`, `cylinder`, etc.). Uppercase insert letters are catalog identifiers, not class names.
+
+**Canonical material types: `box` and `cylinder`.** Prefer geometry names over stock/product names: the UI can say "Round Bar", but JSON says `cylinder`, matching holder cylinders. This supersedes the earlier draft `bar` discriminator; no released implementation needs migration yet. Keep the requested top-level `material` key.
+
+| Domain type | Three.js geometry mapping | Important conversion |
+| --- | --- | --- |
+| Material `box` | `THREE.BoxGeometry` | CNC width=X, depth=Y, height=Z → constructor arguments `(width, depth, height)`. Three.js names its arguments width/height/depth, so map explicitly. |
+| Holder `box` | `THREE.BoxGeometry` | Local X/Y/Z sizes `(width, height, length)`; translate geometry by +length/2 along Z because holder parts start at z=0. |
+| `cylinder` | `THREE.CylinderGeometry` | Both radii = diameter/2, axial size = length. Three.js cylinders are Y-axis aligned: bake a +90° X rotation to align +Y with domain +Z. Material stays centred; holder cylinders additionally translate by +length/2 in Z. |
+| Holder `cone` | `THREE.CylinderGeometry` with unequal radii | Existing start/end diameters describe a taper/frustum; after axis alignment, bottom radius=startDiameter/2 and top radius=endDiameter/2. A true cone has one zero radius. |
+| Revolved `profile` | `THREE.LatheGeometry` | Convert `[z,radius]` to the API's radial/axial profile points; align the generated Y axis to domain Z. |
+| Cutting `insert` | `THREE.Shape` + `THREE.ExtrudeGeometry` | Generate the validated outline from shape/IC/dimensions/nose radius. Plain extrusion covers zero clearance; tapered side faces require custom geometry for positive clearance. |
+| Drill/end mill/ball mill | Primitive assembly, lathed profile or custom `THREE.BufferGeometry` | Tool type is not one Three.js primitive; respect tip reference and distinguish cutting from non-cutting parts. |
+
+Bake primitive-axis/origin conversions into the geometry once, then apply the domain part rotation and position to its mesh; apply assembly orientation separately. Use `THREE.MathUtils.degToRad()` for persisted degree values and match the documented extrinsic X→Y→Z convention (Three.js intrinsic Euler order `ZYX`, or an explicit Rz·Ry·Rx matrix). Never apply the axis correction as an additional user rotation or change the rest of the existing scene to compensate. Unit-test transformed bounds and reference points.
+
+Persist only dimensions and transforms, not Three.js class names, Mesh/Object3D JSON, generated vertices, rendering materials or GPU resources. Keep tessellation, colours, opacity and render quality in renderer settings. Unsupported domain types must be diagnosed, not constructed dynamically from arbitrary class names.
+
+Suggested TypeScript names for later implementation: `ProgramMaterialDefinition` (discriminated union of `BoxMaterialDefinition` / `CylinderMaterialDefinition`), `HolderPart`, `CuttingPart`, and `SimulationGeometryFactory` with `createMaterialMesh()`, `createHolderGroup()` and `createCuttingGroup()`. These are proposed contracts, not existing symbols. The factory returns Three.js objects; metadata/storage services remain independent of Three.js. It can compose the planned ToolGeometryFactory rather than putting domain parsing into PlotService.
+
+Avoid confusion with `THREE.Material`, which means **surface appearance**, not the physical workpiece. Use `materialDefinition` for saved raw material, `workpieceMesh` for its scene object and `surfaceMaterial` for a Three.js rendering material. The existing PlotService line-material/cache properties do not need renaming just because the metadata gains `material`.
+
+When integrating material/tool meshes into the current plot, give axes, toolpaths, workpiece and tools distinct group roles. Do not let the existing "toggle every non-toolpath group" axes behavior hide the new groups accidentally. Define fit-view/clear behavior explicitly and dispose owned geometries/rendering materials when replacing or removing preview objects.
 
 ## 5. Comment format
 
@@ -151,6 +214,7 @@ Illustrative drill assignment for a profile that explicitly supports semicolon c
 ```text
 ; @NCE-SIM:1 BEGIN SETUP
 ; machineName="SIEMENS_MILL"
+; material={"type":"box","width":100,"depth":60,"height":20,"position":[50,30,-10]}
 ; @NCE-SIM:1 END SETUP
 
 ; @NCE-SIM:1 BEGIN TOOL
@@ -184,7 +248,7 @@ The turning example shows the compact fields only: actual mounting/insert placem
 - Escape controller comment delimiters, newlines, and unsafe characters inside strings (for example JSON Unicode escapes for parentheses). Never allow a description to terminate a comment and create NC code.
 - Define deterministic numbered continuation records for values exceeding a profile's line limit; never split escape sequences or produce uncommented continuation lines. Bound decoded sizes and nesting.
 - Version one stores one definition per tool identifier within a program/channel, immediately before its first recognized tool-selection command. Later uses resolve that same assignment. Reject conflicting duplicate definitions; operation-specific redefinitions need a later execution-aware model.
-- Recognize selections using machine-aware parsing, not a global T-number replacement: account for named tools, combined tool/offset codes and preselection versus activation. Do not insert into text that merely mentions a tool inside another comment.
+- Recognize tool calls using machine-aware parsing, not a global T-number replacement: account for named tools and combined tool/offset codes. No M6-dependent preselection workflow is used by this integration. Do not insert into text that merely mentions a tool inside another comment.
 - Replacing a tool updates the existing managed block, rather than appending duplicates. A moved command requires a refreshed source range, not a persisted line number.
 - User edits to managed comments are reparsed and validated. Malformed/unknown metadata is preserved and diagnosed, never guessed or silently rewritten.
 - Apply only minimal text-range edits through the normal editor/document pathway in one undoable operation. Preserve unrelated comments, line endings and code. Opening or plotting a file must not silently rewrite it.
@@ -201,6 +265,27 @@ The turning example shows the compact fields only: actual mounting/insert placem
 6. **Save Program Tool to Library** and **Update Program from Library** are separate, explicit actions with a comparison/confirmation when replacing data.
 
 No implicit bidirectional synchronization. Program snapshots win over later library revisions. Deleting a library tool does not invalidate existing programs. Missing dimensions are shown as incomplete; never silently guess a simulation-ready geometry.
+
+### EventBus-driven updates to program comments
+
+Yes: applying edits in **Program Tools** or confirming a program machine change should update the managed simulation comments through EventBus and a single document-edit service. The UI never builds or replaces NC comments itself. Editing a library entry remains independent and only updates a program through explicit **Update Program from Library**.
+
+Proposed flow:
+
+1. A committed UI edit emits a typed `PROGRAM_TOOL_UPDATE_REQUEST` or `PROGRAM_MACHINE_UPDATE_REQUEST`. These are new proposed events, not existing functionality. Include document/program identity, expected document revision, origin (`user`), and request ID; machine requests also carry old and new machine names. Runtime routing IDs are still needed even though channel IDs are omitted from serialized comments.
+2. `ProgramMetadataEditService` validates the request against the current document and resolves comment capabilities through MachineService. Tool requests update only the relevant managed tool block. Machine requests decode existing managed blocks using the **old** profile, update `machineName`, and re-encode the header and all managed tool blocks using the **new** profile's comment style, escaping, line limits and placement rules.
+3. Apply minimal range edits through the normal ACE/VS Code document pathway as one undoable operation per document. Reject stale revisions rather than overwriting newer user edits. Emit an explicit success/failure result keyed to the request ID; the existing EventBus is synchronous notification, not an awaitable transaction mechanism.
+4. After the edit succeeds, reparse the document and refresh program-tool state, the selected machine and previews. Existing `PARSE_COMPLETED` and `MACHINE_CHANGED` notifications may inform consumers, but generic state/parse notifications must not automatically trigger further writes.
+
+For example, changing from a semicolon-comment profile to a parenthesized-comment profile rewrites only recognized `@NCE-SIM` blocks into independently wrapped parenthesized lines. It does **not** translate executable code or ordinary user comments. Warn that machine selection/comment conversion does not make an NC program compatible with another controller. If remaining code/comments cannot be validated under the new profile, require review before execution/transfer.
+
+If either profile lacks safe comment capabilities, a block is malformed/unknown-version, or no safe insertion point exists, preserve the document and report why conversion cannot be completed. Do not discard old delimiters before extracting the metadata. Machine-profile capability changes without a user machine-selection action should mark metadata for review, not silently rewrite files on startup or refresh.
+
+Because machine selection is currently global, confirm the affected loaded programs before applying a change across channels. Prevalidate the entire requested scope; do not silently edit unrelated files or advertise a successful global switch when one target failed. Multi-document host edits should be grouped where supported, otherwise report partial failures explicitly and keep the setup conflict visible.
+
+Manual comment edits, file loading and undo/redo follow the reverse **read-only** path: document → parser → derived state → UI. Track origin/revision/request IDs, compare semantic values and avoid no-op rewrites so parse/update cycles cannot create an event loop. Saving remains the normal file-save workflow; updating a comment marks the document modified, not automatically saved to disk. Dispose EventBus subscriptions when views disconnect.
+
+Acceptance tests: one Apply produces one edit and no event loop; Q/R/description/geometry round-trip; machine changes rewrite all managed blocks but preserve NC code and ordinary comments; old delimiters are decoded before conversion; undo/redo restores header/tool state and machine selection; unknown syntax, stale revisions, host failures and multi-channel conflicts cause no silent data loss.
 
 ## 7. Clean integration in this codebase
 
@@ -221,13 +306,248 @@ Proposed responsibilities (new modules, not yet created):
 | `ToolCatalogService` | CRUD, validation, revisions, filtering and immutable snapshots. |
 | `SimulationCommentCodec` | Pure bounded parse/serialize, escaping, schema migrations and diagnostics. |
 | `ProgramToolService` | Per-document/channel assignments, conflicts and derived state. |
-| `ProgramMetadataEditService` | Locate safe insertion points and generate minimal undoable edits. |
-| `ToolExecutionAdapter` | Map program assignments into existing Q/R request values with unit handling. |
+| `ProgramMetadataEditService` | Thin metadata command coordinator/edit planner: validate snapshots, locate safe insertion points and request range edits through NCCodePane. Not another document writer or undo manager. |
+| `toToolValues()` (execution mapping function) | Map complete program assignments into existing ToolValue Q/R request values with explicit validation/unit handling. No separate ToolExecutionAdapter service initially. |
 | `ToolGeometryFactory` | Future deterministic Three.js meshes from validated parametric geometry. |
 
 Register services centrally through existing ServiceRegistry/ServiceTokens. Use Web Components, EventBus, TypeScript and existing browser/Three.js APIs; no new frontend framework. Keep the backend stateless for personal libraries.
 
 The extension source is not present in the explored workspace. Host filesystem persistence and contributed views require coordinated changes in that extension project; frontend messages alone cannot implement these capabilities.
+
+### Current architecture audit and minimum integration
+
+#### Tool-command syntax comes from backend machine information
+
+Confirmed current flow: backend `list_machines()` adds `regexPatterns` via `get_machine_regex_patterns(machine["controlType"])` and exposes it through `/api/machines`. BackendGateway loads this response; MachineService copies `regexPatterns` into MachineProfile; NCCodePane passes the active profile's patterns to ParserService. ParserService uses `regexPatterns.tools.pattern` to detect tool commands (with a generic T-number fallback today).
+
+Reuse this machine-provided pattern for program-tool discovery and metadata insertion anchors; do not create a separate hardcoded T-command regex in the tool manager or geometry factory. Relevant contracts already exist as `ServerMachineData.regexPatterns` and `MachineProfile.regexPatterns` in [core types](../src/core/types.ts). Backend patterns are currently selected by control type; extra machine-specific behavior must be explicitly represented if necessary.
+
+Current limitations to address before relying on discovery for edits: ParserService takes only the first tool match per line, assumes numeric capture group 1 or T-style named syntax, and deduplicates into ToolRegisterEntry without preserving occurrence ranges. It scans raw lines, including comments. Add a shared, machine-aware token/occurrence result with exact identifier and source range, excluding comments/strings except recognized named-tool syntax. Validate regex/capture conventions. Generic fallback discovery must not be treated as verified syntax for automatic metadata edits when machine information is absent/invalid.
+
+The tool regex answers **where/how a tool command is written**, not **which branch or loop occurrence executes it**. Keep those separate: source occurrences locate comment blocks; per-segment active tool IDs identify the tool for plot placement. Current tool calls update active state directly; no extra selection/activation protocol is required. Existing machine interfaces still lack safe comment-writing capabilities; add those through backend/profile contracts rather than inferring a comment writer from a highlighting regex.
+
+Verified against the present implementation, not assumed from the proposed service names:
+
+- [TemplateInsertionService](../src/services/templates/TemplateInsertionService.ts) gets a definition from its catalog and publishes `template:insert_request`. Its boolean return means the request was published, not that an editor/host committed it.
+- [NCCodePane](../src/components/NCCodePane.ts) handles this in `applyTemplateInsert()` and synchronizes through `syncEditorValue()`: FileManager → StateService → `code-change` → parse. It already owns the ACE editor. Template insertion does not yet provide arbitrary revision-checked batched range edits.
+- [VsCodeFileManagerService](../src/services/VsCodeFileManagerService.ts) forwards `updateActiveProgramContent()` through `syncToHost()` to `HostBridge.notifyDocumentChanged(channel, text, oldText)`. Host undo/redo updates return through `vscode:host-undo-redo` and `program:content_changed`. Reuse this route; do not notify the host a second time from a metadata service.
+- [StateService](../src/services/StateService.ts) manages application/channel state and history. `setGlobalMachine()` sets the name/profile and publishes `MACHINE_CHANGED`. It does not parse/write simulation comments or transact machine selection together with document edits. Application-state history is not a replacement for document undo.
+- [HostBridgeService](../src/services/HostBridgeService.ts) currently supports outgoing document-change notifications/workbench relay and incoming undo/redo. It has no tool-library load/save RPC, document revision acknowledgment or tool-panel edit routing yet.
+- [main.ts](../src/main.ts) registers host-specific file managers, but registers WebTemplateRepository for templates regardless of host mode. Follow the repository abstraction, not the assumption that templates already implement host-owned JSON storage. Every separate webview has its own ServiceRegistry/EventBus; publishing an event does not cross into another view.
+- [ExecutedProgramService](../src/services/ExecutedProgramService.ts) accepts `ExecutionRequest.toolValues` and forwards them to BackendGateway for both single/multi-channel execution. It does not obtain these values from geometry or a catalog. NCToolpathPlot currently obtains tool overrides from the UI; replace that dependency with program metadata state.
+
+#### Is ProgramMetadataEditService necessary?
+
+**The metadata-editing responsibility is necessary; a second general-purpose edit service is not.** Keep this proposed service small, similar to TemplateInsertionService, because three operations share the same policy: tool assignment, machine/comment conversion and material updates. None of these policies belongs in StateService, ToolCatalogService or HostBridge.
+
+It receives a domain request and a current document snapshot, uses the pure SimulationCommentCodec to decode/encode managed blocks, and generates an edit plan. NCCodePane applies that plan via a small new `applyProgramEdits()` handler (proposed name), batching range replacements and syncing the final text once through the existing file-manager route. Preserve cursor/selection where possible and group web ACE undo; VS Code undo remains host-owned. Suppress intermediate change callbacks only during that explicit batch, then publish one final document update.
+
+ProgramToolService supplies derived per-program setup/tool state; extend its snapshot to include machine/material rather than creating a second store for the header. It must not become an independent source of writable metadata. State reads come from parsed document revisions. The coordinator can be renamed ProgramMetadataService later if that better expresses its scope; do not add both classes with overlapping responsibilities.
+
+#### Connections: catalog, events and host
+
+Library path (no NC document changes):
+
+`Tool Manager → ToolCatalogService → IToolLibraryRepository`
+
+- Web repository: validated JSON in localStorage.
+- VS Code repository: typed request through HostBridge → extension-owned JSON storage → acknowledged response. Add correlated request IDs, revisions and failures; do not treat postMessage as a successful save. Bridge replies resolve repository promises, and catalog success publishes a local `TOOLS_CHANGED` notification. The host separately broadcasts library revision changes to other views, which invalidate/reload their catalogs.
+- ToolCatalogService knows tool identity/revisions/validation, not ACE, NC comments, Three.js or VS Code APIs. It depends on the repository interface, not HostBridge directly. HostBridge transports validated messages and knows no tool geometry rules.
+
+Program path in web/editor mode:
+
+`Tool Manager → committed domain request → ProgramMetadataEditService → edit-plan event → NCCodePane → FileManager → existing host route if applicable → reparse → ProgramToolService → UI`
+
+Assigning from the catalog first resolves the chosen tool ID/revision and copies a complete snapshot into the request. Later library edits do not change that snapshot. Direct program tool edits need no catalog lookup. Requests for machine/material changes use the same planner but do not go through ToolCatalogService.
+
+Program path from a separate VS Code tool view:
+
+`Tool view → HostBridge → extension routes to owning editor/document → editor EventBus → same coordinator/edit path → correlated result back to tool view`
+
+Do not create a fake editor in the tool view or address a document by channel alone. Host routing must provide the owning document identity and revision; the current channel-only messages are insufficient for multiple open editors. If no eligible editor owns the document, report it rather than silently editing a different one. Native-text-editor support would need an explicit extension-side document adapter, not an additional parallel writer in this frontend.
+
+Use direct async methods/promises for catalog/repository work; use EventBus for UI requests and notifications. The existing EventBus is synchronous and does not await async subscribers. Add explicit request/result contracts for edits, including rejection when there is no target, stale revisions, or failed host application. New bridge operations and events are proposals and require host integration.
+
+For machine selection, replace the user-action path to direct `setGlobalMachine()` with a validated metadata-change request. Retain the old profile until conversion planning succeeds; commit state after successful document application. Keep `MACHINE_CHANGED` as a notification for parser/highlighting/workbench consumers, never a blanket trigger to rewrite files. Loading and undo/redo must restore derived selection without introducing new edit/history cycles. Transactional global/multi-document behavior still needs explicit implementation and tests.
+
+#### Execution mapping versus geometry factory
+
+**ToolExecutionAdapter must not be integrated into ToolGeometryFactory.** These are two independent consumers of the same parsed snapshot:
+
+- Execution: `ProgramToolService snapshot → toToolValues() → ExecutionRequest.toolValues → ExecutedProgramService → BackendGateway`.
+- Preview: `ProgramToolService snapshot → ToolGeometryFactory / SimulationGeometryFactory → Three.js objects`.
+
+Initially implement `toToolValues()` as a pure, separately tested function near the execution/domain boundary, used for both single- and multi-channel requests. Preserve numeric/named tool IDs and zero Q/R values, reject invalid values, and omit undefined overrides. Map stored Q/R to backend `qValue`/`rValue`; do not derive R from insert/cutter geometry unless explicitly requested under verified machine rules. Do not recompute compensation paths in the browser: the execution engine already handles compensation.
+
+This function requires no EventBus, HostBridge, catalog lookup or Three.js dependency. Only promote it into a dedicated adapter class if multiple backend contracts or substantial machine-specific conversion policies justify that abstraction. ToolGeometryFactory creates shapes, placements and meshes; it neither serializes backend requests nor writes comments. This separation allows execution without WebGL and previews without a running backend. Keep material metadata local to setup/preview until the backend explicitly supports it.
+
+### Editor position → plot position → active tool
+
+Use EventBus for selection notifications, not for repeatedly transporting complete geometry definitions. The selected execution segment links the source code, coordinates and tool identity. A point `[x,y,z]` alone cannot identify a tool, because several tools/iterations can visit the same position.
+
+#### What exists today
+
+- NCCodePane emits `EDITOR_CURSOR_MOVED` with channel and a 1-based line number.
+- NCToolpathPlot subscribes and calls `highlightSegment()`; currently it highlights matching segments but does not place a tool mesh.
+- ExecutedProgramService maps backend segment points into PlotSegments and already preserves optional `toolNumber`, `channelId` and source line numbers on endpoints. Each adjacent pair of backend points becomes one rendered segment.
+- Current points are deduplicated by coordinates in the point collection. Use ordered segment identity, not the deduplicated point index, for playback/selection. Repeated visits to an identical point must remain distinct execution occurrences.
+- `PlotSegment.toolNumber` and the backend-response mapping currently accept numbers only, while program tools support numbers or strings. Named-tool support needs a consistent frontend/backend contract before it can be relied on for placement. Missing tool metadata is not a signal to use the first tool in the catalog.
+
+#### Retain a snapshot with each plotted execution
+
+At request creation, capture the exact program text/revision, machine/profile context, fixed `toolPathMode: 'center'` and complete resolved program-tool definitions used for the request. Assign a `runId`. Store this immutable context alongside the execution result; do not resolve a past plot against a newly edited program or a changed library entry.
+
+Proposed `PlotRunSnapshot` owns:
+
+- `runId`, document/program identity, revision and channel identity per source program.
+- Machine and coordinate/tool-reference conventions for interpreting returned poses.
+- Ordered rendered segments with run-scoped `segmentId`, original backend-segment ordinal and subsegment index; preserve execution order when tessellating arcs.
+- Source locations indexed to **lists** of segment IDs (line/column where supported, program identity and execution occurrence).
+- Complete tool snapshots indexed by the scoped exact tool identifier, plus material/setup context. Tool number 1 in another channel is not the same assignment automatically.
+
+The updated backend API supplies the active tool for each move. Tool calls update active tool state directly in this integration; there is no M6 requirement. Textual T-code order alone remains insufficient for macros, loops and conditional execution. If execution metadata is absent, retain highlighting but show "active tool unavailable" and hide the tool mesh; do not guess from the nearest preceding text line.
+
+#### Decision: execution-owned active tool in the plot API
+
+Make the backend authoritative for the active tool at every generated movement. The engine captures the active tool **at the moment it emits each plot entry**, after the controller has applied any relevant activation and before later commands mutate state. It must copy the identifier into the entry, not keep a mutable state reference or annotate all entries with the tool active at the end of the run.
+
+The updated API uses `segments[].toolNumber` for the **active tool for that movement**: a number, named-tool string, or the reserved string `"unknown"`. Treat `"unknown"` as unavailable metadata, never as a catalog lookup. A real named tool literally called "unknown" is ambiguous under this API; reserve that name until a future explicit status field resolves the collision. No `toolState` or preselected-tool field is required by the current API. Preserve zero IDs without truthiness checks; do not assign universal unload semantics to T0.
+
+Local backend adapter updated to match the supplied CGI (2026-09-11): [backend/main_import.py](../backend/main_import.py) now forwards `entry.get("toolNumber", "unknown")` and `entry.get("executionStep")` instead of synthesizing tool 1. `executionStep` is a zero-based executed-command occurrence per channel; generated cycle segments share their parent command's step. Missing steps remain null, not an invented plot-array index. Like the supplied CGI, an explicitly null tool field is passed through; clients should treat null/missing values as unavailable too.
+
+Adapter regression tests cover numeric/named tools, zero tool/step, shared and repeated steps, unknown/missing/null metadata and independent conversions. Actual engine capture semantics still require end-to-end verification against the installed updated ncplot7py version. The local adapter deliberately retains its existing geometry/traversal contract and does not add the CGI's legacy timing-based `type` inference. Frontend follow-up remains necessary: widen numeric-only segment tool types, preserve executionStep through subsegment creation, and reserve unknown metadata rather than guessing. Client run-scoped segment IDs can be derived from response ordinal plus subsegment index; executionStep alone is not unique per segment. `segmentId`, `toolState` and `executionMode` from earlier proposals are not supplied by the updated CGI and must not be assumed to exist.
+
+Preserve this captured ID for all primitive moves produced by a cycle and all frontend subsegments produced from a sampled arc. Channel identity plus execution occurrence/segment ID and source location establish the lookup scope. Do not replace the existing numeric `executedLines` list with objects without versioning: adding active tool to motion segments is the minimum compatible contract. If tool pose on a non-motion executed command is needed later, add a separate ordered `executionSteps` trace with step ID, source location, active tool and position/state; a source line number alone cannot identify loop iterations or subprogram calls.
+
+Frontend behavior under this decision:
+
+- Typing or editing tool/machine/material comments does **not** run execution or calculate a new moving-tool pose. Parsing may update lists and the tool manager's static shape preview, but the main plot remains the last completed run and is marked stale when its input changes.
+- An explicit Plot action requests centre mode and captures the corresponding complete program-tool snapshot. The completed response supplies movement coordinates and active tool IDs; the frontend resolves those IDs against that captured snapshot, not against today's edited library/program.
+- Cursor movement over an unchanged executed revision or plot playback only selects an existing segment and moves a cached mesh. This is display of already executed data, not re-execution. On a stale revision disable editor-follow placement; retained run playback can still use its own snapshot.
+- Send tool definitions once per run context (client-owned snapshot initially), not on every point. Return the full definition from the backend only if it is authoritative for resolving/altering it; any effective Q/R or reference changes made by execution need explicit per-step data rather than silently using static defaults.
+- Missing/legacy/mock tool IDs disable accurate tool placement while leaving the path visible. Mock execution must be explicitly identified by the response before its results can be treated as an execution trace; the attached CGI currently permits mock fallback, so a successful response alone is insufficient proof.
+
+Integration fixtures must execute two or more different tool calls (without M6) and verify IDs on every intervening move, not only tool-call lines. Cover named tools, generated cycle moves, no initial tool, supported unload/reset behavior, branching/repetition, and separate channels. Verify both deployed adapter paths preserve the same engine values and never synthesize tool 1.
+
+**Last-tool rule:** each motion uses the most recent **executed tool call in that channel**, until the next tool call or an engine-defined unload/reset. Do not wait for M6 or maintain a separate pending-tool model in the frontend/adapter. An offset-only change is not necessarily a different physical tool. Respect the engine's execution order within a block that both calls a tool and moves.
+
+The execution engine should carry this modal active tool through every move and return its identifier on each segment, even when that move contains no T command. Normalize this into the stored run trace; cursor navigation then looks up the selected segment directly rather than scanning backward on every cursor move. If the backend emits sparse tool IDs, carrying the previous one forward is valid only when its contract guarantees that omission means unchanged and that all activation/unload events are represented. Otherwise missing tool state is unknown, not evidence that the previous tool is still active.
+
+Do not infer an initial tool before its first known activation. Do not leak tool state between runs/channels. Include activations inside loops/subprograms and ignore nonexecuted branches; the last textual T command above a line is not necessarily the last executed tool call.
+
+#### Proposed selection and pose contracts
+
+Keep input **selection** separate from output **resolved pose**:
+
+| Contract | Fields / purpose |
+| --- | --- |
+| Extended editor cursor event | Document/program identity, revision, channel, 1-based line/column, origin and request ID. Existing channel/line-only events need compatibility handling. |
+| `PLOT_SELECTION_REQUEST` | `runId`, `segmentId`, `fraction` (0..1), origin (`editor`, `plot` or `playback`) and request ID. Used for graph clicks/scrubbing or after resolving a cursor location. |
+| `ResolvedToolPose` | `runId`, selected segment/source identity, tool-snapshot key, position `[x,y,z]`, orientation quaternion `[x,y,z,w]`, and validity/approximation status. An internal renderer contract, not additional NC-comment fields. |
+| `PLOT_SELECTION_CHANGED` | Selected run/segment/source and resolved pose/status for views that need it. No full library or Three.js objects in this notification. |
+
+Prefer segment ID plus fraction over accepting an arbitrary XYZ point: it carries execution provenance. A plot raycast can return a line-object segment mapping and fraction. The current rendering batches lines by motion type; maintain a mapping from rendered line-pair index to run/segment ID rather than assuming rendered order equals overall execution order.
+
+For a linear subsegment, position is `start + fraction * (end - start)`. For the current sampled arc representation, this interpolates its small straight subsegment and is only as accurate as backend sampling. Exact arc interpolation and time-accurate animation require additional curve/timing information. Current line-aggregated timing is not enough for a precise repeated-occurrence playback clock.
+
+#### Minimal implementation path
+
+1. Extend execution-result ownership with PlotRunSnapshot. Initially place source/segment lookup and `resolveSelection()` in a small pure helper used by ExecutedProgramService/the plot component, rather than registering a large playback service prematurely.
+2. On editor cursor movement, resolve the source location against the displayed run. Default to the end (`fraction=1`) of the last subsegment of the selected execution occurrence; keep the occurrence explicit. If a line executes repeatedly, prefer the current playback occurrence or present an occurrence selector. If none was selected, use the first occurrence with a visible occurrence indicator, not a hidden assumption that the line executes once.
+3. For non-motion lines or unexecuted branches, show "no plotted move for this location" and hide the cursor-follow tool initially. Do not pretend a nearby motion point belongs to the selected line. A later execution trace can support accurate state on dwell/tool-change lines.
+4. Resolve the segment's active tool ID against **that run's copied program-tool definitions**, never against ToolCatalogService. A missing definition produces a clear diagnostic while the toolpath remains visible.
+5. ToolGeometryFactory builds/caches a tool assembly whose origin is the documented active reference tip. NCToolpathPlot attaches it to a dedicated tool group, sets position/orientation, and renders. Move the existing mesh when only selection changes; rebuild only when its geometry snapshot changes, with correct cache ownership/disposal.
+6. ToolGeometryFactory consumes the resolved definition and transforms, but does not subscribe to editor events, find source lines or discover active tools. A future PlaybackService can own selection/time advancement when animation is added, reusing the same resolver and pose contract.
+
+Full flow:
+
+`EDITOR_CURSOR_MOVED → source/occurrence lookup in PlotRunSnapshot → selected segment → active tool key → run-owned tool definition → pose resolution → NCToolpathPlot + ToolGeometryFactory`
+
+Plot clicks and playback feed the same selection resolver. If a plot click also moves the editor cursor, propagate origin/request ID and suppress the resulting echo; do not start another plot or reset the chosen execution occurrence.
+
+#### Position and orientation correctness
+
+**Decision: always request `toolPathMode: 'center'` for plotting and tool placement.** The backend calculates the centre/reference path; the frontend does not calculate an effective contour, offset the path using tool radius, or switch between competing placement paths. This supersedes the earlier design allowing an effective/centre plot choice.
+
+Implementation must enforce centre mode at the shared plot-request construction boundary for both single- and multi-channel execution, not only change a dropdown default. Remove/disable the effective-mode plot toggle and normalize old persisted plot settings so reloads, channel-header requests and host-triggered requests cannot accidentally select it. Retain a legacy backend type only if another explicitly separate consumer needs it; all application plot calls use centre mode. These are planned changes: the current code still offers both modes until implementation.
+
+Verify the backend's exact centre/reference convention and align the tool mesh origin once: a turning insert nose centre, virtual tip and milling cutter reference tip are not interchangeable. A centre-path request alone does not supply a complete multi-axis pose or define those conventions. Do not add compensation twice. If the selected backend/machine cannot provide the required centre/reference path, report placement unavailable rather than silently falling back to an effective contour.
+
+The attached external CGI API documentation explicitly says `center` and `effective` currently return the same coordinates, with their distinction reserved for later G41/G42 interpolation. Therefore always requesting centre mode expresses the intended contract; it does **not** prove that compensated centre coordinates are implemented yet. Verify the deployed engine with known compensation fixtures before claiming accurate compensated tool placement. The same attachment contains older validation/preprocessing descriptions that differ from the supplied CGI source; treat actual deployed code and contract tests as authoritative, and reconcile documentation before integration.
+
+The backend currently returns XYZ points, not a general multi-axis tool pose. For a verified fixed-orientation machine, combine the stored assembly orientation with the known machine/work-frame transform once. Do not orient a milling cutter along the path tangent. Dynamic rotary-axis/multi-axis orientation and turning Q-to-tip rules require explicit execution/kinematics support, not inference from XYZ. Convert positions into the same scene space as the rendered path/material and maintain fixed-mm conventions. Orientation quaternions in ResolvedToolPose are runtime values; stored metadata still uses the agreed degree rotations.
+
+When program/tool/machine/material edits change the revision, mark the displayed run stale. Disable editor-to-old-run placement until re-execution (or an explicitly verified source map) instead of matching shifted line numbers. The old run can remain viewable through its own plot selection and immutable geometry snapshot. Ignore late results/selections for a run that is no longer displayed.
+
+Separate VS Code editor/plot views need explicit HostBridge messages for selection and the run/source context. The current workbench execution relay sends variables/errors, not plot segments or tool definitions, so this is new functionality. Send the run snapshot once or expose it through a host-owned store; send only run/selection identifiers on cursor movement. EventBus alone does not cross webview boundaries.
+
+Acceptance tests: every single/multi-channel plot request uses centre mode despite legacy settings; last executed tool call persists through moves without tool commands; direct tool activation, supported unload/reset and same-block execution order are honored; repeated lines/subprograms use execution order; initial unknown/missing tool state is diagnosed. Also test same XYZ with different tools, named tools, missing definitions, first/last subsegment selection, arc sampling, fixed-orientation placement, centre-to-mesh reference mapping, stale revisions/out-of-order results, independent channels/runs, plot-click/editor echo suppression, and geometry reuse/disposal. Highlighting should continue to work when accurate tool placement is unavailable.
+
+### Concrete frontend implementation sequence after the backend update
+
+This is the implementation specification for the next frontend work, not a claim that these methods/events exist already. Keep the first milestone small: preserve execution metadata and test lookup before adding meshes. The local backend forwarding is already implemented; no more source-code tool scanning should be added to the plot.
+
+#### A. Preserve the updated API fields
+
+In [core types](../src/core/types.ts), extend `PlotSegment` with optional `executionStep: number | null`, `sourceSegmentIndex: number`, and `subsegmentIndex: number`. Widen `toolNumber` to `number | string | null`; retain optionality for legacy responses. These added indices are client metadata, not required backend fields. Define the corresponding raw response segment interface once rather than leaving the numeric-only inline type in ExecutedProgramService. The literal string `"unknown"` is the API's reserved unavailable-tool sentinel, not a real library key.
+
+In [ExecutedProgramService](../src/services/ExecutedProgramService.ts), copy tool identity and executionStep onto **every** generated PlotSegment. Source-segment index is the original response-array ordinal; subsegment index is the adjacent-point-pair ordinal. Preserve executionStep=0 and numeric tool=0. Do not use `executionStep || index`, parse named tools as integers, carry missing IDs forward, or deduplicate occurrences by XYZ. Existing geometry/traversal filtering is independent; support for unclassified paths is separate from this metadata-preservation change.
+
+Add fixtures in [execution tests](../src/services/__tests__/ExecutedProgramService.test.ts): numeric and named tools, unknown/null/missing IDs, step zero, repeated source lines, multiple cycle segments sharing a step and multiple sampled pairs from one arc. Assert the metadata remains attached after channel results are combined.
+
+#### B. Capture program tools once, before execution
+
+Add a proposed `ProgramToolService.captureProgramSnapshot(programIdentity, revision, text)` returning a detached, validated snapshot of parsed program tool definitions, machine and material. It must parse/validate the exact supplied text or prove that its cached parse matches that revision; do not take a possibly stale asynchronous parse. It needs no catalog lookup: assigning a library tool has already copied the definition into the program.
+
+Extend the execution entry point to accept a client-only run context for all selected programs, with `runId` and immutable snapshots. Register new domain services centrally in [main.ts](../src/main.ts) and [service tokens](../src/core/ServiceTokens.ts); do not instantiate them in individual views. Initially keep run contexts/results in ExecutedProgramService rather than creating another global run-store singleton. Expose proposed read-only `getPlotRun(runId)` / `getRunTool(runId, programId, channelId, toolNumber)` accessors. Their storage must be bounded and released when runs are discarded; TypeScript readonly alone is not protection against mutating shared references.
+
+Use nested maps keyed by program/channel and the exact numeric-or-string identifier (or collision-safe serialized tuple keys). Do not concatenate ambiguous strings or collapse numeric `1` into named `"1"`. Never look up `"unknown"`, null or undefined. Normalize incoming values once at the API boundary only according to documented identifier semantics.
+
+In [NCToolpathPlot](../src/components/NCToolpathPlot.ts), replace the `nc-tool-list.getToolValues()` DOM query in `plotNCCode()` with `toToolValues(snapshot.tools)`. Get the exact program from the existing document/file-manager path, including pending editor changes, and use that same text for snapshot capture and execution. Preserve the custom-variable inputs but copy them into run context too. Missing geometry does not prevent existing Q/R-only programs from plotting; it prevents tool mesh creation with an explicit unavailable-definition status.
+
+Enforce `center` in the shared single/multi-channel request construction path. Keep complete geometry/run context on the client; BackendGateway sends only the existing supported request fields, not the new run-store objects.
+
+#### C. Publish one completed run to the plot
+
+Add proposed `PLOT_RUN_COMPLETED` to [EventBus](../src/services/EventBus.ts), carrying `{ runId }` within one application instance. Store the completed run before publishing. For global multi-channel plotting publish once after the requested result set is assembled; for a channel-header Plot publish once for that single-channel run. Preserve existing per-channel `EXECUTION_COMPLETED` events for variables/errors/executed-line consumers, optionally adding runId for correlation.
+
+Change the plot to render from `getPlotRun(runId)` in one event handler. The current code both subscribes to execution completion and directly calls `updatePlot()` after combining awaited results; remove that duplicate plot-update path when adopting the run event. Do not render each per-channel completion and then overwrite it with a combined result. A promise remains useful for request failure/busy handling, but must not cause a second render of the same run.
+
+Keep current displayed run ID plus a request generation marker. Ignore late/superseded completions. A failure must not leave a partially updated tool snapshot attached to another run's paths. Derived parse changes mark old runs stale; only explicit Plot requests create new runs.
+
+#### D. Resolve an editor selection without executing anything
+
+Reuse `EDITOR_CURSOR_MOVED`, extended with document/program identity and revision. Add a pure `resolvePlotSelection(run, sourceLocation, preferredExecutionStep?)` helper returning selected segment identity, fraction, and status. Build its index once per run rather than scanning every segment on every keystroke.
+
+Within the displayed run, group matches by channel/program and executionStep. The default selection is the last subsegment endpoint of the chosen command occurrence; if no occurrence is selected, select the first matching executed occurrence and indicate that choice. Multiple primitives sharing the same step form one occurrence. For legacy missing steps, use original response segment identity as a limited fallback and mark occurrence grouping unavailable; never merge all null steps into one command.
+
+From that selected segment resolve its tool via `getRunTool()`, producing a `ResolvedToolPose` only when tool/reference data is sufficient. Move the mesh directly in the plot handler, then optionally publish `PLOT_SELECTION_CHANGED` for other consumers; do not subscribe the plot to its own notification and create an echo. `PLOT_SELECTION_REQUEST` feeds this same resolver for plot clicks and later playback. Requests carry runId, segment identity, fraction, origin and correlation ID, not complete tool arrays.
+
+On stale source revisions, unknown tools, missing geometry or unexecuted lines: hide the cursor-follow tool and show the reason; keep valid path highlighting where source mapping is still valid. Unknown tool metadata does not trigger a catalog fallback. No network requests, program edits or execution calls occur during selection.
+
+#### E. Draw and move the tool
+
+Keep [PlotService](../src/services/PlotService.ts) responsible for path geometry/materials. ToolGeometryFactory (proposed) builds holder/cutting meshes from the saved definition; it has no EventBus or HostBridge dependency. NCToolpathPlot owns a dedicated `toolRoot` and calls a proposed `showToolAtSelection()` using the resolved definition/pose. Cache geometry per immutable definition within a run; do not cache by tool number alone across runs. Moving a selection changes only root position/quaternion. Switching tools reuses/builds the corresponding assembly, preserving geometry-local transforms.
+
+Attach scene roles to groups (`axes`, `toolpath`, `tool`, `material`, `highlight`) and explicitly update `clearPlot()`, `toggleAxes()`, visibility and camera-fit behavior so adding a new group cannot make it act like axes. Include tool/material extents in Fit only according to an explicit UI policy; cursor-follow movement must not refit the camera every time. Dispose owned geometry and surface materials on replacement, clear and disconnect; retain and unsubscribe EventBus subscriptions. Keep per-channel tool roots only if simultaneous channel visualization is deliberately enabled; initial cursor-follow can show one selected tool.
+
+For raycast selection later, retain response/subsegment identity for each line pair when createSegmentedToolpath() batches by motion type. The render order is not the execution order. Accurate placement remains gated by backend centre/reference and orientation conventions described above; a mesh preview alone is not collision/material-removal simulation.
+
+#### F. HostBridge only when the views are separate
+
+The web app and editor-hosted plot share a local EventBus and can read the same run store directly. No bridge round trip is needed for them. A separate VS Code plot/tool view has a different store; `{ runId }` alone is insufficient there.
+
+Extend [HostBridgeService](../src/services/HostBridgeService.ts) with typed, validated run-snapshot transfer/request and selection envelopes only when adding that separate view. Send a JSON-safe completed snapshot once per run (maps as entries/records), install it in the receiving store, then notify its local EventBus. Subsequent cursor/playback messages contain only run/source/selection IDs. Route through the extension to the owning document, validate revision/correlation, prevent relay echo, and reject selections for missing snapshots. The current variables/errors-only execution relay cannot supply a tool definition; do not pretend it already does. Reusing a host-owned snapshot store is an alternative to repeated transfers, not an excuse to expose arbitrary filesystem paths.
+
+#### Delivery checklist
+
+1. Frontend response/type preservation tests pass without requiring WebGL.
+2. Metadata codec/program snapshot and Q/R projection tests pass; run context remains unchanged after user edits.
+3. Both single/global Plot paths create exactly one completed run render in centre mode.
+4. Selection tests resolve the correct program/channel/tool/occurrence, including unknown and stale cases.
+5. Three.js geometry tests verify reference-point placement, mesh reuse and resource cleanup without depending on a browser renderer.
+6. Browser checks verify cursor-follow, tool switching and no backend calls while editing or selecting; use a fake backend fixture if the live engine is unavailable.
+7. Separate-view transport tests are added with the extension changes; this does not block the initial same-view web implementation.
 
 ## 8. Tool manager UI
 
@@ -237,6 +557,7 @@ Reuse one Web Component in a web sidebar and a VS Code WebviewView, similar to T
 - Search/filter by tool type and machine compatibility.
 - List with original schematic icons and name/dimensions; avoid copying manufacturer product images without permission.
 - Editing sections: General, Geometry, Holder/Mounting, Compensation (Q/R), Preview.
+- Program setup section: machine and optional Material (Box / Round Bar), dimensions, XYZ centre position and rotation; separate from the reusable tool library.
 - Geometry editors show **Holder parts** and **Cutting parts** as add/remove/reorder lists with type-specific named fields, not raw JSON. Stick-out is edited in the Holder section and stored only on its first part; reordering transfers this assembly setting to the new first part.
 - Turning selector shows original outline icons for C/D/V/W/T/S/R and the extended shapes listed above, with derived corner angle, editable IC/dimensions, thickness, nose radius and clearance. Separate presets cover grooving, parting, threading and custom profiles.
 - Context-sensitive fields: drill length/tip angle versus turning nose radius/orientation, for example.

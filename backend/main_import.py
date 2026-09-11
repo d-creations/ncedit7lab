@@ -501,7 +501,8 @@ def build_segments_from_engine_output(canal_output: Dict[str, Any]) -> Dict[str,
             "traversal": traversal,
             "sourceCode": source_code,
             "lineNumber": line_number,
-            "toolNumber": 1,
+            "executionStep": entry.get("executionStep"),
+            "toolNumber": entry.get("toolNumber", "unknown"),
             "points": points,
         }
         segments.append(seg)

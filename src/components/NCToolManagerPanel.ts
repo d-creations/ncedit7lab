@@ -25,6 +25,7 @@ import type { LibraryToolDefinition } from '@services/tools/ToolLibraryTypes';
 import { toProgramToolDefinition } from '@services/tools/ToolLibraryTypes';
 import { ToolCatalogService } from '@services/tools/ToolCatalogService';
 import type {
+  ProgramOffsetsUpdateRequest,
   ProgramToolUpdateRequest,
   ProgramToolUpdateResult,
 } from '@services/tools/ProgramMetadataEditService';
@@ -97,6 +98,9 @@ export class NCToolManagerPanel extends HTMLElement {
       this.eventBus.subscribe(EVENT_NAMES.PROGRAM_TOOL_UPDATE_RESULT, (data: unknown) => {
         void this.handleUpdateResult(data as ProgramToolUpdateResult);
       }),
+      this.eventBus.subscribe(EVENT_NAMES.PROGRAM_OFFSETS_UPDATE_RESULT, (data: unknown) => {
+        void this.handleUpdateResult(data as ProgramToolUpdateResult);
+      }),
       this.eventBus.subscribe('program:active_changed', (data: { channelId: string }) => {
         if (data.channelId === this.channelId) void this.loadProgram();
       }),
@@ -152,6 +156,17 @@ export class NCToolManagerPanel extends HTMLElement {
     );
     this.programDefinitions = structuredClone(this.programSnapshot.tools) as ProgramToolDefinition[];
     this.offsetDrafts = this.programTools.getTemporaryToolOffsets(this.programSource.identity);
+    const persistedOffsets = this.programSnapshot.offsets;
+    const policy = machine?.toolSelection;
+    if (!this.offsetDrafts.length && persistedOffsets && policy &&
+      persistedOffsets.offsetScope === policy.offsetScope) {
+      this.programTools.setTemporaryToolOffsets(
+        this.programSource.identity,
+        policy,
+        persistedOffsets.offsets,
+      );
+      this.offsetDrafts = this.programTools.getTemporaryToolOffsets(this.programSource.identity);
+    }
     const parse = await this.parserService.parse(this.programSource.text, this.channelId, {
       regexPatterns: machine?.regexPatterns,
     });
@@ -328,8 +343,8 @@ export class NCToolManagerPanel extends HTMLElement {
           this.renderOffsetRow(offset, index, policy.offsetScope === 'tool')).join('') :
           '<div class="empty">No explicit offsets. Tool defaults remain available until an offset table is saved.</div>'}
       </div>
-      <div class="notice warning">Offsets are temporary execution data for this open program. They are not library geometry and are not written to NC comments yet.</div>
-      <div class="form-actions"><button class="button primary" id="save-offsets" type="button">Save Offset Table</button></div>
+      <div class="notice">Offsets are program-owned compensation records. Applying writes a managed simulation-comment block without changing executable NC commands.</div>
+      <div class="form-actions"><button class="button primary" id="save-offsets" type="button">Apply Offsets to Program</button></div>
     </main>`;
   }
 
@@ -822,8 +837,12 @@ export class NCToolManagerPanel extends HTMLElement {
   private saveOffsets(): void {
     try {
       if (!this.programSource) throw new Error('No active program owns this offset table');
-      const policy = this.stateService.getState().activeMachine?.toolSelection;
+      const machine = this.stateService.getState().activeMachine;
+      const policy = machine?.toolSelection;
       if (!policy) throw new Error('Selected machine has no tool-offset policy');
+      if (!machine.simulationCommentSyntax) {
+        throw new Error('Selected machine has no safe simulation-comment capability');
+      }
       const offsets = this.readOffsets();
       this.programTools.setTemporaryToolOffsets(this.programSource.identity, policy, offsets);
       this.offsetDrafts = this.programTools.getTemporaryToolOffsets(this.programSource.identity);
@@ -831,7 +850,20 @@ export class NCToolManagerPanel extends HTMLElement {
         identity: this.programSource.identity,
         offsets: structuredClone(this.offsetDrafts),
       });
-      this.setStatus(`${this.offsetDrafts.length} offset record(s) saved for Plot`, 'success');
+      const requestId = createId('offset-update');
+      this.pendingRequestId = requestId;
+      const request: ProgramOffsetsUpdateRequest = {
+        requestId,
+        channelId: this.channelId,
+        documentId: this.programSource.identity.documentId,
+        programId: this.programSource.identity.programId,
+        expectedRevision: this.programSource.revision,
+        expectedText: this.programSource.text,
+        syntax: machine.simulationCommentSyntax,
+        offsets: { offsetScope: policy.offsetScope, offsets: structuredClone(this.offsetDrafts) },
+      };
+      this.setStatus('Applying offset metadata...', 'info');
+      this.eventBus.publish(EVENT_NAMES.PROGRAM_OFFSETS_UPDATE_REQUEST, request);
     } catch (cause) {
       this.setStatus(cause instanceof Error ? cause.message : String(cause), 'error');
     }

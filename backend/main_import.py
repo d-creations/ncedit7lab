@@ -400,6 +400,17 @@ async def get_syntax(control_type: str):
     return {"status": "success", "control_type": control_type.upper(), "rules": rules}
 
 
+SIMULATION_COMMENT_SYNTAX_BY_CONTROL = {
+    "FANUC": {"kind": "block", "open": "(", "close": ")"},
+    "SIEMENS": {"kind": "line", "prefix": ";"},
+}
+
+
+def get_simulation_comment_syntax(control_type: str) -> Optional[Dict[str, str]]:
+    syntax = SIMULATION_COMMENT_SYNTAX_BY_CONTROL.get(control_type.upper())
+    return dict(syntax) if syntax else None
+
+
 def list_machines() -> Dict[str, Any]:
     if get_available_machines is None:
         return {"machines": [], "success": False, "message": "ncplot7py not available"}
@@ -414,6 +425,9 @@ def list_machines() -> Dict[str, Any]:
         machine["controlType"] = getattr(config, "control_type", machine["controlType"])
         machine["machineType"] = getattr(config, "machine_type", "")
         machine["variablePrefix"] = getattr(config, "variable_prefix", "")
+        simulation_comment_syntax = get_simulation_comment_syntax(machine["controlType"])
+        if simulation_comment_syntax:
+            machine["simulationCommentSyntax"] = simulation_comment_syntax
         file_extensions = getattr(config, "file_extensions", {})
         machine["fileExtensions"] = file_extensions if isinstance(file_extensions, dict) else {}
 

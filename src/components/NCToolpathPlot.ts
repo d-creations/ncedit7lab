@@ -6,13 +6,18 @@ import {
   EVENT_BUS_TOKEN,
   EXECUTED_PROGRAM_SERVICE_TOKEN,
   STATE_SERVICE_TOKEN,
+  PROGRAM_TOOL_SERVICE_TOKEN,
+  FILE_MANAGER_SERVICE_TOKEN,
 } from '@core/ServiceTokens';
 import { PlotService } from '@services/PlotService';
-import { EventBus, EVENT_NAMES } from '@services/EventBus';
+import { EventBus, EVENT_NAMES, type EventSubscription } from '@services/EventBus';
 import { ExecutedProgramService } from '@services/ExecutedProgramService';
 import { StateService } from '@services/StateService';
-import type { PlotMetadata, MachineType, ToolValue, CustomVariable, ChannelId } from '@core/types';
-import type { NCToolList } from './NCToolList';
+import type { PlotMetadata, CustomVariable, ChannelId } from '@core/types';
+import type { ProgramToolService, ProgramSource } from '@services/tools/ProgramToolService';
+import { programIdentityKey } from '@services/tools/ProgramToolService';
+import type { IFileManagerService } from '@services/IFileManagerService';
+import type { PlotRunInput } from '@services/tools/PlotRunSnapshot';
 import type { NCBottomPanel } from './NCBottomPanel';
 
 export class NCToolpathPlot extends HTMLElement {
@@ -31,6 +36,12 @@ export class NCToolpathPlot extends HTMLElement {
   private currentPlotMetadata: PlotMetadata | null = null;
   private highlightObject: THREE.Object3D | null = null;
   private themeObserver?: MutationObserver;
+  private programTools: ProgramToolService;
+  private fileManager: IFileManagerService;
+  private subscriptions: EventSubscription[] = [];
+  private displayedRunId?: string;
+  private requestGeneration = 0;
+  private stale = false;
 
   constructor() {
     super();
@@ -41,6 +52,8 @@ export class NCToolpathPlot extends HTMLElement {
     this.eventBus = registry.get(EVENT_BUS_TOKEN);
     this.executedProgramService = registry.get(EXECUTED_PROGRAM_SERVICE_TOKEN);
     this.stateService = registry.get(STATE_SERVICE_TOKEN);
+    this.programTools = registry.get(PROGRAM_TOOL_SERVICE_TOKEN);
+    this.fileManager = registry.get(FILE_MANAGER_SERVICE_TOKEN);
   }
 
   connectedCallback() {
@@ -50,6 +63,9 @@ export class NCToolpathPlot extends HTMLElement {
   }
 
   disconnectedCallback() {
+    this.clearPlot();
+    this.subscriptions.forEach((subscription) => subscription.unsubscribe());
+    this.subscriptions = [];
     if (this.animationFrameId) {
       cancelAnimationFrame(this.animationFrameId);
     }
@@ -68,34 +84,47 @@ export class NCToolpathPlot extends HTMLElement {
   }
 
   private setupEventListeners() {
-    // Listen for plot updates
-    this.eventBus.subscribe(EVENT_NAMES.EXECUTION_COMPLETED, (data: unknown) => {
-      const executionData = data as { result?: { plotMetadata?: PlotMetadata } };
-      if (executionData.result?.plotMetadata) {
-        this.updatePlot(executionData.result.plotMetadata);
-      }
-    });
+    // One render per completed run; per-channel events remain for errors/variables only.
+    this.subscriptions.push(this.eventBus.subscribe(EVENT_NAMES.PLOT_RUN_COMPLETED, (data: { runId: string }) => {
+      const run = this.executedProgramService.getPlotRun(data.runId);
+      if (!run || data.runId === this.displayedRunId) return;
+      this.displayedRunId = run.runId;
+      this.stale = false;
+      this.updatePlot(structuredClone(run.plotMetadata) as PlotMetadata);
+      this.refreshStaleness();
+    }));
 
     // Allow external UI elements to request a plot
-    this.eventBus.subscribe(EVENT_NAMES.PLOT_REQUEST, (data: unknown) => {
+    this.subscriptions.push(this.eventBus.subscribe(EVENT_NAMES.PLOT_REQUEST, (data: unknown) => {
       const requestData = data as { channelId?: string } | undefined;
       this.plotNCCode(requestData?.channelId);
-    });
+    }));
 
     // Listen for plot toggle
-    this.eventBus.subscribe(EVENT_NAMES.STATE_CHANGED, (data: unknown) => {
+    this.subscriptions.push(this.eventBus.subscribe(EVENT_NAMES.STATE_CHANGED, (data: unknown) => {
       const stateData = data as { uiSettings?: { plotViewerOpen?: boolean } };
       if (stateData.uiSettings?.plotViewerOpen !== undefined) {
         this.isVisible = stateData.uiSettings.plotViewerOpen;
         this.updateVisibility();
       }
-    });
+      this.refreshStaleness();
+    }));
+    for (const name of ['program:content_changed', 'program:active_changed', EVENT_NAMES.MACHINE_CHANGED,
+      EVENT_NAMES.PROGRAM_TOOL_VALUES_CHANGED, EVENT_NAMES.CUSTOM_VARIABLES_CHANGED, EVENT_NAMES.PARSE_COMPLETED]) {
+      this.subscriptions.push(this.eventBus.subscribe(name, () => this.refreshStaleness()));
+    }
 
     // Listen for cursor movement to highlight segments
-    this.eventBus.subscribe(EVENT_NAMES.EDITOR_CURSOR_MOVED, (data: unknown) => {
-      const cursorData = data as { channelId: string; lineNumber: number };
+    this.subscriptions.push(this.eventBus.subscribe(EVENT_NAMES.EDITOR_CURSOR_MOVED, (data: unknown) => {
+      const cursorData = data as { channelId: string; lineNumber: number; source?: ProgramSource };
+      this.refreshStaleness();
+      if (this.stale || !cursorData.source) return;
+      const run = this.displayedRunId ? this.executedProgramService.getPlotRun(this.displayedRunId) : undefined;
+      const snapshot = run?.inputs.find((input) => input.snapshot.identity.channelId === cursorData.channelId)?.snapshot;
+      if (!snapshot || snapshot.revision !== cursorData.source.revision ||
+        programIdentityKey(snapshot.identity) !== programIdentityKey(cursorData.source.identity)) return;
       this.highlightSegment(cursorData.channelId, cursorData.lineNumber);
-    });
+    }));
   }
 
   private render() {
@@ -386,10 +415,10 @@ export class NCToolpathPlot extends HTMLElement {
     if (this.isPlotting) return;
 
     const statusElement = this.shadowRoot?.getElementById('plot-status');
+    const generation = ++this.requestGeneration;
 
     try {
       this.isPlotting = true;
-      this.clearPlot();
       if (statusElement) {
         statusElement.textContent = 'Generating plot...';
       }
@@ -397,8 +426,8 @@ export class NCToolpathPlot extends HTMLElement {
       // Get all active channels and their NC code
       const activeChannels = this.stateService.getActiveChannels();
       const state = this.stateService.getState();
-      const machineName = state.globalMachine || 'SIEMENS_MILL';
-      const toolPathMode = state.toolPathMode || 'effective';
+      const machineName = state.globalMachine;
+      if (!machineName) throw new Error('Select a machine before plotting');
 
       if (activeChannels.length === 0) {
         throw new Error('No active channels');
@@ -422,85 +451,77 @@ export class NCToolpathPlot extends HTMLElement {
         throw new Error('No channels to plot');
       }
 
-      // Get the code from the editor elements in the DOM
-      const requests = channelsToPlot.map((channel) => {
-        // Query the nc-code-pane element for this channel
-        const codePane = document.querySelector(
-          `nc-channel-pane[data-channel="${channel.id}"] nc-code-pane`,
-        ) as (HTMLElement & { getValue: () => string }) | null;
-
-        // Get tool values from the NCToolList component
-        const toolList = document.querySelector(
-          `nc-channel-pane[data-channel="${channel.id}"] nc-tool-list`,
-        ) as (NCToolList & { getToolValues: () => ToolValue[] }) | null;
-
-        // Get custom variables from the NCBottomPanel component
-        const bottomPanel = document.querySelector(
-          `nc-channel-pane[data-channel="${channel.id}"] nc-bottom-panel`,
-        ) as (NCBottomPanel & { getCustomVariables: () => CustomVariable[] }) | null;
-
-        const program = codePane?.getValue() || channel.program || '';
-        const toolValues = toolList?.getToolValues() || [];
-        const customVariables = bottomPanel?.getCustomVariables() || [];
-
+      const inputs: PlotRunInput[] = channelsToPlot.map((channel) => {
+        const source = this.readProgramSource(channel.id);
+        if (!source) throw new Error(`No source program for channel ${channel.id}`);
+        const snapshot = this.programTools.captureProgramSnapshot(
+          source.identity, source.revision, source.text, state.activeMachine?.simulationCommentSyntax,
+        );
+        if (!snapshot.valid) {
+          throw new Error(`Channel ${channel.id}: ${snapshot.diagnostics.map((diagnostic) => diagnostic.message).join('; ')}`);
+        }
         return {
-          channelId: channel.id,
-          program,
-          machineName: machineName as MachineType,
-          toolValues,
-          customVariables,
+          snapshot,
+          machineName,
+          machineProfile: state.activeMachine,
+          toolValues: this.programTools.getExecutionToolValues(snapshot),
+          customVariables: this.readCustomVariables(channel.id),
         };
       });
-
-      // Channel-header Plot requests must remain single-channel backend requests.
-      const results = targetChannelId
-        ? [await this.executedProgramService.executeProgram(requests[0], toolPathMode)]
-        : await this.executedProgramService.executeMultipleChannels(requests, toolPathMode);
-
-      // Clear existing plot before adding new ones
-      // Note: If we are plotting a single channel, we might want to keep others?
-      // But currently updatePlot clears everything.
-      // If we want to support multi-channel plotting where we add one by one, we need to change updatePlot.
-      // For now, let's assume plotting a channel clears the view and shows only that channel (or all if global plot).
-
-      // If we are plotting a specific channel, we should probably clear the cache/view first
-      // But updatePlot does that.
-
-      // Update the plot with the results
-      let totalPoints = 0;
-      let totalSegments = 0;
-
-      // We need to handle multiple results.
-      // Since updatePlot clears the scene, we can only call it once or modify it.
-      // Let's modify updatePlot to NOT clear if we are adding?
-      // Or better, combine the metadata.
-
-      const combinedMetadata: PlotMetadata = {
-        points: [],
-        segments: [],
-      };
-
-      results.forEach((result) => {
-        if (result.plotMetadata) {
-          combinedMetadata.points.push(...result.plotMetadata.points);
-          combinedMetadata.segments.push(...result.plotMetadata.segments);
-        }
-      });
-
-      totalPoints = combinedMetadata.points.length;
-      totalSegments = combinedMetadata.segments.length;
-      this.updatePlot(combinedMetadata);
-
-      if (statusElement) {
-        statusElement.textContent = `Points: ${totalPoints}, Segments: ${totalSegments}`;
-      }
+      // Optional holder/cutting lengths and edge geometry are captured here, never fetched per cursor move.
+      // The run event owns rendering; the promise handles busy/failure state only.
+      await this.executedProgramService.executePlotRun(inputs, targetChannelId !== undefined);
     } catch (error) {
       console.error('Failed to plot NC code:', error);
-      if (statusElement) {
+      if (statusElement && generation === this.requestGeneration) {
         statusElement.textContent = `Error: ${error instanceof Error ? error.message : 'Plot failed'}`;
       }
     } finally {
-      this.isPlotting = false;
+      if (generation === this.requestGeneration) this.isPlotting = false;
+    }
+  }
+
+  private readProgramSource(channelId: ChannelId): ProgramSource | undefined {
+    const codePane = document.querySelector(
+      `nc-channel-pane[data-channel="${channelId}"] nc-code-pane`,
+    ) as (HTMLElement & { getProgramSource(): ProgramSource | undefined }) | null;
+    if (codePane) return codePane.getProgramSource();
+    const program = this.fileManager.getActiveProgram(channelId);
+    return program ? {
+      identity: { documentId: program.sourceFileId, programId: program.id, channelId },
+      revision: program.lastModified,
+      text: program.content,
+    } : undefined;
+  }
+
+  private readCustomVariables(channelId: ChannelId): CustomVariable[] {
+    const panel = document.querySelector(
+      `nc-channel-pane[data-channel="${channelId}"] nc-bottom-panel`,
+    ) as NCBottomPanel | null;
+    return structuredClone(panel?.getCustomVariables() ?? []);
+  }
+
+  private refreshStaleness(): void {
+    const run = this.displayedRunId ? this.executedProgramService.getPlotRun(this.displayedRunId) : undefined;
+    if (!run || this.stale) return;
+    const state = this.stateService.getState();
+    this.stale = run.inputs.some((input) => {
+      const snapshot = input.snapshot;
+      const source = this.readProgramSource(snapshot.identity.channelId);
+      return !source || source.revision !== snapshot.revision || source.text !== snapshot.text ||
+        programIdentityKey(source.identity) !== programIdentityKey(snapshot.identity) ||
+        state.globalMachine !== input.machineName ||
+        JSON.stringify(state.activeMachine) !== JSON.stringify(input.machineProfile) ||
+        JSON.stringify(this.programTools.getExecutionToolValues(snapshot)) !== JSON.stringify(input.toolValues) ||
+        JSON.stringify(this.readCustomVariables(snapshot.identity.channelId)) !== JSON.stringify(input.customVariables);
+    });
+    if (this.stale) {
+      if (this.highlightObject) {
+        this.removeOwnedPlotObject(this.highlightObject);
+        this.highlightObject = null;
+      }
+      const status = this.shadowRoot?.getElementById('plot-status');
+      if (status) status.textContent = 'Plot is stale — input changed. Plot again to follow the editor.';
     }
   }
 
@@ -636,11 +657,11 @@ export class NCToolpathPlot extends HTMLElement {
         toRemove.push(child);
       }
     });
-    toRemove.forEach((obj) => this.scene?.remove(obj));
+    toRemove.forEach((obj) => this.removeOwnedPlotObject(obj));
 
     // Remove highlight object if exists
     if (this.highlightObject) {
-      this.scene.remove(this.highlightObject);
+      this.removeOwnedPlotObject(this.highlightObject);
       this.highlightObject = null;
     }
 
@@ -664,7 +685,7 @@ export class NCToolpathPlot extends HTMLElement {
 
     // Remove previous highlight
     if (this.highlightObject) {
-      this.scene.remove(this.highlightObject);
+      this.removeOwnedPlotObject(this.highlightObject);
       this.highlightObject = null;
     }
 
@@ -826,13 +847,18 @@ export class NCToolpathPlot extends HTMLElement {
   }
 
   private clearPlot() {
-    if (!this.scene) return;
-
+    this.requestGeneration++;
+    this.isPlotting = false;
+    this.executedProgramService.cancelPendingPlot();
+    if (this.displayedRunId) this.executedProgramService.discardPlotRun(this.displayedRunId);
+    this.displayedRunId = undefined;
+    this.stale = false;
     this.currentPlotMetadata = null;
+    if (!this.scene) return;
 
     // Remove highlight object if exists
     if (this.highlightObject) {
-      this.scene.remove(this.highlightObject);
+      this.removeOwnedPlotObject(this.highlightObject);
       this.highlightObject = null;
     }
 
@@ -843,7 +869,7 @@ export class NCToolpathPlot extends HTMLElement {
         toRemove.push(child);
       }
     });
-    toRemove.forEach((obj) => this.scene?.remove(obj));
+    toRemove.forEach((obj) => this.removeOwnedPlotObject(obj));
 
     // Update status
     const statusElement = this.shadowRoot?.getElementById('plot-status');
@@ -853,6 +879,18 @@ export class NCToolpathPlot extends HTMLElement {
 
     // Notify other components (e.g., NCCodePane) that the plot was cleared
     this.eventBus.publish(EVENT_NAMES.PLOT_CLEARED, undefined);
+  }
+
+  /** Segmented paths and highlights own their resources; never dispose shared axes/cache here. */
+  private removeOwnedPlotObject(object: THREE.Object3D): void {
+    this.scene?.remove(object);
+    object.traverse((child) => {
+      if (child instanceof THREE.Line || child instanceof THREE.Mesh) {
+        child.geometry.dispose();
+        const materials = Array.isArray(child.material) ? child.material : [child.material];
+        materials.forEach((material) => material.dispose());
+      }
+    });
   }
 
   private zoomIn() {

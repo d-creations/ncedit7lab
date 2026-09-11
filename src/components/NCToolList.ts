@@ -1,7 +1,9 @@
 import { ServiceRegistry } from '@core/ServiceRegistry';
-import { EVENT_BUS_TOKEN } from '@core/ServiceTokens';
-import { EventBus, EVENT_NAMES } from '@services/EventBus';
-import type { ParseArtifacts, NcParseResult, ToolRegisterEntry, ToolValue } from '@core/types';
+import { EVENT_BUS_TOKEN, PROGRAM_TOOL_SERVICE_TOKEN, FILE_MANAGER_SERVICE_TOKEN } from '@core/ServiceTokens';
+import { EventBus, EVENT_NAMES, type EventSubscription } from '@services/EventBus';
+import type { ParseArtifacts, NcParseResult, ToolRegisterEntry, ToolValue, ChannelId } from '@core/types';
+import type { IFileManagerService } from '@services/IFileManagerService';
+import type { ProgramToolService, ProgramIdentity } from '@services/tools/ProgramToolService';
 
 interface ToolWithValues extends ToolRegisterEntry {
   qValue?: number;
@@ -12,6 +14,9 @@ export class NCToolList extends HTMLElement {
   private eventBus: EventBus;
   private tools: ToolWithValues[] = [];
   private channelId: string = '';
+  private programTools: ProgramToolService;
+  private fileManager: IFileManagerService;
+  private subscriptions: EventSubscription[] = [];
 
   static get observedAttributes() {
     return ['channel-id'];
@@ -21,6 +26,8 @@ export class NCToolList extends HTMLElement {
     super();
     this.attachShadow({ mode: 'open' });
     this.eventBus = ServiceRegistry.getInstance().get(EVENT_BUS_TOKEN);
+    this.programTools = ServiceRegistry.getInstance().get(PROGRAM_TOOL_SERVICE_TOKEN);
+    this.fileManager = ServiceRegistry.getInstance().get(FILE_MANAGER_SERVICE_TOKEN);
   }
 
   attributeChangedCallback(name: string, _oldValue: string, newValue: string) {
@@ -35,14 +42,20 @@ export class NCToolList extends HTMLElement {
   }
 
   private setupEventListeners() {
+    this.subscriptions.push(this.eventBus.subscribe('program:active_changed', (data: { channelId: string }) => {
+      if (data.channelId !== this.channelId) return;
+      this.tools = [];
+      this.updateList();
+    }));
     // Listen for parse results
-    this.eventBus.subscribe(
+    this.subscriptions.push(this.eventBus.subscribe(
       EVENT_NAMES.PARSE_COMPLETED,
       (data: { channelId: string; result: NcParseResult; artifacts: ParseArtifacts }) => {
         if (data.channelId === this.channelId) {
           // Preserve existing Q and R values for tools that still exist
           const existingToolValues = new Map<number | string, { qValue?: number; rValue?: number }>();
-          this.tools.forEach((tool) => {
+          const identity = this.getProgramIdentity();
+          (identity ? this.programTools.getTemporaryToolValues(identity) : []).forEach((tool) => {
             if (tool.qValue !== undefined || tool.rValue !== undefined) {
               existingToolValues.set(tool.toolNumber, {
                 qValue: tool.qValue,
@@ -63,7 +76,19 @@ export class NCToolList extends HTMLElement {
           this.updateList();
         }
       },
-    );
+    ));
+  }
+
+  disconnectedCallback(): void {
+    this.subscriptions.forEach((subscription) => subscription.unsubscribe());
+    this.subscriptions = [];
+  }
+
+  private getProgramIdentity(): ProgramIdentity | undefined {
+    const program = this.fileManager.getActiveProgram(this.channelId);
+    return program ? {
+      documentId: program.sourceFileId, programId: program.id, channelId: this.channelId as ChannelId,
+    } : undefined;
   }
 
   /**
@@ -183,7 +208,7 @@ export class NCToolList extends HTMLElement {
         }
       </style>
 
-      <div class="tool-header">Tools (Q/R Values)</div>
+      <div class="tool-header" title="Temporary overrides; managed program metadata takes precedence">Tools (temporary Q/R values)</div>
       <div class="tool-list" id="list"></div>
     `;
   }
@@ -295,6 +320,11 @@ export class NCToolList extends HTMLElement {
         this.tools[toolIndex].qValue = value;
       } else if (type === 'r') {
         this.tools[toolIndex].rValue = value;
+      }
+      const identity = this.getProgramIdentity();
+      if (identity) {
+        this.programTools.setTemporaryToolValues(identity, this.getToolValues());
+        this.eventBus.publish(EVENT_NAMES.PROGRAM_TOOL_VALUES_CHANGED, { identity });
       }
     }
   }

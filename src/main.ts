@@ -17,6 +17,11 @@ import {
   TEMPLATE_CATALOG_SERVICE_TOKEN,
   TEMPLATE_INSERTION_SERVICE_TOKEN,
   MULTICHANNEL_ALIGNMENT_SERVICE_TOKEN,
+  SIMULATION_COMMENT_CODEC_TOKEN,
+  PROGRAM_TOOL_SERVICE_TOKEN,
+  TOOL_LIBRARY_REPOSITORY_TOKEN,
+  TOOL_CATALOG_SERVICE_TOKEN,
+  PROGRAM_METADATA_EDIT_SERVICE_TOKEN,
 } from '@core/ServiceTokens';
 import { EventBus } from '@services/EventBus';
 import { StateService } from '@services/StateService';
@@ -35,11 +40,17 @@ import { WebTemplateRepository } from '@services/templates/WebTemplateRepository
 import { TemplateCatalogService } from '@services/templates/TemplateCatalogService';
 import { TemplateInsertionService } from '@services/templates/TemplateInsertionService';
 import { MultichannelAlignmentService } from '@services/MultichannelAlignmentService';
+import { SimulationCommentCodec } from '@services/tools/SimulationCommentCodec';
+import { ProgramToolService } from '@services/tools/ProgramToolService';
+import { WebToolLibraryRepository } from '@services/tools/WebToolLibraryRepository';
+import { ToolCatalogService } from '@services/tools/ToolCatalogService';
+import { ProgramMetadataEditService } from '@services/tools/ProgramMetadataEditService';
 import type { ExecutedProgramResult } from '@core/types';
 import { EVENT_NAMES } from '@services/EventBus';
 import '@components/NCEditorApp';
 import '@components/NCWorkbenchPanelApp';
 import '@components/NCTemplatesPanel';
+import '@components/NCToolManagerPanel';
 
 function applyThemeMode(themeMode: 'vscode' | 'one-dark' | 'light', isVSCode: boolean) {
   const body = document.body;
@@ -296,6 +307,28 @@ async function bootstrap() {
     registry.register(
       MULTICHANNEL_ALIGNMENT_SERVICE_TOKEN,
       () => new MultichannelAlignmentService(registry.get(BACKEND_GATEWAY_TOKEN)),
+      ServiceScope.Singleton,
+    );
+
+    registry.register(SIMULATION_COMMENT_CODEC_TOKEN, () => new SimulationCommentCodec(), ServiceScope.Singleton);
+    registry.register(
+      TOOL_LIBRARY_REPOSITORY_TOKEN,
+      () => new WebToolLibraryRepository(),
+      ServiceScope.Singleton,
+    );
+    registry.register(
+      TOOL_CATALOG_SERVICE_TOKEN,
+      () => new ToolCatalogService(registry.get(TOOL_LIBRARY_REPOSITORY_TOKEN), registry.get(EVENT_BUS_TOKEN)),
+      ServiceScope.Singleton,
+    );
+    registry.register(
+      PROGRAM_METADATA_EDIT_SERVICE_TOKEN,
+      () => new ProgramMetadataEditService(registry.get(SIMULATION_COMMENT_CODEC_TOKEN)),
+      ServiceScope.Singleton,
+    );
+    registry.register(
+      PROGRAM_TOOL_SERVICE_TOKEN,
+      () => new ProgramToolService(registry.get(SIMULATION_COMMENT_CODEC_TOKEN), registry.get(EVENT_BUS_TOKEN)),
       ServiceScope.Singleton,
     );
 

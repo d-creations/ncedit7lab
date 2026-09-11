@@ -59,6 +59,7 @@ export class MachineService {
       regexPatterns: data.regexPatterns,
       variablePrefix: data.variablePrefix,
       fileExtensions: data.fileExtensions,
+      simulationCommentSyntax: data.simulationCommentSyntax,
     };
   }
 

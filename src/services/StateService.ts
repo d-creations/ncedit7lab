@@ -121,6 +121,8 @@ export class StateService {
     const raw = JSON.parse(jsonStr);
     return {
       ...raw,
+      // Normalize legacy storage and undo snapshots; effective-mode plotting is retired.
+      toolPathMode: 'center',
       channels: new Map(raw.channels),
       activeProgramIds: new Map(raw.activeProgramIds || [])
     };
@@ -136,7 +138,7 @@ export class StateService {
       ]),
       activeProgramIds: new Map(),
       workbenchSelectedChannel: '1',
-      toolPathMode: 'effective',
+      toolPathMode: 'center',
       uiSettings: {
         timeGutterPosition: 'left',
         keywordListPosition: 'left',
@@ -216,7 +218,9 @@ export class StateService {
     }
   }
 
-  setToolPathMode(toolPathMode: ToolPathMode): void {
+  setToolPathMode(_toolPathMode: ToolPathMode): void {
+    // Compatibility with older callers must not re-enable effective-mode plots.
+    const toolPathMode = 'center';
     if (this.state.toolPathMode === toolPathMode) return;
 
     this.saveStateToHistory();

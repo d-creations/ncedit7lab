@@ -17,6 +17,7 @@ import './NCDrawBoardPanel';
 import './NCFileManager'; // Keep for global file loading if needed, but removed from template
 import './NCTransferPanel';
 import './NCTemplatesPanel';
+import './NCToolManagerPanel';
 
 // Constants for plot panel sizing
 const PLOT_PANEL_MIN_WIDTH = 200;
@@ -524,13 +525,14 @@ export class NCEditorApp extends HTMLElement {
           </div>
         </div>
         <!-- small open bar that appears when plot panel is hidden and integrated into layout -->
-        <div id="plot-open-bar" class="plot-open-bar hidden" title="Open side panel">📈 Tools</div>
+        <div id="plot-open-bar" class="plot-open-bar hidden" title="Open side panel">Tools</div>
         
         <div class="app-plot-container" id="plot-container">
           <div class="plot-resize-handle" id="plot-resize-handle"></div>
           <div class="plot-content" style="display: flex; flex-direction: column;">
             <div class="side-panel-tabs" style="display: flex; background: var(--vscode-editorGroupHeader-tabsBackground, #2d2d2d); border-bottom: 1px solid var(--vscode-editorGroup-border, #3e3e42);">
               <button class="side-tab active" data-view="plot" style="flex:1; padding: 6px; background: var(--vscode-tab-activeBackground, #1e1e1e); color: var(--vscode-tab-activeForeground, #ffffff); border: none; cursor: pointer; border-top: 2px solid var(--vscode-tab-activeBorderTop, #007fd4);">Plot</button>
+              <button class="side-tab" data-view="tools" style="flex:1; padding: 6px; background: var(--vscode-tab-inactiveBackground, #2d2d2d); color: var(--vscode-tab-inactiveForeground, #cccccc); border: none; cursor: pointer; border-top: 2px solid transparent;">Tools</button>
               ${showDrawPanel ? '<button class="side-tab" data-view="draw" style="flex:1; padding: 6px; background: var(--vscode-tab-inactiveBackground, #2d2d2d); color: var(--vscode-tab-inactiveForeground, #cccccc); border: none; cursor: pointer; border-top: 2px solid transparent;">Draw</button>' : ''}
               ${showTemplatesPanel ? '<button class="side-tab" data-view="templates" style="flex:1; padding: 6px; background: var(--vscode-tab-inactiveBackground, #2d2d2d); color: var(--vscode-tab-inactiveForeground, #cccccc); border: none; cursor: pointer; border-top: 2px solid transparent;">Templates</button>' : ''}
               ${showTransferPanel ? '<button class="side-tab" data-view="transfer" style="flex:1; padding: 6px; background: var(--vscode-tab-inactiveBackground, #2d2d2d); color: var(--vscode-tab-inactiveForeground, #cccccc); border: none; cursor: pointer; border-top: 2px solid transparent;">Transfer</button>' : ''}
@@ -538,6 +540,7 @@ export class NCEditorApp extends HTMLElement {
             <div id="side-view-plot" style="flex: 1; overflow: hidden; display: block;">
               <nc-toolpath-plot></nc-toolpath-plot>
             </div>
+            <div id="side-view-tools" style="flex: 1; overflow: hidden; display: none;"><nc-tool-manager-panel></nc-tool-manager-panel></div>
             ${showDrawPanel ? '<div id="side-view-draw" style="flex: 1; overflow: hidden; display: none;"><nc-draw-board-panel></nc-draw-board-panel></div>' : ''}
             ${showTemplatesPanel ? '<div id="side-view-templates" style="flex: 1; overflow: hidden; display: none;"><nc-templates-panel></nc-templates-panel></div>' : ''}
             ${showTransferPanel ? '<div id="side-view-transfer" style="flex: 1; overflow: hidden; display: none;"><nc-transfer-panel></nc-transfer-panel></div>' : ''}
@@ -567,9 +570,10 @@ export class NCEditorApp extends HTMLElement {
           <span>CH 3</span>
         </button>
         <button class="nav-item" data-view="plot">
-          <span class="nav-icon">📈</span>
+          <span class="nav-icon">P</span>
           <span>Plot</span>
         </button>
+        <button class="nav-item" data-view="tools"><span class="nav-icon">T</span><span>Tools</span></button>
         ${showDrawPanel ? '<button class="nav-item" data-view="draw"><span class="nav-icon">✏️</span><span>Draw</span></button>' : ''}
         ${showTemplatesPanel ? '<button class="nav-item" data-view="templates"><span class="nav-icon">📄</span><span>Templates</span></button>' : ''}
       </div>
@@ -815,7 +819,7 @@ export class NCEditorApp extends HTMLElement {
 
     if (view === 'plot') {
       this.setPlotViewerVisible(true);
-    } else if (view === 'draw' || view === 'templates') {
+    } else if (view === 'draw' || view === 'templates' || view === 'tools') {
       this.setPlotViewerVisible(true);
       this.switchSidePanelView(view);
     } else if (view.startsWith('channel-')) {
@@ -872,6 +876,7 @@ export class NCEditorApp extends HTMLElement {
   private switchSidePanelView(view: string): void {
     const tabs = this.querySelectorAll('.side-tab');
     const plotView = this.querySelector('#side-view-plot') as HTMLElement;
+    const toolsView = this.querySelector('#side-view-tools') as HTMLElement;
     const drawView = this.querySelector('#side-view-draw') as HTMLElement;
     const templatesView = this.querySelector('#side-view-templates') as HTMLElement;
     const transferView = this.querySelector('#side-view-transfer') as HTMLElement;
@@ -891,6 +896,7 @@ export class NCEditorApp extends HTMLElement {
 
     if (view === 'plot') {
       if (plotView) plotView.style.display = 'block';
+      if (toolsView) toolsView.style.display = 'none';
       if (drawView) drawView.style.display = 'none';
       if (templatesView) templatesView.style.display = 'none';
       if (transferView) transferView.style.display = 'none';
@@ -898,6 +904,7 @@ export class NCEditorApp extends HTMLElement {
       if (transferToggle) transferToggle.classList.remove('active');
     } else if (view === 'draw') {
       if (plotView) plotView.style.display = 'none';
+      if (toolsView) toolsView.style.display = 'none';
       if (drawView) drawView.style.display = 'block';
       if (templatesView) templatesView.style.display = 'none';
       if (transferView) transferView.style.display = 'none';
@@ -905,13 +912,23 @@ export class NCEditorApp extends HTMLElement {
       if (transferToggle) transferToggle.classList.remove('active');
     } else if (view === 'templates') {
       if (plotView) plotView.style.display = 'none';
+      if (toolsView) toolsView.style.display = 'none';
       if (drawView) drawView.style.display = 'none';
       if (templatesView) templatesView.style.display = 'block';
       if (transferView) transferView.style.display = 'none';
       const transferToggle = this.querySelector('#transfer-toggle') as HTMLButtonElement;
       if (transferToggle) transferToggle.classList.remove('active');
+    } else if (view === 'tools') {
+      if (plotView) plotView.style.display = 'none';
+      if (toolsView) toolsView.style.display = 'block';
+      if (drawView) drawView.style.display = 'none';
+      if (templatesView) templatesView.style.display = 'none';
+      if (transferView) transferView.style.display = 'none';
+      const transferToggle = this.querySelector('#transfer-toggle') as HTMLButtonElement;
+      if (transferToggle) transferToggle.classList.remove('active');
     } else if (view === 'transfer') {
       if (plotView) plotView.style.display = 'none';
+      if (toolsView) toolsView.style.display = 'none';
       if (drawView) drawView.style.display = 'none';
       if (templatesView) templatesView.style.display = 'none';
       if (transferView) transferView.style.display = 'block';

@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ExecutedProgramService } from '../ExecutedProgramService';
 import { BackendGateway } from '../BackendGateway';
-import { EventBus } from '../EventBus';
-import type { PlotResponse } from '@core/types';
+import { EventBus, EVENT_NAMES } from '../EventBus';
+import type { BackendPlotSegment, PlotResponse, ToolPathMode } from '@core/types';
 
 // Mock the BackendGateway
 vi.mock('../BackendGateway');
@@ -16,6 +16,134 @@ describe('ExecutedProgramService', () => {
     mockBackend = new BackendGateway();
     mockEventBus = new EventBus();
     service = new ExecutedProgramService(mockBackend, mockEventBus);
+  });
+
+  describe('centre-mode request boundary', () => {
+    it.each([undefined, 'effective', 'center'] as const)(
+      'enforces centre mode for single and multi-channel requests with legacy mode %s',
+      async (mode: ToolPathMode | undefined) => {
+        vi.mocked(mockBackend.requestPlot).mockResolvedValue({ canal: {} });
+        const first = {
+          channelId: '1' as const,
+          program: '(keep comments)\r\nT0\r\nG1 X1',
+          machineName: 'SIEMENS_MILL',
+          toolValues: [{ toolNumber: 0, qValue: 0, rValue: 0 }],
+          customVariables: [{ name: 'R1', value: 0 }],
+        };
+        const second = { ...first, channelId: '2' as const };
+
+        await service.executeProgram(first, mode);
+        await service.executeMultipleChannels([first, second], mode);
+
+        const payload = (canalNr: string) => ({
+          canalNr,
+          program: '(keep comments)\nT0\nG1 X1',
+          machineName: first.machineName,
+          toolValues: first.toolValues,
+          customVariables: first.customVariables,
+        });
+        expect(mockBackend.requestPlot).toHaveBeenNthCalledWith(1, {
+          toolPathMode: 'center', machinedata: [payload('1')],
+        });
+        expect(mockBackend.requestPlot).toHaveBeenNthCalledWith(2, {
+          toolPathMode: 'center', machinedata: [payload('1'), payload('2')],
+        });
+      },
+    );
+  });
+
+  describe('execution metadata', () => {
+    const move = (metadata: Partial<BackendPlotSegment> = {}): BackendPlotSegment => ({
+      geometry: 'LINEAR',
+      traversal: 'FEED',
+      lineNumber: 7,
+      points: [{ x: 0, y: 0, z: 0 }, { x: 1, y: 0, z: 0 }],
+      ...metadata,
+    });
+    const request = { channelId: '1' as const, program: 'G1 X1', machineName: 'SIEMENS_MILL' };
+
+    it('preserves exact tool identifiers and unavailable values without carrying state forward', async () => {
+      const metadata: Partial<BackendPlotSegment>[] = [
+        { toolNumber: 0, executionStep: 0 },
+        { toolNumber: 1, executionStep: 1 },
+        { toolNumber: '1', executionStep: 2 },
+        { toolNumber: 'DRILL_8', executionStep: 3 },
+        { toolNumber: 'unknown', executionStep: 4 },
+        { toolNumber: null, executionStep: null },
+        {},
+      ];
+      vi.mocked(mockBackend.requestPlot).mockResolvedValue({
+        canal: { '1': { segments: metadata.map(move) } },
+      });
+
+      const result = await service.executeProgram(request);
+      const segments = result.plotMetadata!.segments;
+      expect(segments).toHaveLength(metadata.length);
+      metadata.forEach((entry, index) => {
+        expect(segments[index]).toMatchObject({
+          toolNumber: entry.toolNumber,
+          executionStep: entry.executionStep,
+          sourceSegmentIndex: index,
+          subsegmentIndex: 0,
+          channelId: '1',
+        });
+      });
+      // Deduplicated display points must not collapse repeated execution occurrences.
+      expect(result.plotMetadata!.points).toHaveLength(2);
+
+      vi.mocked(mockBackend.requestPlot).mockResolvedValue({ canal: { '1': { segments: [move()] } } });
+      const nextRun = await service.executeProgram(request);
+      expect(nextRun.plotMetadata!.segments[0].toolNumber).toBeUndefined();
+      expect(nextRun.plotMetadata!.segments[0].executionStep).toBeUndefined();
+    });
+
+    it('retains response ordinals, cycle steps and every sampled arc pair across combined channels', async () => {
+      const completed = vi.fn();
+      mockEventBus.subscribe(EVENT_NAMES.EXECUTION_COMPLETED, completed);
+      vi.mocked(mockBackend.requestPlot).mockResolvedValue({
+        canal: {
+          '1': {
+            segments: [
+              move({ geometry: 'UNSUPPORTED', executionStep: 0 }),
+              move({ toolNumber: 0, executionStep: 0 }),
+              move({
+                geometry: 'ARC_CW', toolNumber: 'FINISH', executionStep: 4,
+                points: [
+                  { x: 1, y: 0, z: 0 }, { x: 0.7, y: 0.7, z: 0 },
+                  { x: 0, y: 1, z: 0 }, { x: -1, y: 0, z: 0 },
+                ],
+              }),
+              move({ toolNumber: 'FINISH', executionStep: 4 }),
+              move({ toolNumber: 2, executionStep: 8 }),
+            ],
+          },
+          '2': { segments: [move({ toolNumber: 'DRILL', executionStep: 0 }), move()] },
+        },
+      });
+
+      const results = await service.executeMultipleChannels([request, { ...request, channelId: '2' }]);
+      // This is the same concatenation used by the global plot; channel-local ordinals stay scoped.
+      const combined = results.flatMap((result) => result.plotMetadata!.segments);
+      expect(combined.map((segment) => [
+        segment.channelId, segment.sourceSegmentIndex, segment.subsegmentIndex,
+        segment.executionStep, segment.toolNumber,
+      ])).toEqual([
+        ['1', 1, 0, 0, 0],
+        ['1', 2, 0, 4, 'FINISH'],
+        ['1', 2, 1, 4, 'FINISH'],
+        ['1', 2, 2, 4, 'FINISH'],
+        ['1', 3, 0, 4, 'FINISH'],
+        ['1', 4, 0, 8, 2],
+        ['2', 0, 0, 0, 'DRILL'],
+        ['2', 1, 0, undefined, undefined],
+      ]);
+      expect(combined.slice(1, 4).map((segment) => segment.type)).toEqual(['arc', 'arc', 'arc']);
+      expect(combined.every((segment) => segment.endPoint.lineNumber === 7)).toBe(true);
+      expect(completed).toHaveBeenCalledTimes(2);
+      results.forEach((result, index) => {
+        expect(completed).toHaveBeenNthCalledWith(index + 1, { channelId: String(index + 1), result });
+      });
+    });
   });
 
   describe('parseExecutionResponse', () => {

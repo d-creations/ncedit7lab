@@ -1,11 +1,13 @@
 import { ServiceRegistry } from '@core/ServiceRegistry';
-import { PARSER_SERVICE_TOKEN, EVENT_BUS_TOKEN, STATE_SERVICE_TOKEN, FILE_MANAGER_SERVICE_TOKEN } from '@core/ServiceTokens';
+import { PARSER_SERVICE_TOKEN, EVENT_BUS_TOKEN, STATE_SERVICE_TOKEN, FILE_MANAGER_SERVICE_TOKEN, PROGRAM_METADATA_EDIT_SERVICE_TOKEN } from '@core/ServiceTokens';
 import { ParserService } from '@services/ParserService';
 import { StateService } from '@services/StateService';
 import { IFileManagerService } from '@services/IFileManagerService';
 import { EventBus, EVENT_NAMES, EventSubscription } from '@services/EventBus';
 import type { ChannelId, ExecutedProgramResult, FaultDetail, NCProgram } from '@core/types';
 import type { TemplateInsertEventPayload } from '@services/templates/TemplateInsertionService';
+import type { ProgramSource } from '@services/tools/ProgramToolService';
+import type { ProgramMetadataEditService, ProgramToolUpdateRequest, ProgramToolUpdateResult } from '@services/tools/ProgramMetadataEditService';
 // @ts-expect-error - ACE module doesn't export types correctly
 import ace from 'ace-builds/src-noconflict/ace';
 import 'ace-builds/src-noconflict/mode-text';
@@ -18,6 +20,9 @@ import { buildBackendUrlSync } from '@services/BackendUrl';
 const MOBILE_BREAKPOINT = 768;
 
 export class NCCodePane extends HTMLElement {
+  private static nextSourceInstance = 0;
+  private readonly sourceInstance = ++NCCodePane.nextSourceInstance;
+  private sourceRevision = 0;
   private editor?: ace.Ace.Editor;
   private parserService: ParserService;
   private stateService: StateService;
@@ -33,6 +38,8 @@ export class NCCodePane extends HTMLElement {
   private templateInsertSubscription?: EventSubscription;
   private scrollSyncSubscription?: EventSubscription;
   private editorScrollSubscription?: EventSubscription;
+  private toolUpdateSubscription?: EventSubscription;
+  private metadataEdits: ProgramMetadataEditService;
   private scrollSyncEnabled = false;
   private isApplyingSyncedScroll = false;
   private themeObserver?: MutationObserver;
@@ -46,6 +53,7 @@ export class NCCodePane extends HTMLElement {
     this.stateService = registry.get(STATE_SERVICE_TOKEN);
     this.fileManager = registry.get(FILE_MANAGER_SERVICE_TOKEN);
     this.eventBus = registry.get(EVENT_BUS_TOKEN);
+    this.metadataEdits = registry.get(PROGRAM_METADATA_EDIT_SERVICE_TOKEN);
   }
 
   static get observedAttributes() {
@@ -116,6 +124,11 @@ export class NCCodePane extends HTMLElement {
       (data: unknown) => {
         this.applyTemplateInsert(data as TemplateInsertEventPayload);
       },
+    );
+
+    this.toolUpdateSubscription = this.eventBus.subscribe(
+      EVENT_NAMES.PROGRAM_TOOL_UPDATE_REQUEST,
+      (data: unknown) => this.applyProgramToolUpdate(data as ProgramToolUpdateRequest),
     );
 
     this.scrollSyncSubscription = this.eventBus.subscribe(
@@ -219,6 +232,7 @@ export class NCCodePane extends HTMLElement {
     if (this.editorScrollSubscription) {
       this.editorScrollSubscription.unsubscribe();
     }
+    this.toolUpdateSubscription?.unsubscribe();
     if (this.resizeObserver) {
       this.resizeObserver.disconnect();
     }
@@ -440,6 +454,7 @@ export class NCCodePane extends HTMLElement {
     setTimeout(() => this.updateSyntaxHighlighting(), 100);
 
     this.editor.on('change', () => {
+      this.sourceRevision++;
       if (this.isSettingValue) return;
       const value = this.editor?.getValue() || '';
       this.fileManager.updateActiveProgramContent(this.channelId, value);
@@ -484,6 +499,8 @@ export class NCCodePane extends HTMLElement {
       this.eventBus.publish(EVENT_NAMES.EDITOR_CURSOR_MOVED, {
         channelId: this.channelId,
         lineNumber: lineNumber,
+        column: cursorPosition.column + 1,
+        source: this.getProgramSource(),
       });
     });
   }
@@ -498,8 +515,7 @@ export class NCCodePane extends HTMLElement {
   }
 
   private isVsCodeHost(): boolean {
-    // @ts-ignore
-    return (typeof acquireVsCodeApi !== 'undefined' || window.acquireVsCodeApi !== undefined);
+    return (window as Window & { acquireVsCodeApi?: unknown }).acquireVsCodeApi !== undefined;
   }
 
   private applyEditorTheme(): void {
@@ -590,6 +606,40 @@ export class NCCodePane extends HTMLElement {
 
   getValue(): string {
     return this.editor?.getValue() || '';
+  }
+
+  /** Pending ACE edits and their local revision are captured together; no parse or write. */
+  getProgramSource(): ProgramSource | undefined {
+    const program = this.fileManager.getActiveProgram(this.channelId);
+    if (!program || !this.editor) return undefined;
+    return {
+      identity: { documentId: program.sourceFileId, programId: program.id, channelId: this.channelId },
+      revision: `${this.sourceInstance}:${this.sourceRevision}`,
+      text: this.editor.getValue(),
+    };
+  }
+
+  private applyProgramToolUpdate(request: ProgramToolUpdateRequest): void {
+    if (request.channelId !== this.channelId) return;
+    let result: ProgramToolUpdateResult;
+    try {
+      const source = this.getProgramSource();
+      if (!source || source.identity.documentId !== request.documentId ||
+        source.identity.programId !== request.programId ||
+        source.revision !== request.expectedRevision || source.text !== request.expectedText) {
+        throw new Error('Program changed; reload Program Tools before applying');
+      }
+      const edit = this.metadataEdits.planToolUpdate(source.text, request.tool, request.syntax);
+      const nextText = source.text.slice(0, edit.startOffset) + edit.text + source.text.slice(edit.endOffset);
+      this.setValue(nextText);
+      this.syncEditorValue(nextText);
+      result = { requestId: request.requestId, channelId: this.channelId, success: true,
+        message: `Applied tool ${String(request.tool.toolNumber)} to the program` };
+    } catch (cause) {
+      result = { requestId: request.requestId, channelId: this.channelId, success: false,
+        message: cause instanceof Error ? cause.message : String(cause) };
+    }
+    this.eventBus.publish(EVENT_NAMES.PROGRAM_TOOL_UPDATE_RESULT, result);
   }
 
   private applyTemplateInsert(payload: TemplateInsertEventPayload): void {

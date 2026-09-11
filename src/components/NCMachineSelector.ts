@@ -3,7 +3,7 @@ import { MACHINE_SERVICE_TOKEN, STATE_SERVICE_TOKEN, EVENT_BUS_TOKEN } from '@co
 import { MachineService } from '@services/MachineService';
 import { StateService } from '@services/StateService';
 import { EventBus, EVENT_NAMES } from '@services/EventBus';
-import type { MachineType, MachineProfile, ToolPathMode } from '@core/types';
+import type { MachineType, MachineProfile } from '@core/types';
 
 export class NCMachineSelector extends HTMLElement {
   private machineService: MachineService;
@@ -26,12 +26,9 @@ export class NCMachineSelector extends HTMLElement {
     this.attachEventListeners();
 
     // Listen for state changes to update the machine list when machines are fetched
-    this.eventBus.subscribe(EVENT_NAMES.STATE_CHANGED, (data: { machines?: MachineProfile[]; toolPathMode?: ToolPathMode }) => {
+    this.eventBus.subscribe(EVENT_NAMES.STATE_CHANGED, (data: { machines?: MachineProfile[] }) => {
       if (data.machines) {
         this.updateOptions();
-      }
-      if (data.toolPathMode) {
-        this.updateToolPathMode(data.toolPathMode);
       }
     });
 
@@ -43,7 +40,6 @@ export class NCMachineSelector extends HTMLElement {
     if (currentState.globalMachine) {
         this.updateSelection(currentState.globalMachine);
     }
-    this.updateToolPathMode(currentState.toolPathMode);
   }
 
   private updateSelection(machineName: string) {
@@ -87,12 +83,13 @@ export class NCMachineSelector extends HTMLElement {
           overflow: hidden;
         }
         .tool-path-mode {
-          display: flex;
+          padding: 4px 6px;
           border: 1px solid #555;
           border-radius: 4px;
-          overflow: hidden;
+          color: #d4d4d4;
+          font-size: 11px;
+          white-space: nowrap;
         }
-        .tool-path-mode button,
         .control-type-filter button {
           min-width: 36px;
           padding: 4px 6px;
@@ -103,11 +100,9 @@ export class NCMachineSelector extends HTMLElement {
           cursor: pointer;
           font-size: 11px;
         }
-        .tool-path-mode button:last-child,
         .control-type-filter button:last-child {
           border-right: 0;
         }
-        .tool-path-mode button.active,
         .control-type-filter button.active {
           background: var(--vscode-button-background, #007acc);
           color: var(--vscode-button-foreground, #ffffff);
@@ -139,7 +134,6 @@ export class NCMachineSelector extends HTMLElement {
             min-width: 120px;
           }
           .machine-type-filter button,
-          .tool-path-mode button,
           .control-type-filter button {
             min-height: 40px;
             padding: 8px;
@@ -151,10 +145,7 @@ export class NCMachineSelector extends HTMLElement {
         <select id="selector">
           <option value="">Select Machine...</option>
         </select>
-        <div class="tool-path-mode" role="group" aria-label="Tool path mode">
-          <button type="button" data-tool-path-mode="effective" class="active" title="Plot the effective programmed contour">Effective</button>
-          <button type="button" data-tool-path-mode="center" title="Plot the tool-center path">Center</button>
-        </div>
+        <span class="tool-path-mode" title="Plots always request the tool-center path; accuracy depends on backend support">Center path</span>
         <div class="machine-type-filter" role="group" aria-label="Machine type filter">
           <button type="button" data-machine-type="all" class="active" title="Show all machines">All</button>
           <button type="button" data-machine-type="mill" title="Show mill machines">Mill</button>
@@ -205,12 +196,6 @@ export class NCMachineSelector extends HTMLElement {
       }
     });
 
-    this.shadowRoot?.querySelectorAll<HTMLButtonElement>('[data-tool-path-mode]').forEach((button) => {
-      button.addEventListener('click', () => {
-        this.stateService.setToolPathMode(button.dataset.toolPathMode as ToolPathMode);
-      });
-    });
-
     this.shadowRoot?.querySelectorAll<HTMLButtonElement>('[data-machine-type]').forEach((button) => {
       button.addEventListener('click', () => {
         this.machineTypeFilter = button.dataset.machineType as 'all' | 'mill' | 'turn';
@@ -231,12 +216,6 @@ export class NCMachineSelector extends HTMLElement {
         this.ensureCompatibleFilters('control-type');
         this.updateOptions();
       });
-    });
-  }
-
-  private updateToolPathMode(toolPathMode: ToolPathMode): void {
-    this.shadowRoot?.querySelectorAll<HTMLButtonElement>('[data-tool-path-mode]').forEach((button) => {
-      button.classList.toggle('active', button.dataset.toolPathMode === toolPathMode);
     });
   }
 

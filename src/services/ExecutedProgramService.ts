@@ -9,10 +9,13 @@ import type {
   ToolValue,
   ToolPathMode,
   CustomVariable,
-  VariableValue,
+  BackendPlotChannel,
 } from '@core/types';
 import { BackendGateway } from './BackendGateway';
 import { EventBus, EVENT_NAMES } from './EventBus';
+import { freezeMetadata } from './tools/SimulationMetadata';
+import type { PlotRunInput, PlotRunSnapshot } from './tools/PlotRunSnapshot';
+import { executionProgram } from './tools/PlotRunSnapshot';
 
 export interface ExecutionRequest {
   channelId: ChannelId;
@@ -26,33 +29,109 @@ export class ExecutedProgramService {
   private backend: BackendGateway;
   private eventBus: EventBus;
   private executionCache = new Map<string, ExecutedProgramResult>();
+  private plotRuns = new Map<string, PlotRunSnapshot>();
+  private plotGeneration = 0;
+  private readonly maxPlotRuns = 5;
 
   constructor(backend: BackendGateway, eventBus: EventBus) {
     this.backend = backend;
     this.eventBus = eventBus;
   }
 
+  /** Detach all inputs before the first await; publish only the latest fully assembled run. */
+  async executePlotRun(inputs: PlotRunInput[], singleChannel = false): Promise<PlotRunSnapshot> {
+    const generation = ++this.plotGeneration;
+    const runId = `plot-${generation}`;
+    if (!inputs.length || (singleChannel && inputs.length !== 1)) {
+      throw new Error('Plot requires the selected source programs');
+    }
+    const channels = new Set<string>();
+    for (const input of inputs) {
+      if (!input.snapshot.valid) throw new Error('Resolve program metadata diagnostics before plotting');
+      if (input.snapshot.setup?.machineName && input.snapshot.setup.machineName !== input.machineName) {
+        throw new Error('Program setup machine conflicts with the selected machine');
+      }
+      if (channels.has(input.snapshot.identity.channelId)) throw new Error('Duplicate plot channel');
+      channels.add(input.snapshot.identity.channelId);
+    }
+    // Clone before freezing: callers, editor state and legacy execution consumers remain mutable.
+    const captured = structuredClone(inputs);
+    const requests = captured.map((input): ExecutionRequest => ({
+      channelId: input.snapshot.identity.channelId,
+      program: executionProgram(input.snapshot),
+      machineName: input.machineName,
+      toolValues: structuredClone(input.toolValues),
+      customVariables: structuredClone(input.customVariables),
+    }));
+    freezeMetadata(captured);
+    let results: ExecutedProgramResult[];
+    try {
+      const response = await this.backend.requestPlot(this.buildPlotRequest(requests));
+      if (response.success === false) throw new Error('Backend rejected the plot request');
+      results = requests.map((request) => this.parseExecutionResponse(response, request.channelId));
+    } catch (error) {
+      if (generation === this.plotGeneration) {
+        requests.forEach((request) => this.eventBus.publish(EVENT_NAMES.EXECUTION_ERROR, {
+          channelId: request.channelId, runId, error,
+        }));
+      }
+      throw error;
+    }
+    const run = freezeMetadata({
+      runId,
+      toolPathMode: 'center' as const,
+      inputs: captured,
+      plotMetadata: structuredClone({
+        points: results.flatMap((result) => result.plotMetadata?.points ?? []),
+        segments: results.flatMap((result) => result.plotMetadata?.segments ?? []),
+      }),
+    });
+    // Superseded/cleared requests must not evict or replace the displayed run.
+    if (generation === this.plotGeneration) {
+      this.plotRuns.set(runId, run);
+      while (this.plotRuns.size > this.maxPlotRuns) {
+        this.plotRuns.delete(this.plotRuns.keys().next().value!);
+      }
+      requests.forEach((request, index) => {
+        if (generation === this.plotGeneration) {
+          this.eventBus.publish(EVENT_NAMES.EXECUTION_COMPLETED, {
+            channelId: request.channelId, runId, result: results[index],
+          });
+        }
+      });
+      if (generation === this.plotGeneration) {
+        this.eventBus.publish(EVENT_NAMES.PLOT_RUN_COMPLETED, { runId });
+      }
+    }
+    return run;
+  }
+
+  getPlotRun(runId: string): PlotRunSnapshot | undefined {
+    return this.plotRuns.get(runId);
+  }
+
+  getRunTool(runId: string, programId: string, channelId: ChannelId, toolNumber: number | string | null | undefined) {
+    if (toolNumber === undefined || toolNumber === null || toolNumber === 'unknown') return undefined;
+    const input = this.plotRuns.get(runId)?.inputs.find((entry) =>
+      entry.snapshot.identity.programId === programId && entry.snapshot.identity.channelId === channelId);
+    return input?.snapshot.tools.find((tool) => tool.toolNumber === toolNumber);
+  }
+
+  discardPlotRun(runId: string): void {
+    this.plotRuns.delete(runId);
+  }
+
+  cancelPendingPlot(): void {
+    this.plotGeneration++;
+  }
+
   async executeProgram(
     request: ExecutionRequest,
-    toolPathMode: ToolPathMode = 'effective',
+    // Accepted for legacy callers only. All application plots request the centre path.
+    _toolPathMode: ToolPathMode = 'center',
   ): Promise<ExecutedProgramResult> {
     try {
-      // Preprocess program: remove () {} characters as per server requirements
-      const cleanProgram = this.preprocessProgram(request.program);
-
-      // Build plot request
-      const plotRequest: PlotRequest = {
-        toolPathMode,
-        machinedata: [
-          {
-            program: cleanProgram,
-            machineName: request.machineName,
-            canalNr: request.channelId,
-            toolValues: request.toolValues,
-            customVariables: request.customVariables,
-          },
-        ],
-      };
+      const plotRequest = this.buildPlotRequest([request]);
 
       console.debug('Plot request payload for channel', request.channelId, plotRequest);
       // Make server request
@@ -65,6 +144,9 @@ export class ExecutedProgramService {
       // Cache result
       const cacheKey = this.getCacheKey(request);
       this.executionCache.set(cacheKey, result);
+      while (this.executionCache.size > this.maxPlotRuns) {
+        this.executionCache.delete(this.executionCache.keys().next().value!);
+      }
 
       // Publish event
       this.eventBus.publish(EVENT_NAMES.EXECUTION_COMPLETED, {
@@ -85,20 +167,11 @@ export class ExecutedProgramService {
 
   async executeMultipleChannels(
     requests: ExecutionRequest[],
-    toolPathMode: ToolPathMode = 'effective',
+    // Accepted for legacy callers only; never forwarded to the backend.
+    _toolPathMode: ToolPathMode = 'center',
   ): Promise<ExecutedProgramResult[]> {
     try {
-      // Preprocess all programs
-      const machinedata = requests.map((req) => ({
-        program: this.preprocessProgram(req.program),
-        machineName: req.machineName,
-        canalNr: req.channelId,
-        toolValues: req.toolValues,
-        customVariables: req.customVariables,
-      }));
-
-      // Build plot request
-      const plotRequest: PlotRequest = { toolPathMode, machinedata };
+      const plotRequest = this.buildPlotRequest(requests);
 
       // Make server request
       const response: PlotResponse = await this.backend.requestPlot(plotRequest);
@@ -128,6 +201,21 @@ export class ExecutedProgramService {
       });
       throw error;
     }
+  }
+
+  private buildPlotRequest(requests: ExecutionRequest[]): PlotRequest {
+    // Enforce at the shared boundary, including channel-header and host-triggered plots.
+    // This requests the reference path; it does not certify backend compensation accuracy.
+    return {
+      toolPathMode: 'center',
+      machinedata: requests.map((request) => ({
+        program: this.preprocessProgram(request.program),
+        machineName: request.machineName,
+        canalNr: request.channelId,
+        toolValues: request.toolValues,
+        customVariables: request.customVariables,
+      })),
+    };
   }
 
   private preprocessProgram(program: string): string {
@@ -186,31 +274,7 @@ export class ExecutedProgramService {
       console.debug('Canal data received:', response.canal);
 
       // Parse the canal data - it's keyed by canal number
-      const canalData = response.canal as Record<
-        string,
-        {
-          segments?: Array<{
-            geometry?: string;
-            traversal?: string;
-            sourceCode?: string;
-            lineNumber?: number;
-            toolNumber?: number;
-            points?: Array<{ x: number; y: number; z: number }>;
-          }>;
-          executedLines?: number[];
-          variables?: Record<string, number>;
-          namedVariables?: Record<string, VariableValue>;
-          timing?: number[];
-          errors?: Array<{
-            type: string;
-            code: number;
-            line: number;
-            message: string;
-            value: string;
-            canal: number;
-          }>;
-        }
-      >;
+      const canalData = response.canal as Record<string, BackendPlotChannel>;
 
       // Merge data from all canals
       for (const canalNr of Object.keys(canalData)) {
@@ -263,7 +327,7 @@ export class ExecutedProgramService {
         }
 
         if (canal.segments && Array.isArray(canal.segments)) {
-          canal.segments.forEach((segment) => {
+          canal.segments.forEach((segment, sourceSegmentIndex) => {
             if (segment.points && segment.points.length >= 2) {
               let segmentType: 'rapid' | 'feed' | 'arc' | undefined;
               const traversal = segment.traversal?.toUpperCase();
@@ -303,6 +367,9 @@ export class ExecutedProgramService {
                   endPoint: mappedPoints[index + 1],
                   type: segmentType,
                   toolNumber: segment.toolNumber,
+                  executionStep: segment.executionStep,
+                  sourceSegmentIndex,
+                  subsegmentIndex: index,
                   channelId: canalNr as ChannelId,
                 });
               }
@@ -335,5 +402,7 @@ export class ExecutedProgramService {
 
   clearCache(): void {
     this.executionCache.clear();
+    this.plotRuns.clear();
+    this.cancelPendingPlot();
   }
 }

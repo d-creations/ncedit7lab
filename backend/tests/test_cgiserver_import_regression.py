@@ -218,6 +218,14 @@ def test_list_machines_uses_configured_control_family(monkeypatch):
 
     assert body["machines"][0]["controlType"] == "FANUC"
     assert body["machines"][0]["machineType"] == "MILL"
+    assert body["machines"][0]["simulationCommentSyntax"] == {
+        "kind": "block", "open": "(", "close": ")",
+    }
+
+
+def test_simulation_comment_capabilities_are_explicit_and_bounded():
+    assert api.get_simulation_comment_syntax("SIEMENS") == {"kind": "line", "prefix": ";"}
+    assert api.get_simulation_comment_syntax("UNKNOWN") is None
 
 
 def test_cgiserver_import_preserves_o0017_g112_xy_ij_parity_for_star_machine():

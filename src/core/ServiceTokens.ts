@@ -12,6 +12,11 @@ import type { ITemplateRepository } from '../services/templates/ITemplateReposit
 import { TemplateCatalogService } from '../services/templates/TemplateCatalogService';
 import { TemplateInsertionService } from '../services/templates/TemplateInsertionService';
 import { MultichannelAlignmentService } from '../services/MultichannelAlignmentService';
+import { SimulationCommentCodec } from '../services/tools/SimulationCommentCodec';
+import { ProgramToolService } from '../services/tools/ProgramToolService';
+import type { IToolLibraryRepository } from '../services/tools/ToolLibraryTypes';
+import { ToolCatalogService } from '../services/tools/ToolCatalogService';
+import { ProgramMetadataEditService } from '../services/tools/ProgramMetadataEditService';
 
 import { IFileManagerService } from '../services/IFileManagerService';
 import { IConfigService } from '../services/config/IConfigService';
@@ -34,3 +39,8 @@ export const TEMPLATE_CATALOG_SERVICE_TOKEN = createServiceToken<TemplateCatalog
 export const TEMPLATE_INSERTION_SERVICE_TOKEN = createServiceToken<TemplateInsertionService>('TemplateInsertionService');
 export const MULTICHANNEL_ALIGNMENT_SERVICE_TOKEN =
   createServiceToken<MultichannelAlignmentService>('MultichannelAlignmentService');
+export const SIMULATION_COMMENT_CODEC_TOKEN = createServiceToken<SimulationCommentCodec>('SimulationCommentCodec');
+export const PROGRAM_TOOL_SERVICE_TOKEN = createServiceToken<ProgramToolService>('ProgramToolService');
+export const TOOL_LIBRARY_REPOSITORY_TOKEN = createServiceToken<IToolLibraryRepository>('ToolLibraryRepository');
+export const TOOL_CATALOG_SERVICE_TOKEN = createServiceToken<ToolCatalogService>('ToolCatalogService');
+export const PROGRAM_METADATA_EDIT_SERVICE_TOKEN = createServiceToken<ProgramMetadataEditService>('ProgramMetadataEditService');

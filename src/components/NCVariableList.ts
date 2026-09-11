@@ -386,6 +386,7 @@ export class NCVariableList extends HTMLElement {
 
     this.customVariables.set(name, value);
     this.updateCustomList();
+    this.eventBus.publish(EVENT_NAMES.CUSTOM_VARIABLES_CHANGED, { channelId: this.channelId });
 
     // Clear inputs
     nameInput.value = '';
@@ -396,6 +397,7 @@ export class NCVariableList extends HTMLElement {
   private removeCustomVariable(name: string) {
     this.customVariables.delete(name);
     this.updateCustomList();
+    this.eventBus.publish(EVENT_NAMES.CUSTOM_VARIABLES_CHANGED, { channelId: this.channelId });
   }
 
   private updateCustomList() {

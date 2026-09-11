@@ -1,3 +1,5 @@
+import type { SimulationCommentSyntax } from '../services/tools/SimulationCommentCodec';
+
 export interface BackendFeatures {
   transfer_enabled: boolean;
   transfer_protocols?: string[];
@@ -42,6 +44,8 @@ export interface MachineRegexPatterns {
 }
 
 export interface MachineProfile {
+  /** Explicit read capability only; does not authorize header insertion or conversion. */
+  simulationCommentSyntax?: SimulationCommentSyntax;
   machineName: MachineType;
   controlType: string;
   machineType?: string;
@@ -161,7 +165,14 @@ export interface PlotSegment {
   startPoint: PlotPoint;
   endPoint: PlotPoint;
   type: 'rapid' | 'feed' | 'arc';
-  toolNumber?: number;
+  /** Active tool captured by execution; "unknown", null and missing mean unavailable. */
+  toolNumber?: number | string | null;
+  /** Executed-command occurrence within the channel, shared by generated cycle moves. */
+  executionStep?: number | null;
+  /** Original backend segment ordinal within the channel, before motion filtering. */
+  sourceSegmentIndex?: number;
+  /** Adjacent-point-pair ordinal within the original backend segment. */
+  subsegmentIndex?: number;
   channelId?: ChannelId;
 }
 
@@ -185,6 +196,28 @@ export interface PlotRequest {
     toolValues?: ToolValue[];
     customVariables?: CustomVariable[];
   }>;
+}
+
+/** Raw motion metadata from the backend; identifiers must not be inferred from NC text. */
+export interface BackendPlotSegment {
+  geometry?: string;
+  traversal?: string;
+  sourceCode?: string;
+  lineNumber?: number;
+  toolNumber?: number | string | null;
+  executionStep?: number | null;
+  points?: Array<{ x: number; y: number; z: number }>;
+  /** Legacy classification is retained for compatibility, not used to infer motion semantics. */
+  type?: string;
+}
+
+export interface BackendPlotChannel {
+  segments?: BackendPlotSegment[];
+  executedLines?: number[];
+  variables?: Record<string, number>;
+  namedVariables?: Record<string, VariableValue>;
+  timing?: number[];
+  errors?: PlotResponse['errors'];
 }
 
 export interface PlotResponse {
@@ -217,6 +250,7 @@ export interface FileExtensionConfig {
 }
 
 export interface ServerMachineData {
+  simulationCommentSyntax?: SimulationCommentSyntax;
   machineName: MachineType;
   controlType: string;
   machineType?: string;

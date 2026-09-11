@@ -16,7 +16,10 @@ import { ProgramToolService, type ProgramSource } from '@services/tools/ProgramT
 import { SimulationCommentCodec } from '@services/tools/SimulationCommentCodec';
 import { ToolCatalogService } from '@services/tools/ToolCatalogService';
 import { WebToolLibraryRepository } from '@services/tools/WebToolLibraryRepository';
-import type { ProgramToolUpdateRequest } from '@services/tools/ProgramMetadataEditService';
+import type {
+  ProgramOffsetsUpdateRequest,
+  ProgramToolUpdateRequest,
+} from '@services/tools/ProgramMetadataEditService';
 
 const syntax = { kind: 'block', open: '(', close: ')' } as const;
 
@@ -36,6 +39,7 @@ describe('NCToolManagerPanel', () => {
     state.setMachines([{ machineName: 'FANUC_TEST', controlType: 'FANUC', axes: ['X', 'Y', 'Z'],
       feedLimits: { min: 0, max: 1000 }, defaultTools: [], availableChannels: 1,
       simulationCommentSyntax: syntax,
+      toolSelection: { mode: 'packed', namedTools: false, offsetScope: 'global', offsetAddress: 'D' },
     }]);
     state.setGlobalMachine('FANUC_TEST');
     state.activateChannel('1');
@@ -105,6 +109,27 @@ describe('NCToolManagerPanel', () => {
       tool: { toolNumber: 1, description: 'Program drill', Q: 0 },
     });
     await vi.waitFor(() => expect(panel.shadowRoot?.textContent).toContain('Applied'));
+  });
+
+  it('publishes an explicit revision-checked offset update request', async () => {
+    const request = vi.fn((payload: ProgramOffsetsUpdateRequest) => {
+      eventBus.publish(EVENT_NAMES.PROGRAM_OFFSETS_UPDATE_RESULT, {
+        requestId: payload.requestId, channelId: payload.channelId, success: true, message: 'Applied offsets',
+      });
+    });
+    eventBus.subscribe(EVENT_NAMES.PROGRAM_OFFSETS_UPDATE_REQUEST, request);
+    (panel.shadowRoot?.querySelector('[data-manager-tab="offsets"]') as HTMLButtonElement).click();
+    (panel.shadowRoot?.querySelector('#add-offset') as HTMLButtonElement).click();
+    const row = panel.shadowRoot?.querySelector('[data-offset-row]') as HTMLElement;
+    (row.querySelector('[data-offset-field="number"]') as HTMLInputElement).value = '2';
+    (row.querySelector('[data-offset-field="r"]') as HTMLInputElement).value = '0.4';
+    (panel.shadowRoot?.querySelector('#save-offsets') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(1));
+    expect(request.mock.calls[0][0]).toMatchObject({
+      channelId: '1', documentId: 'doc', programId: 'program',
+      expectedRevision: 'editor:0', expectedText: 'T1\nG1 X10', syntax,
+      offsets: { offsetScope: 'global', offsets: [{ offsetNumber: 2, rValue: 0.4 }] },
+    });
   });
 
   it('keeps Program Apply disabled when the selected machine has no explicit capability', async () => {

@@ -467,7 +467,7 @@ export class NCToolpathPlot extends HTMLElement {
           machineProfile: state.activeMachine,
           toolValues: this.programTools.getExecutionToolValues(snapshot),
           toolOffsets: this.programTools.getExecutionToolOffsets(
-            snapshot.identity,
+            snapshot,
             state.activeMachine?.toolSelection,
           ),
           customVariables: this.readCustomVariables(channel.id),
@@ -519,7 +519,7 @@ export class NCToolpathPlot extends HTMLElement {
         JSON.stringify(state.activeMachine) !== JSON.stringify(input.machineProfile) ||
         JSON.stringify(this.programTools.getExecutionToolValues(snapshot)) !== JSON.stringify(input.toolValues) ||
         JSON.stringify(this.programTools.getExecutionToolOffsets(
-          snapshot.identity,
+          snapshot,
           state.activeMachine?.toolSelection,
         )) !== JSON.stringify(input.toolOffsets) ||
         JSON.stringify(this.readCustomVariables(snapshot.identity.channelId)) !== JSON.stringify(input.customVariables);

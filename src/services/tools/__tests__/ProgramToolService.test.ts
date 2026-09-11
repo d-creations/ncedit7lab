@@ -113,6 +113,26 @@ describe('ProgramToolService', () => {
     expect(() => service.getToolValues(duplicate)).toThrow();
   });
 
+  it('uses persisted offsets from the exact snapshot without opening the Tool Manager', () => {
+    const text = codec.encodeOffsets({
+      offsetScope: 'tool',
+      offsets: [
+        { toolNumber: 1, offsetNumber: 2, rValue: 0.4 },
+        { toolNumber: '1', offsetNumber: 2, rValue: 0.8 },
+      ],
+    }, syntax);
+    const snapshot = service.captureProgramSnapshot(identity, 4, text, syntax);
+    expect(service.getExecutionToolOffsets(snapshot, {
+      mode: 'direct', namedTools: true, offsetScope: 'tool',
+    })).toEqual([
+      { toolNumber: 1, offsetNumber: 2, rValue: 0.4 },
+      { toolNumber: '1', offsetNumber: 2, rValue: 0.8 },
+    ]);
+    expect(() => service.getExecutionToolOffsets(snapshot, {
+      mode: 'packed', namedTools: false, offsetScope: 'global',
+    })).toThrow('scope does not match');
+  });
+
   it('requires document identity and revision rather than addressing by channel alone', () => {
     expect(() => service.captureProgramSnapshot({ ...identity, documentId: '' }, 1, '')).toThrow();
     expect(() => service.captureProgramSnapshot(identity, NaN, '')).toThrow();

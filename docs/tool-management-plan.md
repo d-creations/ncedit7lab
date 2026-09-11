@@ -1,6 +1,6 @@
 # Tool management and portable simulation metadata
 
-Status: tool-management design proposed; backend/frontend execution metadata and centre-mode request enforcement implemented. The codec/snapshot foundation is now connected to same-view editor Plot actions with bounded immutable run storage and single completed-run rendering. Library persistence, metadata editing, occurrence selection and geometry/setup UI remain unimplemented. Updated: 2026-09-11.
+Status: tool-management design in progress; backend/frontend execution metadata, centre-mode request enforcement, browser library persistence, Program Tools editing and offset-table persistence are implemented. The codec/snapshot foundation is connected to same-view editor Plot actions with bounded immutable run storage and single completed-run rendering. Occurrence selection, moving geometry and setup/material UI remain unimplemented. Updated: 2026-09-11.
 
 ### Implementation progress — editor Plot actions
 
@@ -9,16 +9,16 @@ now generates tool-detection metadata and drives existing execution-chain tool
 handlers. Optional `machinedata[].toolOffsets` records separate compensation
 registers from physical tool IDs; FANUC registers are global per channel,
 Siemens records include the exact numeric/named tool ID. `ExecutionRequest` and
-immutable `PlotRunInput` can carry these records. Existing UI/program TOOL
-comments still provide one Q/R default per tool; offset-table editing and
-comment persistence remain pending. Explicit offset tables do not merge with
+immutable `PlotRunInput` can carry these records. Managed `TOOL` comments
+provide one Q/R default per physical tool, while a separate managed `OFFSETS`
+block persists the program's controller offset table. Explicit offset tables do not merge with
 or fall back to defaults when a selected record is missing. This is not a claim
 of implemented turning nose, tool-length, M6 sequencing or TCP simulation.
 
 - Channel-header and global Plot capture the exact pending ACE text, document/program/channel identity and editor-instance revision before execution. Editor revisions are local read tokens, not extension-host acknowledgment/edit contracts. Without an editor, the file-manager source is used and exact text is also checked for staleness; empty editor text never falls back to old state.
 - Optional holder/cutting length and edge data are parsed from program comments only when Plot starts, and retained in the immutable run. No library or geometry network fetch occurs on editing/cursor movement. Missing geometry and Q/R-only tools remain valid; no meshes or accurate placement are claimed.
 - Machine profiles carry optional explicit `simulationCommentSyntax` from `/api/machines`. Nothing is inferred from machine names or highlighting regexes. The deployed backend must advertise this capability to enable embedded metadata; its current local profile adapter does not manufacture it. Metadata with missing/invalid syntax or diagnostics blocks the request visibly. Header writing/conversion and automatic setup-machine restoration remain pending; a setup/selected-machine conflict is rejected.
-- Temporary Q/R inputs now live in program-scoped `ProgramToolService` state rather than a plot-time tool-list DOM query. Managed tool assignments own their whole Q/R record and take precedence; other temporary overrides remain supported. Closing a program releases its temporary values. No comments are written or files saved by Plot.
+- Q/R inputs live in program-scoped `ProgramToolService` state rather than a plot-time tool-list DOM query. Tool List exposes an explicit Apply action that writes a revision-checked managed `TOOL` block while preserving existing geometry. The Tool Manager Offsets tab similarly applies one managed `OFFSETS` block; Plot itself never writes comments or saves files.
 - `ExecutedProgramService.executePlotRun()` owns a deeply frozen copy of the source snapshots, effective overrides, custom variables, machine profile and completed combined paths. `getPlotRun()` / `getRunTool()` preserve scoped exact identifiers, reject unavailable-tool lookup, and retain at most five runs. Recognized managed blocks are blanked only in the execution copy, preserving source line numbers. The backend still receives only existing centre-mode/Q/R/variable request fields.
 - `PLOT_RUN_COMPLETED` is emitted once after storage, replacing the plot's per-channel and awaited duplicate render paths. Per-channel execution notifications remain for errors/variables, now correlated by run ID on this path. Superseded/cleared responses do not update either plot or editor execution consumers; failures retain the previous run. Changed source/profile/Q/R/custom-variable inputs mark old paths stale and disable editor-follow highlighting. No selection resolver, occurrence chooser or moving-tool pose is implemented yet.
 - Event subscriptions and owned path/highlight resources are released on clear/replacement/disconnect. Host-separated views still need explicit run transport; these changes apply to one application instance only.
@@ -539,7 +539,7 @@ Add fixtures in [execution tests](../src/services/__tests__/ExecutedProgramServi
 
 #### B. Capture program tools once, before execution
 
-Integration status: `ProgramToolService.captureProgramSnapshot(identity, revision, text, syntax?)`, `SimulationCommentCodec`, initial domain validation and `toToolValues()` are centrally registered and used by editor Plot. Capture itself remains read-only. Explicit syntax transport, bounded run context/storage, completed-run event ownership and DOM-lookup replacement are implemented. Deployment capability advertisement, host-owned revisions and metadata edits remain pending. Optional lengths/edge geometry stay client-owned and are loaded only at this explicit Plot boundary.
+Integration status: `ProgramToolService.captureProgramSnapshot(identity, revision, text, syntax?)`, `SimulationCommentCodec`, domain validation and `toToolValues()` are centrally registered and used by editor Plot. Capture itself remains read-only. Explicit syntax transport, bounded run context/storage, completed-run event ownership, DOM-lookup replacement, and revision-checked `TOOL`/`OFFSETS` metadata edits are implemented. Deployment capability advertisement and extension-host-owned document revisions remain pending. Optional lengths/edge geometry stay client-owned and are loaded only at this explicit Plot boundary.
 
 Add a proposed `ProgramToolService.captureProgramSnapshot(programIdentity, revision, text)` returning a detached, validated snapshot of parsed program tool definitions, machine and material. It must parse/validate the exact supplied text or prove that its cached parse matches that revision; do not take a possibly stale asynchronous parse. It needs no catalog lookup: assigning a library tool has already copied the definition into the program.
 
@@ -599,7 +599,7 @@ Extend [HostBridgeService](../src/services/HostBridgeService.ts) with typed, val
 
 Reuse one Web Component in a web sidebar and a VS Code WebviewView, similar to Templates. Users can move the contributed view into VS Code's secondary/right sidebar.
 
-- Tabs: **Library** / **Program Tools**.
+- Tabs: **Library** / **Program Tools** / **Offsets**.
 - Search/filter by tool type and machine compatibility.
 - List with original schematic icons and name/dimensions; avoid copying manufacturer product images without permission.
 - Editing sections: General, Geometry, Holder/Mounting, Compensation (Q/R), Preview.

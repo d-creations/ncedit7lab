@@ -1,9 +1,22 @@
 import { ServiceRegistry } from '@core/ServiceRegistry';
-import { EVENT_BUS_TOKEN, PROGRAM_TOOL_SERVICE_TOKEN, FILE_MANAGER_SERVICE_TOKEN } from '@core/ServiceTokens';
+import {
+  EVENT_BUS_TOKEN,
+  FILE_MANAGER_SERVICE_TOKEN,
+  PROGRAM_TOOL_SERVICE_TOKEN,
+  STATE_SERVICE_TOKEN,
+} from '@core/ServiceTokens';
 import { EventBus, EVENT_NAMES, type EventSubscription } from '@services/EventBus';
 import type { ParseArtifacts, NcParseResult, ToolRegisterEntry, ToolValue, ChannelId } from '@core/types';
 import type { IFileManagerService } from '@services/IFileManagerService';
-import { programIdentityKey, type ProgramToolService, type ProgramIdentity } from '@services/tools/ProgramToolService';
+import { StateService } from '@services/StateService';
+import {
+  programIdentityKey,
+  type ProgramIdentity,
+  type ProgramSource,
+  type ProgramToolService,
+} from '@services/tools/ProgramToolService';
+import type { ProgramToolUpdateRequest, ProgramToolUpdateResult } from '@services/tools/ProgramMetadataEditService';
+import type { ProgramToolDefinition } from '@services/tools/SimulationMetadata';
 
 interface ToolWithValues extends ToolRegisterEntry {
   qValue?: number;
@@ -16,8 +29,11 @@ export class NCToolList extends HTMLElement {
   private channelId: string = '';
   private programTools: ProgramToolService;
   private fileManager: IFileManagerService;
+  private stateService: StateService;
   private subscriptions: EventSubscription[] = [];
   private offsetCount = 0;
+  private pendingRequestId?: string;
+  private applyStatus = '';
 
   static get observedAttributes() {
     return ['channel-id'];
@@ -29,6 +45,7 @@ export class NCToolList extends HTMLElement {
     this.eventBus = ServiceRegistry.getInstance().get(EVENT_BUS_TOKEN);
     this.programTools = ServiceRegistry.getInstance().get(PROGRAM_TOOL_SERVICE_TOKEN);
     this.fileManager = ServiceRegistry.getInstance().get(FILE_MANAGER_SERVICE_TOKEN);
+    this.stateService = ServiceRegistry.getInstance().get(STATE_SERVICE_TOKEN);
   }
 
   attributeChangedCallback(name: string, _oldValue: string, newValue: string) {
@@ -58,6 +75,15 @@ export class NCToolList extends HTMLElement {
         this.updateList();
       },
     ));
+    this.subscriptions.push(this.eventBus.subscribe(
+      EVENT_NAMES.PROGRAM_TOOL_UPDATE_RESULT,
+      (result: ProgramToolUpdateResult) => {
+        if (!this.pendingRequestId || result.requestId !== this.pendingRequestId) return;
+        this.pendingRequestId = undefined;
+        this.applyStatus = result.message;
+        this.updateList();
+      },
+    ));
     // Listen for parse results
     this.subscriptions.push(this.eventBus.subscribe(
       EVENT_NAMES.PARSE_COMPLETED,
@@ -65,9 +91,20 @@ export class NCToolList extends HTMLElement {
         if (data.channelId === this.channelId) {
           // Preserve existing Q and R values for tools that still exist
           const existingToolValues = new Map<number | string, { qValue?: number; rValue?: number }>();
-          const identity = this.getProgramIdentity();
-          this.offsetCount = identity ? this.programTools.getTemporaryToolOffsets(identity).length : 0;
-          (identity ? this.programTools.getTemporaryToolValues(identity) : []).forEach((tool) => {
+          const source = this.readProgramSource();
+          const identity = source?.identity ?? this.getProgramIdentity();
+          const snapshot = source ? this.programTools.captureProgramSnapshot(
+            source.identity,
+            source.revision,
+            source.text,
+            this.stateService.getState().activeMachine?.simulationCommentSyntax,
+          ) : undefined;
+          const offsets = identity ? this.programTools.getTemporaryToolOffsets(identity) : [];
+          this.offsetCount = offsets.length || snapshot?.offsets?.offsets.length || 0;
+          const values = snapshot?.valid
+            ? this.programTools.getExecutionToolValues(snapshot)
+            : identity ? this.programTools.getTemporaryToolValues(identity) : [];
+          values.forEach((tool) => {
             if (tool.qValue !== undefined || tool.rValue !== undefined) {
               existingToolValues.set(tool.toolNumber, {
                 qValue: tool.qValue,
@@ -101,6 +138,13 @@ export class NCToolList extends HTMLElement {
     return program ? {
       documentId: program.sourceFileId, programId: program.id, channelId: this.channelId as ChannelId,
     } : undefined;
+  }
+
+  private readProgramSource(): ProgramSource | undefined {
+    const pane = document.querySelector(
+      `nc-channel-pane[data-channel="${this.channelId}"] nc-code-pane`,
+    ) as (HTMLElement & { getProgramSource(): ProgramSource | undefined }) | null;
+    return pane?.getProgramSource();
   }
 
   /**
@@ -226,11 +270,27 @@ export class NCToolList extends HTMLElement {
           color: var(--vscode-descriptionForeground, #7f848e);
           font-size: 11px;
         }
+
+        .apply-button {
+          padding: 2px 7px;
+          border: 1px solid var(--vscode-button-border, transparent);
+          border-radius: 3px;
+          color: var(--vscode-button-foreground, #fff);
+          background: var(--vscode-button-background, #0e639c);
+          cursor: pointer;
+        }
+
+        .apply-status {
+          padding: 3px 8px;
+          color: var(--vscode-descriptionForeground, #7f848e);
+          font-size: 11px;
+        }
       </style>
 
       <div class="tool-header" title="Tool defaults and offset registers are stored separately">
         <span>Program Tools</span><span id="offset-summary" class="offset-summary"></span>
       </div>
+      <div id="apply-status" class="apply-status" aria-live="polite"></div>
       <div class="tool-list" id="list"></div>
     `;
   }
@@ -242,6 +302,8 @@ export class NCToolList extends HTMLElement {
     if (offsetSummary) {
       offsetSummary.textContent = `${this.offsetCount} offset${this.offsetCount === 1 ? '' : 's'}`;
     }
+    const applyStatus = this.shadowRoot?.getElementById('apply-status');
+    if (applyStatus) applyStatus.textContent = this.applyStatus;
 
     list.innerHTML = '';
 
@@ -328,6 +390,13 @@ export class NCToolList extends HTMLElement {
 
       toolInputs.appendChild(qGroup);
       toolInputs.appendChild(rGroup);
+      const applyButton = document.createElement('button');
+      applyButton.type = 'button';
+      applyButton.className = 'apply-button';
+      applyButton.textContent = 'Apply';
+      applyButton.title = 'Write these tool defaults to managed NC program comments';
+      applyButton.addEventListener('click', () => this.applyToolToProgram(index));
+      toolInputs.appendChild(applyButton);
 
       item.appendChild(toolRow);
       item.appendChild(toolInputs);
@@ -352,6 +421,50 @@ export class NCToolList extends HTMLElement {
         this.programTools.setTemporaryToolValues(identity, this.getToolValues());
         this.eventBus.publish(EVENT_NAMES.PROGRAM_TOOL_VALUES_CHANGED, { identity });
       }
+    }
+  }
+
+  private applyToolToProgram(toolIndex: number): void {
+    try {
+      const source = this.readProgramSource();
+      if (!source) throw new Error('No active editor owns this program');
+      const syntax = this.stateService.getState().activeMachine?.simulationCommentSyntax;
+      if (!syntax) throw new Error('Selected machine has no safe simulation-comment capability');
+      const edited = this.tools[toolIndex];
+      if (!edited) throw new Error('Tool is no longer available');
+      const snapshot = this.programTools.captureProgramSnapshot(
+        source.identity, source.revision, source.text, syntax,
+      );
+      if (!snapshot.valid) {
+        throw new Error(snapshot.diagnostics.map((diagnostic) => diagnostic.message).join('; '));
+      }
+      const existing = snapshot.tools.find((tool) =>
+        typeof tool.toolNumber === typeof edited.toolNumber && tool.toolNumber === edited.toolNumber);
+      const { Q: _Q, R: _R, ...base } = existing
+        ? structuredClone(existing) as unknown as ProgramToolDefinition
+        : { toolNumber: edited.toolNumber, description: '' };
+      const requestId = globalThis.crypto?.randomUUID?.() ?? `tool-update-${Date.now()}`;
+      this.pendingRequestId = requestId;
+      this.applyStatus = 'Applying tool defaults...';
+      this.updateList();
+      const request: ProgramToolUpdateRequest = {
+        requestId,
+        channelId: this.channelId,
+        documentId: source.identity.documentId,
+        programId: source.identity.programId,
+        expectedRevision: source.revision,
+        expectedText: source.text,
+        syntax,
+        tool: {
+          ...base,
+          ...(edited.qValue === undefined ? {} : { Q: edited.qValue }),
+          ...(edited.rValue === undefined ? {} : { R: edited.rValue }),
+        },
+      };
+      this.eventBus.publish(EVENT_NAMES.PROGRAM_TOOL_UPDATE_REQUEST, request);
+    } catch (cause) {
+      this.applyStatus = cause instanceof Error ? cause.message : String(cause);
+      this.updateList();
     }
   }
 }

@@ -163,7 +163,7 @@ export class NCToolManagerPanel extends HTMLElement {
       this.programTools.setTemporaryToolOffsets(
         this.programSource.identity,
         policy,
-        persistedOffsets.offsets,
+        persistedOffsets.offsets.map((offset) => ({ ...offset })),
       );
       this.offsetDrafts = this.programTools.getTemporaryToolOffsets(this.programSource.identity);
     }

@@ -96,12 +96,20 @@ export class ProgramToolService {
   }
 
   getExecutionToolOffsets(
-    identity: ProgramIdentity,
+    source: ProgramIdentity | ProgramToolSnapshot,
     policy?: ToolSelectionPolicy,
   ): ToolOffsetValue[] | undefined {
-    const offsets = this.getTemporaryToolOffsets(identity);
+    const snapshot = 'text' in source ? source : undefined;
+    const identity: ProgramIdentity = snapshot ? snapshot.identity : source as ProgramIdentity;
+    const key = programIdentityKey(identity);
+    const offsets = this.temporaryOffsets.has(key)
+      ? this.getTemporaryToolOffsets(identity)
+      : snapshot?.offsets?.offsets.map((offset) => ({ ...offset })) ?? [];
     if (!offsets.length) return undefined;
     if (!policy) throw new MetadataValidationError('Selected machine has no tool-offset policy');
+    if (snapshot?.offsets && snapshot.offsets.offsetScope !== policy.offsetScope) {
+      throw new MetadataValidationError('Program offset scope does not match the selected machine');
+    }
     return this.validateToolOffsets(policy, offsets);
   }
 

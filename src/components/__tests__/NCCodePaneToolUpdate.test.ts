@@ -2,7 +2,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import { NCCodePane } from '../NCCodePane';
 import { EventBus, EVENT_NAMES } from '@services/EventBus';
-import { ProgramMetadataEditService, type ProgramToolUpdateRequest } from '@services/tools/ProgramMetadataEditService';
+import {
+  ProgramMetadataEditService,
+  type ProgramOffsetsUpdateRequest,
+  type ProgramToolUpdateRequest,
+} from '@services/tools/ProgramMetadataEditService';
 import { SimulationCommentCodec } from '@services/tools/SimulationCommentCodec';
 
 const syntax = { kind: 'line', prefix: ';' } as const;
@@ -69,5 +73,24 @@ describe('NCCodePane program tool updates', () => {
       .applyProgramToolUpdate(request({ channelId: '2' }));
     expect(setValue).not.toHaveBeenCalled();
     expect(result).not.toHaveBeenCalled();
+  });
+
+  it('applies a revision-checked offset table through editor synchronization', () => {
+    const { pane, eventBus, setValue, syncEditorValue } = harness();
+    const result = vi.fn();
+    eventBus.subscribe(EVENT_NAMES.PROGRAM_OFFSETS_UPDATE_RESULT, result);
+    const offsetsRequest: ProgramOffsetsUpdateRequest = {
+      requestId: 'offset-request', channelId: '1', documentId: 'doc', programId: 'program',
+      expectedRevision: 'editor:0', expectedText: 'T1\nG1 X10', syntax,
+      offsets: { offsetScope: 'global', offsets: [{ offsetNumber: 2, rValue: 0.4 }] },
+    };
+    (pane as unknown as { applyProgramOffsetsUpdate(value: ProgramOffsetsUpdateRequest): void })
+      .applyProgramOffsetsUpdate(offsetsRequest);
+    const nextText = setValue.mock.calls[0][0] as string;
+    expect(nextText).toContain('; @NCE-SIM:1 BEGIN OFFSETS');
+    expect(syncEditorValue).toHaveBeenCalledWith(nextText);
+    expect(result).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      requestId: 'offset-request', success: true,
+    }));
   });
 });

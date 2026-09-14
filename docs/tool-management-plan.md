@@ -16,6 +16,11 @@ The following status supersedes earlier dated milestone statements in this file.
 	`NCToolpathPlot` displays one selected milling mesh at the selected segment's
 	endpoint pose. The mesh is removed and GPU resources are disposed on selection,
 	run and component cleanup.
+- The FANUC demo has been verified with real O-code containing `T2500`, `T2200`
+	and `T2900`. Valid milling definitions are sent even when the same program
+	also contains unsupported inserts or geometry-free tool records. To display a
+	tool, select a plotted motion after the tool call; selecting the `T2500` line
+	itself has no coordinates and therefore has no tool pose.
 - `ToolGeometryFactory` currently renders validated `endMill`, `ballMill` and
 	`drill` cutting geometry plus supported box/cylinder/cone holders. It does not
 	yet implement axial profiles, inserts, custom geometry, shared mesh caching,
@@ -71,7 +76,7 @@ of implemented turning nose, tool-length, M6 sequencing or TCP simulation.
 - Machine profiles carry optional explicit `simulationCommentSyntax` from `/api/machines`. Nothing is inferred from machine names or highlighting regexes. The deployed backend must advertise this capability to enable embedded metadata; its current local profile adapter does not manufacture it. Metadata with missing/invalid syntax or diagnostics blocks the request visibly. Header writing/conversion and automatic setup-machine restoration remain pending; a setup/selected-machine conflict is rejected.
 - Q/R inputs live in program-scoped `ProgramToolService` state rather than a plot-time tool-list DOM query. Tool List exposes an explicit Apply action that writes a revision-checked managed `TOOL` block while preserving existing geometry. The Tool Manager Offsets tab similarly applies one managed `OFFSETS` block; Plot itself never writes comments or saves files.
 - `ExecutedProgramService.executePlotRun()` owns a deeply frozen copy of the source snapshots, effective overrides, custom variables, machine profile and completed combined paths. `getPlotRun()` / `getRunTool()` preserve scoped exact identifiers, reject unavailable-tool lookup, and retain at most five runs. Recognized managed blocks are blanked only in the execution copy, preserving source line numbers. The backend still receives only existing centre-mode/Q/R/variable request fields.
-- `PLOT_RUN_COMPLETED` is emitted once after storage, replacing the plot's per-channel and awaited duplicate render paths. Per-channel execution notifications remain for errors/variables, now correlated by run ID on this path. Superseded/cleared responses do not update either plot or editor execution consumers; failures retain the previous run. Changed source/profile/Q/R/custom-variable inputs mark old paths stale and disable editor-follow highlighting. No selection resolver, occurrence chooser or moving-tool pose is implemented yet.
+- `PLOT_RUN_COMPLETED` is emitted once after storage, replacing the plot's per-channel and awaited duplicate render paths. Per-channel execution notifications remain for errors/variables, now correlated by run ID on this path. Superseded/cleared responses do not update either plot or editor execution consumers; failures retain the previous run. Changed source/profile/Q/R/custom-variable inputs mark old paths stale and disable editor-follow highlighting. The selection resolver, occurrence chooser and verified MILL_DEMO moving-tool pose are implemented; plot-click and timed playback remain future work.
 - Event subscriptions and owned path/highlight resources are released on clear/replacement/disconnect. Host-separated views still need explicit run transport; these changes apply to one application instance only.
 - Verification: 130 tests across 11 files, including real Plot event wiring in jsdom without WebGL. Interactive browser automation was skipped; deployed engine/tool-reference behavior remains unverified.
 
@@ -95,10 +100,10 @@ of implemented turning nose, tool-length, M6 sequencing or TCP simulation.
 
 ### Machine visualization direction (2026-09-14)
 
-Plan, not implemented: start with a stationary workpiece-frame view of the path,
-one selected tool assembly and optional initial material. Do not require a full
-machine digital twin to draw this view. Reuse the existing run-owned tool ID,
-geometry snapshot and source/occurrence selection.
+Current implementation: a stationary workpiece-frame view displays the path and
+one selected milling tool assembly for verified MILL_DEMO poses. Optional initial
+material and a full machine digital twin remain future work. The implementation
+reuses the run-owned tool ID, geometry snapshot and source/occurrence selection.
 
 The execution boundary must supply a documented tool reference position and
 orientation in the same workpiece frame as the displayed path. Resolve controller
@@ -496,10 +501,11 @@ Use EventBus for selection notifications, not for repeatedly transporting comple
 #### What exists today
 
 - NCCodePane emits `EDITOR_CURSOR_MOVED` with channel and a 1-based line number.
-- NCToolpathPlot subscribes and calls `highlightSegment()`; currently it highlights matching segments but does not place a tool mesh.
+- NCToolpathPlot subscribes and calls `highlightSegment()`; for verified poses it
+	also places the run-owned milling tool mesh at the selected pose.
 - ExecutedProgramService maps backend segment points into PlotSegments and already preserves optional `toolNumber`, `channelId` and source line numbers on endpoints. Each adjacent pair of backend points becomes one rendered segment.
 - Current points are deduplicated by coordinates in the point collection. Use ordered segment identity, not the deduplicated point index, for playback/selection. Repeated visits to an identical point must remain distinct execution occurrences.
-- `PlotSegment.toolNumber` and the backend-response mapping now preserve numbers, named strings, null and missing values, alongside `executionStep` and response/subsegment indices. Named-tool snapshot lookup and placement are not implemented yet. Missing tool metadata is not a signal to use the first tool in the catalog.
+- `PlotSegment.toolNumber` and the backend-response mapping now preserve numbers, named strings, null and missing values, alongside `executionStep` and response/subsegment indices. Exact run-owned numeric tool lookup and milling placement are implemented; named-tool placement remains subject to the backend pose contract. Missing tool metadata is not a signal to use the first tool in the catalog.
 
 #### Retain a snapshot with each plotted execution
 

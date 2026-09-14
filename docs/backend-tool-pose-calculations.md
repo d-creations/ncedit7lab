@@ -16,6 +16,13 @@ turning references, length/TCP semantics, non-demo frame changes, full-turn
 sampling and bounded adaptive subdivision. They must fail explicitly rather than
 being inferred from the current demo implementation.
 
+The verified FANUC demo path includes programs with additional unsupported tool
+records. Those records do not suppress valid milling tools from the request; the
+engine receives the supported milling definitions and returns poses for movements
+whose executed tool has a matching definition. A tool-change line itself has no
+pose because it emits no plotted coordinates; the corresponding motion must be
+selected in the editor.
+
 ## 1. Boundary and existing behavior
 
 One Plot action executes one POST containing all selected `machinedata` channels.

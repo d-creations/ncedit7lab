@@ -72,6 +72,27 @@ describe('completed plot runs', () => {
     expect(wire.machinedata[0].program.split('\n')).toHaveLength(text.split('\n').length);
   });
 
+  it('sends complete simulation machine data only for an advertised pose contract', async () => {
+    const first = input();
+    first.machineProfile = {
+      machineName: 'FANUC_MILL_DEMO', controlType: 'FANUC', axes: ['X', 'Y', 'Z', 'B', 'C'],
+      feedLimits: { min: 0, max: 1000 }, defaultTools: [], availableChannels: 1,
+      profileRevision: 'sha256:demo', supportedPoseContracts: ['workpiece-tool-reference-v1'],
+      simulation: {
+        schemaVersion: 1, revision: 1, modelId: 'MILL_DEMO', displayName: 'MILL DEMO', fidelity: 'demo',
+        poseContract: 'workpiece-tool-reference-v1', carriers: [], toolMounts: [],
+      },
+    };
+    await service.executePlotRun([first], true);
+    expect(vi.mocked(backend.requestPlot).mock.calls[0][0]).toMatchObject({
+      toolPathMode: 'center', poseContract: 'workpiece-tool-reference-v1',
+      machinedata: [{ simulation: {
+        profileRevision: 'sha256:demo',
+        tools: [{ toolNumber: 0, reference: 'millingTip', mountingOrientationDegrees: [0, 0, 0] }],
+      } }],
+    });
+  });
+
   it('isolates exact tool IDs and never resolves unavailable tools or other programs', async () => {
     const first = input();
     const text = [0, 1, '1', 'DRILL'].map((toolNumber) => codec.encodeTool({ toolNumber, description: String(toolNumber) }, syntax)).join('\n');

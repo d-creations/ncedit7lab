@@ -1,5 +1,6 @@
 // ExecutedProgramService for server-side program execution
 
+import { WORKPIECE_TOOL_REFERENCE_POSE_CONTRACT } from '@core/types';
 import type {
   ChannelId,
   MachineType,
@@ -11,12 +12,16 @@ import type {
   ToolPathMode,
   CustomVariable,
   BackendPlotChannel,
+  MachineProfile,
+  SimulationChannelInput,
+  ToolReference,
 } from '@core/types';
 import { BackendGateway } from './BackendGateway';
 import { EventBus, EVENT_NAMES } from './EventBus';
 import { freezeMetadata } from './tools/SimulationMetadata';
 import type { PlotRunInput, PlotRunSnapshot } from './tools/PlotRunSnapshot';
 import { executionProgram } from './tools/PlotRunSnapshot';
+import type { ProgramToolDefinition } from './tools/SimulationMetadata';
 
 export interface ExecutionRequest {
   channelId: ChannelId;
@@ -25,6 +30,7 @@ export interface ExecutionRequest {
   toolValues?: ToolValue[];
   toolOffsets?: ToolOffsetValue[];
   customVariables?: CustomVariable[];
+  simulation?: SimulationChannelInput;
 }
 
 export class ExecutedProgramService {
@@ -65,6 +71,10 @@ export class ExecutedProgramService {
       toolValues: structuredClone(input.toolValues),
       toolOffsets: structuredClone(input.toolOffsets),
       customVariables: structuredClone(input.customVariables),
+      simulation: this.createSimulationInput(
+        input.machineProfile,
+        structuredClone(input.snapshot.tools) as ProgramToolDefinition[],
+      ),
     }));
     freezeMetadata(captured);
     let results: ExecutedProgramResult[];
@@ -209,8 +219,10 @@ export class ExecutedProgramService {
   private buildPlotRequest(requests: ExecutionRequest[]): PlotRequest {
     // Enforce at the shared boundary, including channel-header and host-triggered plots.
     // This requests the reference path; it does not certify backend compensation accuracy.
+    const includesPoseRequest = requests.length > 0 && requests.every((request) => request.simulation !== undefined);
     return {
       toolPathMode: 'center',
+      ...(includesPoseRequest ? { poseContract: WORKPIECE_TOOL_REFERENCE_POSE_CONTRACT } : {}),
       machinedata: requests.map((request) => ({
         program: this.preprocessProgram(request.program),
         machineName: request.machineName,
@@ -218,8 +230,41 @@ export class ExecutedProgramService {
         toolValues: request.toolValues,
         ...(request.toolOffsets !== undefined ? { toolOffsets: request.toolOffsets } : {}),
         customVariables: request.customVariables,
+        ...(includesPoseRequest ? { simulation: request.simulation! } : {}),
       })),
     };
+  }
+
+  private createSimulationInput(
+    machine: MachineProfile | undefined,
+    tools: readonly ProgramToolDefinition[],
+  ): SimulationChannelInput | undefined {
+    const simulation = machine?.simulation;
+    if (!machine?.profileRevision || !simulation ||
+      !machine.supportedPoseContracts?.includes(WORKPIECE_TOOL_REFERENCE_POSE_CONTRACT) ||
+      simulation.poseContract !== WORKPIECE_TOOL_REFERENCE_POSE_CONTRACT) {
+      return undefined;
+    }
+    const inputs = tools.map((tool) => {
+      const reference = this.toolReference(tool);
+      if (!reference) return undefined;
+      return {
+        toolNumber: tool.toolNumber,
+        reference,
+        mountingOrientationDegrees: [...(tool.orientation ?? [0, 0, 0])] as [number, number, number],
+      };
+    });
+    const supportedInputs = inputs.filter((input): input is SimulationChannelInput['tools'][number] => input !== undefined);
+    if (supportedInputs.length === 0) return undefined;
+    return { profileRevision: machine.profileRevision, tools: supportedInputs };
+  }
+
+  private toolReference(tool: ProgramToolDefinition): ToolReference | undefined {
+    if (!tool.cutting?.length) return undefined;
+    const turning = tool.cutting.every((part) => part.type === 'insert');
+    const milling = tool.cutting.every((part) => part.type !== 'insert');
+    if (turning) return 'turningVirtualTip';
+    return milling ? 'millingTip' : undefined;
   }
 
   private preprocessProgram(program: string): string {
@@ -375,6 +420,8 @@ export class ExecutedProgramService {
                   sourceSegmentIndex,
                   subsegmentIndex: index,
                   channelId: canalNr as ChannelId,
+                  motionContext: segment.motionContext,
+                  poses: segment.poses,
                 });
               }
             }

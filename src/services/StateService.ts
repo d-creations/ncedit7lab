@@ -179,7 +179,8 @@ export class StateService {
 
   activateChannel(id: ChannelId): void {
     const channel = this.state.channels.get(id);
-    if (!channel || channel.active) return;
+    const machine = this.state.activeMachine;
+    if (!channel || channel.active || (machine && Number(id) > machine.availableChannels)) return;
 
     this.updateChannel(id, { active: true });
     this.eventBus.publish(EVENT_NAMES.CHANNEL_ACTIVATED, { channelId: id });
@@ -213,7 +214,17 @@ export class StateService {
     const machine = this.state.machines.find((m) => m.machineName === machineType);
     if (machine) {
       this.state.activeMachine = machine;
+      for (const [channelId, channel] of this.state.channels) {
+        const active = Number(channelId) <= machine.availableChannels;
+        if (channel.active !== active) this.state.channels.set(channelId, { ...channel, active });
+      }
+      if (Number(this.state.workbenchSelectedChannel) > machine.availableChannels) {
+        this.state.workbenchSelectedChannel = '1';
+      }
       this.persistState();
+      this.eventBus.publish(EVENT_NAMES.STATE_CHANGED, {
+        channels: this.getActiveChannels(), workbenchSelectedChannel: this.state.workbenchSelectedChannel,
+      });
       this.eventBus.publish(EVENT_NAMES.MACHINE_CHANGED, { machine });
     }
   }

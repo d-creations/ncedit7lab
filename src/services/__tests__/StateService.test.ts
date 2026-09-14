@@ -51,4 +51,20 @@ describe('StateService centre-mode normalization', () => {
       expect(JSON.parse(stored).toolPathMode).toBe('center');
     },
   );
+
+  it('activates only the selected machine channels and rejects unavailable channels', () => {
+    const service = new StateService(new EventBus(), false);
+    service.setMachines([
+      { machineName: 'SR', controlType: 'FANUC', axes: [], feedLimits: { min: 0, max: 1 }, defaultTools: [], availableChannels: 2 },
+      { machineName: 'SV', controlType: 'FANUC', axes: [], feedLimits: { min: 0, max: 1 }, defaultTools: [], availableChannels: 3 },
+    ]);
+
+    service.setGlobalMachine('SR');
+    expect(service.getActiveChannels().map((channel) => channel.id)).toEqual(['1', '2']);
+    service.activateChannel('3');
+    expect(service.getActiveChannels().map((channel) => channel.id)).toEqual(['1', '2']);
+
+    service.setGlobalMachine('SV');
+    expect(service.getActiveChannels().map((channel) => channel.id)).toEqual(['1', '2', '3']);
+  });
 });

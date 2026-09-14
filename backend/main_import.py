@@ -95,6 +95,9 @@ try:
     )
     from ncplot7py.domain.cnc_state import CNCState
     from ncplot7py.domain.tool_compensation import load_tool_data
+    from ncplot7py.domain.simulation_contract import (
+        SimulationContractError, validate_pose_request,
+    )
     from ncplot7py.domain.exceptions import ExceptionNode
 except Exception as e:
     logging.error(f"Failed to import ncplot7py: {e}")
@@ -423,6 +426,7 @@ def list_machines() -> Dict[str, Any]:
         if get_machine_regex_patterns:
             machine["regexPatterns"] = get_machine_regex_patterns(machine["machineName"])
         config = get_machine_config(machine["machineName"])
+        machine.update(config.simulation_metadata())
         machine["toolSelection"] = getattr(config, "tool_selection", {})
         machine["controlType"] = getattr(config, "control_type", machine["controlType"])
         machine["machineType"] = getattr(config, "machine_type", "")
@@ -519,6 +523,8 @@ def build_segments_from_engine_output(canal_output: Dict[str, Any]) -> Dict[str,
             "lineNumber": line_number,
             "executionStep": entry.get("executionStep"),
             "toolNumber": entry.get("toolNumber", "unknown"),
+            "motionContext": entry.get("motionContext"),
+            "poses": entry.get("poses"),
             "points": points,
         }
         segments.append(seg)
@@ -815,6 +821,23 @@ async def cgiserver_import(request: Request):
     else:
         raise HTTPException(status_code=400, detail="Invalid request format")
 
+    tool_path_mode = req.get("toolPathMode", "effective") if isinstance(req, dict) else "effective"
+    if tool_path_mode not in ("effective", "center"):
+        raise HTTPException(status_code=400, detail="toolPathMode must be effective or center")
+
+    if NCExecutionEngine is None or UniversalConfigDrivenControl is None:
+        return {"success": False, "canal": {}, "message": ["NC execution engine unavailable"],
+                "errors": [{"code": "ENGINE_EXECUTION_FAILED", "message": "NC execution engine unavailable"}]}
+    try:
+        profiles = {machine["machineName"]: get_machine_config(machine["machineName"])
+                    for machine in get_available_machines()}
+        validate_pose_request(req, profiles)
+    except SimulationContractError as error:
+        return {
+            "success": False, "canal": {}, "message": [str(error)],
+            "errors": [error.as_dict()],
+        }
+
     # Build programs list, canal names, tool values, custom variables, and machine names
     programs: List[str] = []
     canal_names: List[str] = []
@@ -843,7 +866,7 @@ async def cgiserver_import(request: Request):
     init_states = []
     for idx in range(len(programs)):
         if CNCState is not None:
-            state = CNCState()
+            state = CNCState(tool_path_mode=tool_path_mode)
             machine_name = machine_names[idx] if idx < len(machine_names) else ""
             if machine_name:
                 try:
@@ -868,6 +891,12 @@ async def cgiserver_import(request: Request):
                 load_tool_data(state, tool_vals, machinedata[idx].get("toolOffsets", []))
             except ValueError as error:
                 raise HTTPException(status_code=400, detail=str(error)) from error
+            simulation = machinedata[idx].get("simulation")
+            if isinstance(simulation, dict):
+                state.extra["pose_tools"] = {
+                    tool["toolNumber"]: {"mountingOrientationDegrees": list(tool["mountingOrientationDegrees"])}
+                    for tool in simulation.get("tools", [])
+                }
             init_states.append(state)
         else:
             init_states.append(None)
@@ -904,33 +933,13 @@ async def cgiserver_import(request: Request):
         errors.append(error_info)
         logging.warning("NC execution error: %s", error_info)
     except Exception as e:
-        logging.warning("Real engine failed: %s. Falling back to mock parser.", e)
-        # Fallback will handle this
+        logging.exception("NC execution failed")
+        return {"success": False, "canal": {}, "message": ["NC execution failed"],
+                "errors": [{"code": "ENGINE_EXECUTION_FAILED", "message": "NC execution failed"}]}
 
-    # Check if engine output is valid/non-empty. If empty or failed, use mock.
-    use_mock = False
-    if engine_output is None:
-        use_mock = True
-    else:
-        # Check if we got any plot points. If all canals are empty, assume failure/mismatch
-        # and fallback to mock (legacy behavior) to ensure the user sees something.
-        total_points = 0
-        for canal in engine_output:
-            if isinstance(canal, dict):
-                total_points += len(canal.get("plot", []))
-            elif isinstance(canal, list):
-                total_points += len(canal)
-        
-        if total_points == 0 and any(len(p.strip()) > 0 for p in programs) and not engine_output_has_non_plot_data(engine_output):
-            logging.info("Real engine returned 0 points for non-empty program. Falling back to mock.")
-            use_mock = True
-
-    if use_mock:
-        result = run_mock_parser(machinedata)
-        # Include any errors that occurred before falling back to mock
-        if errors:
-            result["errors"] = errors
-        return result
+    if engine_output is None or errors:
+        return {"success": False, "canal": {}, "message": ["NC execution failed"],
+                "errors": errors or [{"code": "ENGINE_EXECUTION_FAILED", "message": "No engine result"}]}
 
     # engine_output is a list per canal
     canal_results = {}
@@ -958,12 +967,7 @@ async def cgiserver_import(request: Request):
                 "errors": errors,
             }
 
-    response = {"canal": canal_results, "message": messages, "success": True}
-    # Include errors array in the response even if execution succeeded partially
-    if errors:
-        response["errors"] = errors
-        # Keep success=True for partial results, add hasErrors flag for clarity
-        response["hasErrors"] = True
+    response = {"canal": canal_results, "message": messages, "success": True, "executionOrigin": "engine"}
     return response
 
 

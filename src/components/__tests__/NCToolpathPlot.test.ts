@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NCToolpathPlot } from '../NCToolpathPlot';
+import * as THREE from 'three';
 import { ServiceRegistry } from '@core/ServiceRegistry';
 import { EVENT_BUS_TOKEN, EXECUTED_PROGRAM_SERVICE_TOKEN, FILE_MANAGER_SERVICE_TOKEN,
   PLOT_SERVICE_TOKEN, PROGRAM_TOOL_SERVICE_TOKEN, STATE_SERVICE_TOKEN } from '@core/ServiceTokens';
@@ -18,7 +19,9 @@ import type { PlotMetadata, PlotResponse } from '@core/types';
 interface PlotHarness extends HTMLElement {
   initThree(): void;
   updatePlot(metadata: PlotMetadata): void;
-  highlightSegment(channel: string, line: number): void;
+  scene?: THREE.Scene;
+  highlightObject: THREE.LineSegments | null;
+  toolObject: THREE.Group | null;
   plotNCCode(channel?: string): Promise<void>;
   clearPlot(): void;
 }
@@ -105,16 +108,51 @@ describe('editor Plot actions', () => {
   });
 
   it('marks edits stale and prevents old-line highlighting without execution', async () => {
+    requestPlot.mockResolvedValue({ canal: { '1': { segments: [{
+      traversal: 'FEED', geometry: 'LINEAR', lineNumber: 1, executionStep: 0, toolNumber: 1,
+      points: [{ x: 0, y: 0, z: 0 }, { x: 5, y: 0, z: 0 }],
+    }] } } });
+    plot.scene = new THREE.Scene();
     await plot.plotNCCode('1');
-    const highlight = vi.spyOn(plot, 'highlightSegment').mockImplementation(() => {});
     bus.publish(EVENT_NAMES.EDITOR_CURSOR_MOVED, { channelId: '1', lineNumber: 1, source });
-    expect(highlight).toHaveBeenCalledTimes(1);
+    expect(Array.from(plot.highlightObject!.geometry.getAttribute('position').array)).toEqual([0, 0, 0, 5, 0, 0]);
+    const previousGeometry = plot.highlightObject!.geometry;
+    const clearDispose = vi.spyOn(previousGeometry, 'dispose');
+    bus.publish(EVENT_NAMES.EDITOR_CURSOR_MOVED, { channelId: '1', lineNumber: 2, source });
+    expect(plot.highlightObject).toBeNull();
+    expect(clearDispose).toHaveBeenCalledOnce();
+    expect(plot.shadowRoot?.getElementById('plot-status')?.textContent).toContain('No plotted move');
+    bus.publish(EVENT_NAMES.EDITOR_CURSOR_MOVED, { channelId: '1', lineNumber: 1, source });
+    const dispose = vi.spyOn(plot.highlightObject!.geometry, 'dispose');
     source = { ...source, revision: 1, text: 'G1 X100' };
     bus.publish('program:content_changed', {});
     bus.publish(EVENT_NAMES.EDITOR_CURSOR_MOVED, { channelId: '1', lineNumber: 1, source });
-    expect(highlight).toHaveBeenCalledTimes(1);
+    expect(plot.highlightObject).toBeNull();
+    expect(dispose).toHaveBeenCalledOnce();
     expect(plot.shadowRoot?.getElementById('plot-status')?.textContent).toContain('stale');
     expect(requestPlot).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows the selected milling tool at its emitted workpiece pose', async () => {
+    source.text = new SimulationCommentCodec().encodeTool({ toolNumber: 1, description: '8mm end mill',
+      cutting: [{ type: 'endMill', diameter: 8, length: 30 }],
+    }, syntax);
+    requestPlot.mockResolvedValue({ canal: { '1': { segments: [{
+      traversal: 'FEED', geometry: 'LINEAR', lineNumber: 1, executionStep: 0, toolNumber: 1,
+      points: [{ x: 0, y: 0, z: 0 }, { x: 5, y: 6, z: 7 }],
+      poses: [
+        { position: [0, 0, 0], orientation: [0, 0, 0, 1], reference: 'millingTip', frameId: 'workpiece:tableBC' },
+        { position: [5, 6, 7], orientation: [0, 0, 1, 0], reference: 'millingTip', frameId: 'workpiece:tableBC' },
+      ],
+    }] } } });
+    plot.scene = new THREE.Scene();
+
+    await plot.plotNCCode('1');
+    bus.publish(EVENT_NAMES.EDITOR_CURSOR_MOVED, { channelId: '1', lineNumber: 1, source });
+
+    expect(plot.toolObject).not.toBeNull();
+    expect(plot.toolObject!.position.toArray()).toEqual([5, 6, 7]);
+    expect(plot.toolObject!.quaternion.toArray()).toEqual([0, 0, 1, 0]);
   });
 
   it('does not replace the old plot on invalid metadata or a failed request', async () => {
@@ -128,6 +166,36 @@ describe('editor Plot actions', () => {
     await plot.plotNCCode('1');
     expect(render).toHaveBeenCalledTimes(1);
     expect(plot.shadowRoot?.getElementById('plot-status')?.textContent).toContain('offline');
+  });
+
+  it('selects repeated occurrences without execution and retains the choice until source changes', async () => {
+    requestPlot.mockResolvedValue({ canal: { '1': { segments: [0, 3].map((executionStep) => ({
+      traversal: 'FEED', geometry: 'LINEAR', lineNumber: 1, executionStep, toolNumber: executionStep,
+      points: [{ x: 0, y: 0, z: 0 }, { x: executionStep + 1, y: 0, z: 0 }],
+    })) } } });
+    plot.scene = new THREE.Scene();
+    const changed = vi.fn();
+    bus.subscribe(EVENT_NAMES.PLOT_SELECTION_CHANGED, changed);
+    await plot.plotNCCode('1');
+    bus.publish(EVENT_NAMES.EDITOR_CURSOR_MOVED, { channelId: '1', lineNumber: 1, source });
+    const control = plot.shadowRoot!.querySelector<HTMLSelectElement>('#plot-occurrence')!;
+    expect(Array.from(control.options, (option) => option.value)).toEqual(['0', '3']);
+    expect(control.value).toBe('0');
+    control.value = '3';
+    control.dispatchEvent(new Event('change'));
+    expect(Array.from(plot.highlightObject!.geometry.getAttribute('position').array)).toEqual([0, 0, 0, 4, 0, 0]);
+    expect(changed).toHaveBeenLastCalledWith(expect.objectContaining({
+      runId: 'plot-1', status: 'selected', executionStep: 3, toolNumber: 3,
+      sourceSegmentIndex: 1, subsegmentIndex: 0, toolDefinitionAvailable: false,
+    }));
+    bus.publish(EVENT_NAMES.EDITOR_CURSOR_MOVED, { channelId: '1', lineNumber: 1, source });
+    expect(control.value).toBe('3');
+    expect(requestPlot).toHaveBeenCalledTimes(1);
+    source = { ...source, revision: 1 };
+    bus.publish('program:content_changed', {});
+    expect(control.disabled).toBe(true);
+    expect(control.options).toHaveLength(0);
+    expect(plot.highlightObject).toBeNull();
   });
 
   it('clearing cancels a pending render and disconnect releases subscriptions', async () => {

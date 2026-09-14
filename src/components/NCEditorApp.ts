@@ -92,7 +92,10 @@ export class NCEditorApp extends HTMLElement {
       const machines = this.machineService.getMachines();
       if (machines.length > 0) {
         this.stateService.setMachines(machines);
-        this.stateService.setGlobalMachine(machines[0].machineName);
+        const initialMachine = machines.find((machine) =>
+          machine.machineName === 'FANUC_STAR_SR20R_IV_B',
+        ) ?? machines[0];
+        this.stateService.setGlobalMachine(initialMachine.machineName);
       }
 
       this.normalizeInitialChannels();
@@ -126,9 +129,11 @@ export class NCEditorApp extends HTMLElement {
       return;
     }
 
-    this.stateService.activateChannel('1');
-    this.stateService.deactivateChannel('2');
-    this.stateService.deactivateChannel('3');
+    const availableChannels = this.stateService.getState().activeMachine?.availableChannels ?? 1;
+    (['1', '2', '3'] as const).forEach((channelId) => {
+      if (Number(channelId) <= availableChannels) this.stateService.activateChannel(channelId);
+      else this.stateService.deactivateChannel(channelId);
+    });
   }
 
   private async render(): Promise<void> {

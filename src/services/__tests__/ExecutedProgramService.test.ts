@@ -76,7 +76,7 @@ describe('ExecutedProgramService', () => {
 
     it('preserves exact tool identifiers and unavailable values without carrying state forward', async () => {
       const metadata: Partial<BackendPlotSegment>[] = [
-        { toolNumber: 0, executionStep: 0 },
+        { toolNumber: 0, executionStep: 0, motionContext: { channelId: '1', startAxes: { X: 0, B: 0 }, endAxes: { X: 1, B: 90 }, toolOffset: { radiusMode: 'OFF' } }, poses: [{ position: [0, 0, 0], orientation: [0, 0, 0, 1], reference: 'millingTip', frameId: 'workpiece:tableBC' }] },
         { toolNumber: 1, executionStep: 1 },
         { toolNumber: '1', executionStep: 2 },
         { toolNumber: 'DRILL_8', executionStep: 3 },
@@ -102,6 +102,10 @@ describe('ExecutedProgramService', () => {
       });
       // Deduplicated display points must not collapse repeated execution occurrences.
       expect(result.plotMetadata!.points).toHaveLength(2);
+      expect(segments[0].motionContext).toEqual({
+        channelId: '1', startAxes: { X: 0, B: 0 }, endAxes: { X: 1, B: 90 }, toolOffset: { radiusMode: 'OFF' },
+      });
+      expect(segments[0].poses).toEqual(metadata[0].poses);
 
       vi.mocked(mockBackend.requestPlot).mockResolvedValue({ canal: { '1': { segments: [move()] } } });
       const nextRun = await service.executeProgram(request);

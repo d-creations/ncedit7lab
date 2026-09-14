@@ -33,7 +33,7 @@ import type {
 const CHANNELS: ChannelId[] = ['1', '2', '3'];
 const INSERT_SHAPES: InsertShape[] = ['C', 'D', 'V', 'W', 'T', 'S', 'R', 'E', 'H', 'O', 'P', 'L', 'A', 'B', 'K'];
 
-type ManagerTab = 'library' | 'program' | 'offsets';
+type ManagerTab = 'library' | 'program' | 'offsets' | 'simulation';
 
 function exactKey(value: ToolIdentifier): string {
   return JSON.stringify([typeof value, value]);
@@ -244,10 +244,12 @@ export class NCToolManagerPanel extends HTMLElement {
           <button class="manager-tab ${this.activeTab === 'library' ? 'active' : ''}" data-manager-tab="library">Library</button>
           <button class="manager-tab ${this.activeTab === 'program' ? 'active' : ''}" data-manager-tab="program">Program Tools</button>
           <button class="manager-tab ${this.activeTab === 'offsets' ? 'active' : ''}" data-manager-tab="offsets">Offsets</button>
+          <button class="manager-tab ${this.activeTab === 'simulation' ? 'active' : ''}" data-manager-tab="simulation">Simulation</button>
         </nav>
         <div class="manager-body">
           ${this.activeTab === 'library' ? this.renderLibrary() :
-            this.activeTab === 'program' ? this.renderProgram() : this.renderOffsets()}
+            this.activeTab === 'program' ? this.renderProgram() :
+              this.activeTab === 'offsets' ? this.renderOffsets() : this.renderSimulation()}
         </div>
         <div id="manager-status" class="status ${this.statusKind}" role="status" aria-live="polite">${this.escape(this.status)}</div>
       </div>
@@ -345,6 +347,25 @@ export class NCToolManagerPanel extends HTMLElement {
       </div>
       <div class="notice">Offsets are program-owned compensation records. Applying writes a managed simulation-comment block without changing executable NC commands.</div>
       <div class="form-actions"><button class="button primary" id="save-offsets" type="button">Apply Offsets to Program</button></div>
+    </main>`;
+  }
+
+  private renderSimulation(): string {
+    const machine = this.stateService.getState().activeMachine;
+    const simulation = machine?.simulation;
+    if (!machine) return '<main class="simulation-pane"><div class="empty">Select a machine to inspect its simulation profile.</div></main>';
+    if (!simulation) return `<main class="simulation-pane"><div class="notice warning">${this.escape(machine.machineName)} does not provide simulation machine data.</div></main>`;
+    const supported = machine.supportedPoseContracts?.includes(simulation.poseContract) ?? false;
+    return `<main class="simulation-pane">
+      <section><div class="section-heading"><h3>${this.escape(simulation.displayName)}</h3><span>${this.escape(simulation.fidelity)} profile</span></div>
+        <div class="field-grid simulation-fields"><div><span>Machine</span><strong>${this.escape(machine.machineName)}</strong></div><div><span>Model</span><strong>${this.escape(simulation.modelId)}</strong></div><div><span>Axes</span><strong>${this.escape(machine.axes.join(', ') || 'None')}</strong></div><div><span>Channels</span><strong>${machine.availableChannels}</strong></div><div><span>Profile revision</span><strong>${this.escape(machine.profileRevision ?? 'Unavailable')}</strong></div><div><span>Pose output</span><strong class="${supported ? 'available' : 'unavailable'}">${supported ? 'Available' : 'Not installed'}</strong></div></div>
+      </section>
+      <section><div class="section-heading"><h3>Carriers</h3><span>Reference orientation and rotary chains</span></div>
+        <div class="simulation-list">${simulation.carriers.map((carrier) => `<div class="simulation-row"><strong>${this.escape(carrier.id)}</strong><span>${carrier.role} · [${carrier.referenceOrientationDegrees.join(', ')}]</span><span>${carrier.rotationChain.length ? carrier.rotationChain.map((joint) => `${this.escape(joint.axisId)} ${joint.sign > 0 ? '+' : '-'} (${joint.axis.join(', ')})`).join('; ') : 'Fixed'}</span></div>`).join('')}</div>
+      </section>
+      <section><div class="section-heading"><h3>Tool mappings</h3><span>Static profile assignments</span></div>
+        <div class="simulation-list">${simulation.toolMounts.map((mount) => `<div class="simulation-row"><strong>CH ${this.escape(mount.channelId)}</strong><span>${this.escape(mount.carrierId)} → ${this.escape(mount.target.mode === 'fixed' ? mount.target.workpieceCarrierId : mount.target.allowedWorkpieceCarrierIds.join(', '))}</span><span>${mount.tools.kind === 'numericRange' ? `Tools ${mount.tools.from}-${mount.tools.to}` : mount.tools.values.map(String).join(', ')}</span></div>`).join('')}</div>
+      </section>
     </main>`;
   }
 
@@ -926,6 +947,9 @@ export class NCToolManagerPanel extends HTMLElement {
       .tool-meta.complete { color:#2f8f4e; }
       .tool-form { display:flex; flex-direction:column; gap:0; }
       .offset-editor-pane { grid-column:1 / -1; min-height:0; overflow:auto; display:flex; flex-direction:column; }
+      .simulation-pane { grid-column:1 / -1; min-height:0; overflow:auto; }
+      .simulation-fields { padding-top:8px; } .simulation-fields div { display:grid; gap:3px; min-width:0; } .simulation-fields span,.simulation-row span { color:var(--vscode-descriptionForeground,#57606a); font-size:11px; } .simulation-fields strong,.simulation-row strong { overflow-wrap:anywhere; font-size:12px; } .available { color:#2f8f4e; } .unavailable { color:#b7791f; }
+      .simulation-list { display:grid; gap:1px; border:1px solid var(--vscode-editorGroup-border,#d0d7de); } .simulation-row { display:grid; grid-template-columns:minmax(120px,1fr) minmax(160px,2fr) minmax(140px,2fr); gap:8px; padding:8px; background:var(--vscode-editor-background,#fff); }
       .offset-header { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:12px; border-bottom:1px solid var(--vscode-editorGroup-border,#d0d7de); }
       .offset-table { display:grid; gap:1px; background:var(--vscode-editorGroup-border,#d0d7de); }
       .offset-row { display:grid; grid-template-columns:repeat(auto-fit,minmax(90px,1fr)) 32px; gap:8px; align-items:end; padding:9px; background:var(--vscode-editor-background,#fff); }

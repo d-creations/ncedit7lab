@@ -16,9 +16,12 @@ import { StateService } from '@services/StateService';
 import type { PlotMetadata, CustomVariable, ChannelId } from '@core/types';
 import type { ProgramToolService, ProgramSource } from '@services/tools/ProgramToolService';
 import { programIdentityKey } from '@services/tools/ProgramToolService';
+import { createPlotSelectionResolver, type PlotSourceLocation } from '@services/tools/PlotSelectionResolver';
 import type { IFileManagerService } from '@services/IFileManagerService';
 import type { PlotRunInput } from '@services/tools/PlotRunSnapshot';
+import type { PlotSegment } from '@core/types';
 import type { NCBottomPanel } from './NCBottomPanel';
+import { ToolGeometryFactory } from './ToolGeometryFactory';
 
 export class NCToolpathPlot extends HTMLElement {
   private scene?: THREE.Scene;
@@ -33,13 +36,17 @@ export class NCToolpathPlot extends HTMLElement {
   private isVisible = false;
   private resizeObserver?: ResizeObserver;
   private isPlotting = false;
-  private currentPlotMetadata: PlotMetadata | null = null;
   private highlightObject: THREE.Object3D | null = null;
+  private toolObject: THREE.Group | null = null;
+  private readonly toolGeometryFactory = new ToolGeometryFactory();
   private themeObserver?: MutationObserver;
   private programTools: ProgramToolService;
   private fileManager: IFileManagerService;
   private subscriptions: EventSubscription[] = [];
   private displayedRunId?: string;
+  private resolveSelection?: ReturnType<typeof createPlotSelectionResolver>;
+  private selectionLocation?: PlotSourceLocation;
+  private selectedExecutionStep?: number;
   private requestGeneration = 0;
   private stale = false;
 
@@ -89,6 +96,8 @@ export class NCToolpathPlot extends HTMLElement {
       const run = this.executedProgramService.getPlotRun(data.runId);
       if (!run || data.runId === this.displayedRunId) return;
       this.displayedRunId = run.runId;
+      this.clearSelection();
+      this.resolveSelection = createPlotSelectionResolver(run);
       this.stale = false;
       this.updatePlot(structuredClone(run.plotMetadata) as PlotMetadata);
       this.refreshStaleness();
@@ -119,13 +128,85 @@ export class NCToolpathPlot extends HTMLElement {
     this.subscriptions.push(this.eventBus.subscribe(EVENT_NAMES.EDITOR_CURSOR_MOVED, (data: unknown) => {
       const cursorData = data as { channelId: string; lineNumber: number; source?: ProgramSource };
       this.refreshStaleness();
-      if (this.stale || !cursorData.source) return;
+      if (this.stale || !cursorData.source) {
+        this.clearSelection();
+        return;
+      }
       const run = this.displayedRunId ? this.executedProgramService.getPlotRun(this.displayedRunId) : undefined;
       const snapshot = run?.inputs.find((input) => input.snapshot.identity.channelId === cursorData.channelId)?.snapshot;
       if (!snapshot || snapshot.revision !== cursorData.source.revision ||
-        programIdentityKey(snapshot.identity) !== programIdentityKey(cursorData.source.identity)) return;
-      this.highlightSegment(cursorData.channelId, cursorData.lineNumber);
+        programIdentityKey(snapshot.identity) !== programIdentityKey(cursorData.source.identity)) {
+        this.clearSelection();
+        return;
+      }
+      if (!run) return;
+      const location: PlotSourceLocation = {
+        channelId: cursorData.channelId as ChannelId,
+        lineNumber: cursorData.lineNumber,
+      };
+      const sameLocation = this.selectionLocation?.channelId === location.channelId &&
+        this.selectionLocation.lineNumber === location.lineNumber;
+      this.selectionLocation = location;
+      this.selectOccurrence(sameLocation ? this.selectedExecutionStep : undefined);
     }));
+  }
+
+  private clearSelection(): void {
+    this.highlightSegment();
+    this.updateToolMesh();
+    this.selectionLocation = undefined;
+    this.selectedExecutionStep = undefined;
+    const control = this.shadowRoot?.querySelector<HTMLSelectElement>('#plot-occurrence');
+    if (control) {
+      control.replaceChildren();
+      control.disabled = true;
+    }
+    this.eventBus.publish(EVENT_NAMES.PLOT_SELECTION_CHANGED, { runId: this.displayedRunId, status: 'cleared' });
+  }
+
+  private selectOccurrence(step?: number): void {
+    this.refreshStaleness();
+    if (this.stale || !this.selectionLocation || !this.displayedRunId) {
+      this.clearSelection();
+      return;
+    }
+    const location = this.selectionLocation;
+    const selection = this.resolveSelection?.(location, step);
+    this.highlightSegment(selection?.segment);
+    const control = this.shadowRoot?.querySelector<HTMLSelectElement>('#plot-occurrence');
+    if (control) {
+      control.replaceChildren();
+      control.disabled = selection?.status !== 'selected';
+      for (const [index, executionStep] of (selection?.occurrenceSteps ?? []).entries()) {
+        control.add(new Option(`${index + 1} / ${selection!.occurrenceSteps!.length} (step ${executionStep})`, String(executionStep)));
+      }
+    }
+    const status = this.shadowRoot?.getElementById('plot-status');
+    if (selection?.status !== 'selected' || !selection.segment) {
+      this.selectedExecutionStep = undefined;
+      if (status) status.textContent = selection?.status === 'no-plotted-move'
+        ? 'No plotted move for this location' : 'Execution occurrence unavailable';
+      this.eventBus.publish(EVENT_NAMES.PLOT_SELECTION_CHANGED, {
+        runId: this.displayedRunId, status: selection?.status ?? 'cleared', location,
+      });
+      return;
+    }
+    this.selectedExecutionStep = selection.segment.executionStep!;
+    if (control) control.value = String(this.selectedExecutionStep);
+    const run = this.executedProgramService.getPlotRun(this.displayedRunId);
+    const source = run?.inputs.find((input) => input.snapshot.identity.channelId === location.channelId)?.snapshot;
+    const tool = source && this.executedProgramService.getRunTool(
+      this.displayedRunId, source.identity.programId, location.channelId, selection.segment.toolNumber,
+    );
+    this.updateToolMesh(selection.segment, tool);
+    if (status) status.textContent = `Execution step ${this.selectedExecutionStep}; ${tool ? tool.description : 'tool definition unavailable'}`;
+    this.eventBus.publish(EVENT_NAMES.PLOT_SELECTION_CHANGED, {
+      runId: this.displayedRunId, status: 'selected', source: source?.identity, location,
+      executionStep: this.selectedExecutionStep, fraction: selection.fraction,
+      sourceSegmentIndex: selection.segment.sourceSegmentIndex,
+      subsegmentIndex: selection.segment.subsegmentIndex,
+      toolNumber: selection.segment.toolNumber, toolDefinitionAvailable: Boolean(tool),
+    });
   }
 
   private render() {
@@ -350,6 +431,8 @@ export class NCToolpathPlot extends HTMLElement {
         </div>
         <div class="plot-info">
           <div id="plot-status">No plot data</div>
+          <label for="plot-occurrence">Occurrence</label>
+          <select id="plot-occurrence" disabled style="max-width:100%;width:180px;height:28px"></select>
         </div>
         <div class="orbit-hint">
           🖱️ Left: Rotate | Middle: Pan | Scroll: Zoom
@@ -360,6 +443,10 @@ export class NCToolpathPlot extends HTMLElement {
   }
 
   private attachControlListeners() {
+    this.shadowRoot?.querySelector<HTMLSelectElement>('#plot-occurrence')?.addEventListener('change', (event) => {
+      const control = event.currentTarget as HTMLSelectElement;
+      this.selectOccurrence(Number(control.value));
+    });
     const clearButton = this.shadowRoot?.getElementById('clear-plot');
     clearButton?.addEventListener('click', () => this.clearPlot());
 
@@ -525,6 +612,7 @@ export class NCToolpathPlot extends HTMLElement {
         JSON.stringify(this.readCustomVariables(snapshot.identity.channelId)) !== JSON.stringify(input.customVariables);
     });
     if (this.stale) {
+      this.clearSelection();
       if (this.highlightObject) {
         this.removeOwnedPlotObject(this.highlightObject);
         this.highlightObject = null;
@@ -657,7 +745,6 @@ export class NCToolpathPlot extends HTMLElement {
   private updatePlot(plotMetadata: PlotMetadata) {
     if (!this.scene) return;
 
-    this.currentPlotMetadata = plotMetadata;
 
     // Clear existing plot lines (keep axes)
     const toRemove: THREE.Object3D[] = [];
@@ -689,8 +776,7 @@ export class NCToolpathPlot extends HTMLElement {
     this.zoomToFit();
   }
 
-  private highlightSegment(channelId: string, lineNumber: number) {
-    if (!this.scene || !this.currentPlotMetadata) return;
+  private highlightSegment(selectedSegment?: PlotSegment) {
 
     // Remove previous highlight
     if (this.highlightObject) {
@@ -698,28 +784,15 @@ export class NCToolpathPlot extends HTMLElement {
       this.highlightObject = null;
     }
 
-    // Find segments corresponding to this line number
-    // We check endPoint.lineNumber as it represents the move to that point
-    const segments = this.currentPlotMetadata.segments.filter(
-      (s) =>
-        (!s.channelId || s.channelId === channelId) &&
-        (s.endPoint.lineNumber === lineNumber || s.startPoint.lineNumber === lineNumber),
-    );
-
-    if (segments.length === 0) return;
-
-    // Create geometry for highlighted segments
-    const vertices: number[] = [];
-    segments.forEach((segment) => {
-      vertices.push(
-        segment.startPoint.x,
-        segment.startPoint.y,
-        segment.startPoint.z,
-        segment.endPoint.x,
-        segment.endPoint.y,
-        segment.endPoint.z,
-      );
-    });
+    if (!this.scene || !selectedSegment) return;
+    const vertices = [
+      selectedSegment.startPoint.x,
+      selectedSegment.startPoint.y,
+      selectedSegment.startPoint.z,
+      selectedSegment.endPoint.x,
+      selectedSegment.endPoint.y,
+      selectedSegment.endPoint.z,
+    ];
 
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
@@ -742,6 +815,27 @@ export class NCToolpathPlot extends HTMLElement {
     if (!this.animationFrameId && this.renderer && this.camera) {
       this.renderer.render(this.scene, this.camera);
     }
+  }
+
+  private updateToolMesh(segment?: PlotSegment, tool?: ReturnType<ExecutedProgramService['getRunTool']>): void {
+    if (this.toolObject) {
+      this.removeOwnedPlotObject(this.toolObject);
+      this.toolObject = null;
+    }
+    if (!this.scene || !segment || !tool || !segment.poses?.length) return;
+
+    const poseIndex = Math.min((segment.subsegmentIndex ?? 0) + 1, segment.poses.length - 1);
+    const pose = segment.poses[poseIndex];
+    if (pose.reference !== 'millingTip') return;
+    const mesh = this.toolGeometryFactory.create(tool);
+    if (!mesh) return;
+
+    mesh.position.fromArray(pose.position);
+    mesh.quaternion.fromArray(pose.orientation);
+    mesh.userData.isToolMesh = true;
+    mesh.renderOrder = 1000;
+    this.toolObject = mesh;
+    this.scene.add(mesh);
   }
 
   private resetCamera() {
@@ -856,13 +950,14 @@ export class NCToolpathPlot extends HTMLElement {
   }
 
   private clearPlot() {
+    this.clearSelection();
     this.requestGeneration++;
     this.isPlotting = false;
     this.executedProgramService.cancelPendingPlot();
     if (this.displayedRunId) this.executedProgramService.discardPlotRun(this.displayedRunId);
     this.displayedRunId = undefined;
+    this.resolveSelection = undefined;
     this.stale = false;
-    this.currentPlotMetadata = null;
     if (!this.scene) return;
 
     // Remove highlight object if exists

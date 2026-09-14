@@ -62,6 +62,7 @@ export const EVENT_NAMES = {
   PLOT_UPDATED: 'plot:updated',
   PLOT_REQUEST: 'plot:request',
   PLOT_RUN_COMPLETED: 'plot:run_completed',
+  PLOT_SELECTION_CHANGED: 'plot:selection_changed',
   PROGRAM_TOOL_VALUES_CHANGED: 'program:tool_values_changed',
   PROGRAM_TOOL_OFFSETS_CHANGED: 'program:tool_offsets_changed',
   CUSTOM_VARIABLES_CHANGED: 'program:custom_variables_changed',

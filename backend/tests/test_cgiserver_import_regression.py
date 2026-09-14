@@ -4,10 +4,145 @@ import builtins
 import hashlib
 import hmac
 import json
+import math
+from dataclasses import replace
+import contextlib
+import importlib.machinery
+import importlib.util
+import io
+from pathlib import Path
 from types import SimpleNamespace
 import pytest
 
 from backend import main_import as api
+
+
+@pytest.fixture(params=["fastapi", "cgi"])
+def execution_adapter(request):
+    if request.param == "fastapi":
+        return api
+    import ncplot7py
+    script = Path(ncplot7py.__file__).resolve().parents[2] / "scripts" / "cgiserver.cgi"
+    if not script.exists():
+        pytest.skip("CGI parity requires the engine source checkout")
+    loader = importlib.machinery.SourceFileLoader("cgi_contract_test", str(script))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    with contextlib.redirect_stdout(io.StringIO()):
+        loader.exec_module(module)
+    return module
+
+
+def execute_adapter(adapter, payload):
+    if adapter is api:
+        return asyncio.run(api.cgiserver_import(FakeRequest(payload)))
+    return adapter.handle_execute_programs(
+        payload["machinedata"], payload.get("toolPathMode", "effective"), request_payload=payload,
+    )
+
+
+@pytest.mark.parametrize("machine,selection", [("FANUC_MILL", "T1"), ("SIEMENS_840DI", 'T="CUTTER"')])
+@pytest.mark.parametrize("command", ["G41", "G42"])
+def test_r0_in_explicit_register_does_not_fall_back_to_tool_radius(execution_adapter, machine, selection, command):
+    tool_id = 1 if machine == "FANUC_MILL" else "CUTTER"
+    offset = {"offsetNumber": 2, "rValue": 0}
+    if isinstance(tool_id, str):
+        offset["toolNumber"] = tool_id
+    payload = {"toolPathMode": "center", "machinedata": [{
+        "machineName": machine, "canalNr": "1",
+        "program": selection + f"\nG17 G90\nD2\n{command} G1 X10 Y0 F100\nG1 X20 Y0\nG40",
+        "toolValues": [{"toolNumber": tool_id, "rValue": 7}], "toolOffsets": [offset],
+    }]}
+    result = execute_adapter(execution_adapter, payload)
+    assert result["success"] is True
+    assert result["executionOrigin"] == "engine"
+    assert not result.get("errors")
+    assert result["canal"]["1"]["segments"][-1]["points"][-1]["y"] == 0
+    assert result["canal"]["1"]["segments"][-1]["toolNumber"] == tool_id
+
+
+@pytest.mark.parametrize("values", [{"rValue": -1}, {}])
+def test_missing_or_negative_radius_fails_without_mock(execution_adapter, values):
+    result = execute_adapter(execution_adapter, {"toolPathMode": "center", "machinedata": [{
+        "machineName": "FANUC_MILL", "canalNr": "1", "program": "T1\nG41 G1 X10 F100",
+        "toolValues": [{"toolNumber": 1, **values}],
+    }]})
+    assert result["success"] is False
+    assert result["canal"] == {}
+    assert result["errors"]
+
+
+def test_pose_negotiation_never_executes_or_downgrades(execution_adapter, monkeypatch):
+    def forbidden(*args, **kwargs):
+        pytest.fail("Unsupported pose request must not execute")
+    monkeypatch.setattr(execution_adapter, "NCExecutionEngine", forbidden)
+    config = execution_adapter.get_machine_config("FANUC_MILL")
+    metadata = config.simulation_metadata()
+    assert metadata["supportedPoseContracts"] == []
+    payload = {"poseContract": "workpiece-tool-reference-v1", "toolPathMode": "center", "machinedata": [{
+        "machineName": "FANUC_MILL", "canalNr": "1", "program": "T1",
+        "simulation": {"profileRevision": metadata["profileRevision"], "tools": []},
+    }]}
+    result = execute_adapter(execution_adapter, payload)
+    assert result["success"] is False
+    assert result["errors"][0]["code"] == "POSE_CONTRACT_UNSUPPORTED"
+    payload["machinedata"][0]["simulation"]["profileRevision"] = "old"
+    assert execute_adapter(execution_adapter, payload)["errors"][0]["code"] == "PROFILE_REVISION_MISMATCH"
+
+
+def test_failed_engine_is_not_replaced_and_empty_output_is_valid(execution_adapter, monkeypatch):
+    class EmptyEngine:
+        errors = []
+        def __init__(self, control):
+            pass
+        def get_Syncro_plot(self, programs, sync):
+            return [{"plot": [], "programExec": []}]
+    monkeypatch.setattr(execution_adapter, "NCExecutionEngine", EmptyEngine)
+    payload = {"machinedata": [{"machineName": "FANUC_MILL", "canalNr": "1", "program": "G0 X1"}]}
+    result = execute_adapter(execution_adapter, payload)
+    assert result["success"] is True
+    assert result["canal"]["1"]["segments"] == []
+    def failed(*args, **kwargs):
+        raise RuntimeError("offline")
+    monkeypatch.setattr(execution_adapter, "NCExecutionEngine", failed)
+    result = execute_adapter(execution_adapter, payload)
+    assert result["success"] is False
+    assert result["canal"] == {}
+    assert result["errors"][0]["code"] == "ENGINE_EXECUTION_FAILED"
+
+
+@pytest.mark.parametrize("radius", [0, 2])
+def test_center_request_preserves_zero_radius_and_applies_nonzero_radius(radius):
+    payload = {"toolPathMode": "center", "machinedata": [{
+        "machineName": "FANUC_MILL", "canalNr": "1",
+        "program": "T1\nG17 G90\nG0 X0 Y0 Z0\nG41 G1 X10 Y0 F100\nG1 X20 Y0\nG40",
+        "toolValues": [{"toolNumber": 1, "rValue": radius}],
+    }]}
+    body = asyncio.run(api.cgiserver_import(FakeRequest(payload)))
+    assert body["success"] is True
+    assert not body.get("errors")
+    segment = body["canal"]["1"]["segments"][-1]
+    assert segment["toolNumber"] == 1
+    assert segment["points"][-1]["y"] == pytest.approx(radius)
+
+
+def test_multichannel_plot_executes_once_with_independent_radii(execution_adapter, monkeypatch):
+    created = []
+    original = execution_adapter.NCExecutionEngine
+    def capture(control):
+        created.append(control)
+        return original(control)
+    monkeypatch.setattr(execution_adapter, "NCExecutionEngine", capture)
+    result = execute_adapter(execution_adapter, {"toolPathMode": "center", "machinedata": [
+        {"machineName": "FANUC_MILL", "canalNr": str(channel),
+         "program": "T1\nG17\nG41 G1 X10 Y0 F100\nG1 X20 Y0\nG40",
+         "toolValues": [{"toolNumber": 1, "rValue": radius}]}
+        for channel, radius in [(1, 0), (2, 2)]
+    ]})
+    assert result["success"] is True
+    assert len(created) == 1
+    assert result["canal"]["1"]["segments"][-1]["points"][-1]["y"] == 0
+    assert result["canal"]["2"]["segments"][-1]["points"][-1]["y"] == 2
 
 
 def test_api_loads_channel_scoped_offsets_and_preserves_named_ids(monkeypatch):
@@ -141,6 +276,57 @@ def test_build_segments_preserves_execution_occurrences_and_active_tools():
     assert other["segments"][0]["executionStep"] is None
 
 
+def test_build_segments_preserves_immutable_motion_context():
+    context = {
+        "channelId": "1", "startAxes": {"X": 0.0, "B": 0.0, "C": 0.0},
+        "endAxes": {"X": 10.0, "B": 90.0, "C": 45.0},
+        "toolOffset": {"number": 2, "radiusMode": "LEFT", "radius": 0},
+    }
+    converted = api.build_segments_from_engine_output({"plot": [{
+        "x": [0, 1], "y": [0, 0], "z": [0, 0], "motionContext": context,
+    }]})
+
+    assert converted["segments"][0]["motionContext"] == context
+
+
+def test_mill_demo_engine_captures_actual_motion_axis_endpoints():
+    payload = {"toolPathMode": "center", "machinedata": [{
+        "machineName": "FANUC_MILL_DEMO", "canalNr": "1",
+        "program": "T1\nG17 G90\nG0 X1 Y2 Z3 B90 C45",
+    }]}
+    result = asyncio.run(api.cgiserver_import(FakeRequest(payload)))
+
+    assert result["success"] is True
+    context = result["canal"]["1"]["segments"][0]["motionContext"]
+    assert context["channelId"] == "1"
+    assert context["startAxes"] == {"X": 0.0, "Y": 0.0, "Z": 0.0, "B": 0.0, "C": 0.0}
+    assert context["endAxes"] == {"X": 1.0, "Y": 2.0, "Z": 3.0, "B": 90.0, "C": 45.0}
+    assert context["toolOffset"] == {"radiusMode": "OFF"}
+
+
+def test_mill_demo_pose_request_returns_workpiece_frame_pose(execution_adapter):
+    config = execution_adapter.get_machine_config("FANUC_MILL_DEMO")
+    payload = {"poseContract": "workpiece-tool-reference-v1", "toolPathMode": "center", "machinedata": [{
+        "machineName": "FANUC_MILL_DEMO", "canalNr": "1",
+        "program": "T1\nG17 G90\nG0 X1 Y2 Z3 B90 C0",
+        "simulation": {"profileRevision": config.simulation_metadata()["profileRevision"], "tools": [{
+            "toolNumber": 1, "reference": "millingTip", "mountingOrientationDegrees": [0, 0, 0],
+        }]},
+    }]}
+    result = execute_adapter(execution_adapter, payload)
+
+    assert result["success"] is True
+    segment = result["canal"]["1"]["segments"][0]
+    assert len(segment["poses"]) == len(segment["points"])
+    _assert_close_tuple(segment["poses"][0]["orientation"], [0, 0, 0, 1])
+    pose = segment["poses"][-1]
+    point = segment["points"][-1]
+    assert pose["position"] == [point["x"], point["y"], point["z"]]
+    assert pose["reference"] == "millingTip"
+    assert pose["frameId"] == "workpiece:tableBC"
+    _assert_close_tuple(pose["orientation"], [0, -math.sqrt(0.5), 0, math.sqrt(0.5)])
+
+
 def test_nc_request_telemetry_uses_identity_without_program_content(monkeypatch):
     hmac_key = bytes(range(32))
     monkeypatch.setenv("TELEMETRY_USER_HMAC_KEY", base64.b64encode(hmac_key).decode("ascii"))
@@ -236,12 +422,7 @@ def test_cgiserver_import_returns_line_alignment_syntax():
 def test_list_machines_uses_configured_control_family(monkeypatch):
     machine = {"machineName": "FANUC_MILL", "controlType": "FANUC_MILL"}
     requested_regex_profiles = []
-    config = SimpleNamespace(
-        control_type="FANUC",
-        machine_type="MILL",
-        variable_prefix="#",
-        file_extensions={},
-    )
+    config = replace(api.get_machine_config("FANUC_MILL"), file_extensions={})
     monkeypatch.setattr(api, "get_available_machines", lambda: [machine])
     monkeypatch.setattr(
         api,
@@ -254,6 +435,10 @@ def test_list_machines_uses_configured_control_family(monkeypatch):
 
     assert body["machines"][0]["controlType"] == "FANUC"
     assert body["machines"][0]["machineType"] == "MILL"
+    assert body["machines"][0]["axes"] == list(config.axes)
+    assert body["machines"][0]["availableChannels"] == config.channels
+    assert body["machines"][0]["profileRevision"].startswith("sha256:")
+    assert body["machines"][0]["supportedPoseContracts"] == []
     assert body["machines"][0]["simulationCommentSyntax"] == {
         "kind": "block", "open": "(", "close": ")",
     }
@@ -263,6 +448,39 @@ def test_list_machines_uses_configured_control_family(monkeypatch):
 def test_simulation_comment_capabilities_are_explicit_and_bounded():
     assert api.get_simulation_comment_syntax("SIEMENS") == {"kind": "line", "prefix": ";"}
     assert api.get_simulation_comment_syntax("UNKNOWN") is None
+
+
+def test_machine_discovery_exposes_explicit_mill_demo_profiles():
+    machines = {
+        machine["machineName"]: machine
+        for machine in api.list_machines()["machines"]
+    }
+    for name, control_type in [("FANUC_MILL_DEMO", "FANUC"), ("SIEMENS_MILL_DEMO", "SIEMENS")]:
+        machine = machines[name]
+        assert machine["controlType"] == control_type
+        assert machine["axes"] == ["X", "Y", "Z", "B", "C"]
+        assert machine["availableChannels"] == 1
+        assert machine["supportedPoseContracts"] == ["workpiece-tool-reference-v1"]
+        assert machine["simulation"]["modelId"] == "MILL_DEMO"
+        assert machine["simulation"]["toolMounts"][0]["carrierId"] == "millingSpindle"
+
+
+def test_machine_discovery_exposes_requested_star_models_and_channels():
+    machines = {
+        machine["machineName"]: machine
+        for machine in api.list_machines()["machines"]
+    }
+    expected = {
+        "FANUC_STAR_SR20R_IV_B": (2, "STAR_SR20R_IV_B", "B1"),
+        "FANUC_STAR_SV20R": (3, "STAR_SV20R", "X3"),
+        "FANUC_STAR_SG42": (2, "STAR_SG42", "ZB"),
+    }
+    for name, (channels, model_id, axis) in expected.items():
+        machine = machines[name]
+        assert machine["availableChannels"] == channels
+        assert axis in machine["axes"]
+        assert machine["simulation"]["modelId"] == model_id
+        assert machine["supportedPoseContracts"] == []
 
 
 def test_cgiserver_import_preserves_o0017_g112_xy_ij_parity_for_star_machine():

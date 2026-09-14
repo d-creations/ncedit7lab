@@ -14,6 +14,54 @@ export type MachineType = string;
 
 export type ToolPathMode = 'effective' | 'center';
 
+export const WORKPIECE_TOOL_REFERENCE_POSE_CONTRACT = 'workpiece-tool-reference-v1';
+export type ToolReference = 'millingTip' | 'turningVirtualTip';
+
+export interface MachineSimulationRotationJoint {
+  axisId: string;
+  axis: [number, number, number];
+  sign: -1 | 1;
+  zeroDegrees: number;
+}
+
+export interface MachineSimulationCarrier {
+  id: string;
+  role: 'tool' | 'workpiece';
+  referenceOrientationDegrees: [number, number, number];
+  rotationChain: MachineSimulationRotationJoint[];
+}
+
+export interface MachineSimulationToolMount {
+  channelId: ChannelId;
+  tools: { kind: 'numericRange'; from: number; to: number } |
+    { kind: 'identifiers'; values: Array<number | string> };
+  carrierId: string;
+  target: { mode: 'fixed'; workpieceCarrierId: string } |
+    { mode: 'execution'; allowedWorkpieceCarrierIds: string[] };
+}
+
+export interface MachineSimulationConfig {
+  schemaVersion: 1;
+  revision: number;
+  modelId: string;
+  displayName: string;
+  fidelity: 'demo' | 'configured';
+  poseContract: typeof WORKPIECE_TOOL_REFERENCE_POSE_CONTRACT;
+  carriers: MachineSimulationCarrier[];
+  toolMounts: MachineSimulationToolMount[];
+}
+
+export interface SimulationToolInput {
+  toolNumber: number | string;
+  reference: ToolReference;
+  mountingOrientationDegrees: [number, number, number];
+}
+
+export interface SimulationChannelInput {
+  profileRevision: string;
+  tools: SimulationToolInput[];
+}
+
 export interface PatternRange {
   min: number;
   max: number;
@@ -72,6 +120,9 @@ export interface MachineProfile {
   defaultTools: ToolInfo[];
   kinematics?: unknown;
   availableChannels: number;
+  profileRevision?: string;
+  supportedPoseContracts?: string[];
+  simulation?: MachineSimulationConfig;
   regexPatterns?: MachineRegexPatterns;
   toolSelection?: ToolSelectionPolicy;
   variablePrefix?: string;
@@ -180,6 +231,27 @@ export interface PlotPoint {
   lineNumber?: number;
 }
 
+/** Immutable raw state captured by the engine when a motion primitive is emitted. */
+export interface MotionContext {
+  channelId: string;
+  startAxes: Record<string, number>;
+  endAxes: Record<string, number>;
+  toolOffset: {
+    number?: number;
+    radiusMode?: string;
+    radius?: number;
+    tipOrientation?: number;
+    edgeNumber?: number;
+  };
+}
+
+export interface PoseSample {
+  position: readonly [number, number, number];
+  orientation: readonly [number, number, number, number];
+  reference: 'millingTip' | 'turningVirtualTip';
+  frameId: string;
+}
+
 export interface PlotSegment {
   startPoint: PlotPoint;
   endPoint: PlotPoint;
@@ -193,6 +265,9 @@ export interface PlotSegment {
   /** Adjacent-point-pair ordinal within the original backend segment. */
   subsegmentIndex?: number;
   channelId?: ChannelId;
+  motionContext?: MotionContext;
+  /** Pose samples emitted for the originating backend primitive. */
+  poses?: readonly PoseSample[];
 }
 
 export interface ToolValue {
@@ -219,6 +294,7 @@ export interface CustomVariable {
 
 export interface PlotRequest {
   toolPathMode: ToolPathMode;
+  poseContract?: typeof WORKPIECE_TOOL_REFERENCE_POSE_CONTRACT;
   machinedata: Array<{
     program: string;
     machineName: MachineType;
@@ -226,6 +302,7 @@ export interface PlotRequest {
     toolValues?: ToolValue[];
     toolOffsets?: ToolOffsetValue[];
     customVariables?: CustomVariable[];
+    simulation?: SimulationChannelInput;
   }>;
 }
 
@@ -237,6 +314,8 @@ export interface BackendPlotSegment {
   lineNumber?: number;
   toolNumber?: number | string | null;
   executionStep?: number | null;
+  motionContext?: MotionContext;
+  poses?: readonly PoseSample[];
   points?: Array<{ x: number; y: number; z: number }>;
   /** Legacy classification is retained for compatibility, not used to infer motion semantics. */
   type?: string;
@@ -285,6 +364,11 @@ export interface ServerMachineData {
   machineName: MachineType;
   controlType: string;
   machineType?: string;
+  axes: string[];
+  availableChannels: number;
+  profileRevision: string;
+  supportedPoseContracts: string[];
+  simulation?: MachineSimulationConfig;
   variablePrefix?: string;
   regexPatterns?: MachineRegexPatterns;
   toolSelection?: ServerToolSelectionPolicy;

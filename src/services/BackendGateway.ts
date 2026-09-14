@@ -4,7 +4,6 @@ import type {
   PlotRequest,
   PlotResponse,
   LineAlignmentSyntaxResponse,
-  ServerMachineListRequest,
   ServerMachineListResponse,
   TransferListResponse,
   TransferUploadResponse,
@@ -119,22 +118,12 @@ export class BackendGateway {
   // --- CGI API Methods ---
 
   async listMachines(): Promise<ServerMachineListResponse> {
-    try {
-      const response = await fetch(await buildBackendUrl('/api/machines', this.configService));
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      return response.json();
-    } catch (error) {
-      console.warn('Direct machines endpoint unavailable, falling back to CGI bridge', error);
-
-      const request: ServerMachineListRequest = {
-        action: 'list_machines',
-      };
-
-      return this.post<ServerMachineListResponse>(request);
+    const response = await fetch(await buildBackendUrl('/api/machines', this.configService));
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
     }
+
+    return response.json();
   }
 
   async requestPlot(plotRequest: PlotRequest): Promise<PlotResponse> {

@@ -39,6 +39,12 @@ describe('NCToolManagerPanel', () => {
     state.setMachines([{ machineName: 'FANUC_TEST', controlType: 'FANUC', axes: ['X', 'Y', 'Z'],
       feedLimits: { min: 0, max: 1000 }, defaultTools: [], availableChannels: 1,
       simulationCommentSyntax: syntax,
+      profileRevision: 'sha256:test', supportedPoseContracts: [],
+      simulation: {
+        schemaVersion: 1, revision: 1, modelId: 'MILL_DEMO', displayName: 'Mill demo', fidelity: 'demo',
+        poseContract: 'workpiece-tool-reference-v1', carriers: [{ id: 'spindle', role: 'tool', referenceOrientationDegrees: [0, 0, 0], rotationChain: [] }],
+        toolMounts: [{ channelId: '1', tools: { kind: 'numericRange', from: 1, to: 99 }, carrierId: 'spindle', target: { mode: 'fixed', workpieceCarrierId: 'table' } }],
+      },
       toolSelection: { mode: 'packed', namedTools: false, offsetScope: 'global', offsetAddress: 'D' },
     }]);
     state.setGlobalMachine('FANUC_TEST');
@@ -84,6 +90,14 @@ describe('NCToolManagerPanel', () => {
     expect(stored).toMatchObject({ schemaVersion: 1, revision: 1 });
     expect(stored.tools[0]).toMatchObject({ description: 'Finisher 10', Q: 3 });
     expect(stored.tools[0].cutting[0]).toMatchObject({ type: 'endMill', diameter: 10, length: 30 });
+  });
+
+  it('shows the selected machine simulation data without claiming unavailable pose output', async () => {
+    (panel.shadowRoot?.querySelector('[data-manager-tab="simulation"]') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(panel.shadowRoot?.textContent).toContain('Mill demo'));
+    expect(panel.shadowRoot?.textContent).toContain('MILL_DEMO');
+    expect(panel.shadowRoot?.textContent).toContain('Not installed');
+    expect(panel.shadowRoot?.textContent).toContain('Tools 1-99');
   });
 
   it('detects a program tool and publishes an explicit revision-checked Apply request', async () => {

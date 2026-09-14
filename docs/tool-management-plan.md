@@ -1,6 +1,57 @@
 # Tool management and portable simulation metadata
 
-Status: tool-management design in progress; backend/frontend execution metadata, centre-mode request enforcement, browser library persistence, Program Tools editing and offset-table persistence are implemented. The codec/snapshot foundation is connected to same-view editor Plot actions with bounded immutable run storage and single completed-run rendering. Occurrence selection, moving geometry and setup/material UI remain unimplemented. Updated: 2026-09-11.
+### Current implementation status (2026-09-14)
+
+The following status supersedes earlier dated milestone statements in this file.
+
+- `FANUC_MILL_DEMO` and `SIEMENS_MILL_DEMO` provide the verified
+	`workpiece-tool-reference-v1` contract. One centre-mode Plot request submits
+	profile revision plus `simulation.tools`; FastAPI and CGI return one aligned
+	workpiece-frame position/quaternion pose per emitted point.
+- The engine uses the tool's supplied mounting orientation together with the
+	configured B/C table chain. Explicit B/C initial axes avoid implicit-zero
+	assumptions, and pose quaternions keep their sign continuous across a primitive.
+- `ExecutedProgramService` stores poses in the immutable plot run. Cursor
+	occurrence selection resolves the run-owned tool definition, and
+	`NCToolpathPlot` displays one selected milling mesh at the selected segment's
+	endpoint pose. The mesh is removed and GPU resources are disposed on selection,
+	run and component cleanup.
+- `ToolGeometryFactory` currently renders validated `endMill`, `ballMill` and
+	`drill` cutting geometry plus supported box/cylinder/cone holders. It does not
+	yet implement axial profiles, inserts, custom geometry, shared mesh caching,
+	material previews, plot-click selection or timed playback.
+- STAR profiles, turning virtual-tip poses, length/TCP behavior, real machine
+	calibration and full-machine simulation are not implemented and do not
+	advertise pose support.
+
+Verification currently covers FastAPI/CGI pose parity and aligned samples (39
+backend regression tests), plot selection/tool placement (8 component tests),
+execution transport (16 service tests), and a successful frontend build.
+
+### Selection update (2026-09-14)
+
+The same-view cursor path now uses a per-run source/occurrence index. It selects
+the last subsegment of the first matching executed occurrence; the pure resolver
+also accepts a preferred execution step. The renderer draws the selected segment
+directly, without searching a cloned segment list or falling back to line matching.
+Missing execution steps disable selection for that location; missing channel IDs
+are not treated as matching every channel. No move or invalid source context clears
+the highlight. This supersedes the legacy selection fallback proposed below.
+An occurrence chooser now selects explicit execution steps and preserves the choice
+while the cursor stays on the same source line. Invalid explicit steps are rejected,
+not replaced by the first occurrence. Selection notifications include run/source and
+segment identity plus run-owned tool availability, without transporting geometry.
+Stale/cleared runs disable the chooser. Plot-click and timed playback remain
+pending. The selected cursor occurrence now drives the verified MILL_DEMO tool
+pose preview; focused tests cover selection, channel isolation, occurrence
+switching, highlight disposal and mesh placement.
+
+Status (2026-09-14): metadata/codec, browser library, Program Tools/offset edits,
+immutable editor Plot runs, same-view occurrence selection, bounded MILL_DEMO pose
+transport and selected milling-tool preview are implemented. Setup/material UI,
+additional geometry families, playback and non-demo machine poses remain pending.
+Section 11 contains both implemented contract details and broader future work; the
+current-status section above defines the active implementation boundary.
 
 ### Implementation progress — editor Plot actions
 
@@ -41,6 +92,23 @@ of implemented turning nose, tool-length, M6 sequencing or TCP simulation.
 - Dedicated grooving/parting/threading/custom geometry and supplier-specific insert forms are not typed support yet: preserve their blocks verbatim and diagnose them, never substitute another cutter. No geometry-ready or machining-accuracy claim follows from a successful schema parse. Unit conversion/import UI, geometry bounds/rotation helpers and library storage are still pending.
 - Verification: frontend build, 113 tests across 8 files, semantic ESLint and whitespace checks pass. Standard ESLint also exits successfully but reports formatting/CRLF warnings; no persistent lint configuration was relaxed.
 - Subsequent editor Plot integration is described above. Safe header capabilities, host document edit contracts and metadata editing remain pending; the old temporary Q/R UI is preserved through shared program-scoped state.
+
+### Machine visualization direction (2026-09-14)
+
+Plan, not implemented: start with a stationary workpiece-frame view of the path,
+one selected tool assembly and optional initial material. Do not require a full
+machine digital twin to draw this view. Reuse the existing run-owned tool ID,
+geometry snapshot and source/occurrence selection.
+
+The execution boundary must supply a documented tool reference position and
+orientation in the same workpiece frame as the displayed path. Resolve controller
+units, compensation, table/head rotation and target spindle before publishing the
+completed run, never during cursor movement. A/B/C are joint coordinates, not a
+universal tool Euler rotation. Missing pose data leaves placement unavailable;
+there is no guessed rotation, synthetic tool ID or replacement execution.
+
+The [detailed plan in section 11](#11-minimal-machine-and-tool-visualization-plan)
+distinguishes fixed-tool preview, rotary tool poses and full-machine simulation.
 
 ## 1. Main decision
 
@@ -636,3 +704,474 @@ Reviewed 2026-09-11:
 - [VS Code ExtensionContext](https://code.visualstudio.com/api/references/vscode-api#ExtensionContext): globalStorageUri for extension-owned library persistence; workspace.fs for URI-based file access.
 
 These references inform the architecture; the namespaced comment format above is an NC-Edit7 proposal, not an existing CNC interchange standard.
+
+## 11. Minimal machine and tool visualization plan
+
+Research and design update: 2026-09-14. This section specifies future work, not
+implemented machine profiles, renderer features or verified ncplot7py kinematics.
+No production machine configuration or external engine repository was modified
+for this plan. Earlier generic XYZABC and universal STAR range examples are
+superseded by the explicit frame contract and model-specific restrictions here.
+
+### 11.1 Decision: a workpiece view, not a machine digital twin
+
+Start with the executed tool-reference path, one selected tool/holder mesh,
+coordinate axes and optional initial material. Keep the workpiece stationary in
+its own frame. No machine enclosure, moving spindle housing, turret body, chuck
+collision model or transfer animation is needed for this first display.
+
+The user is right that much of the machine geometry is unnecessary **when the
+position is already the correct tool-reference position in the workpiece frame**.
+The producer then supplies the corresponding orientation. The renderer does not
+need pivot distances to place that resolved pose. Those distances may still be
+necessary upstream to convert raw machine positions into workpiece coordinates.
+
+| Input available | What we can honestly display |
+| --- | --- |
+| Existing XYZ path and active tool ID only | Path, highlight and static local tool preview; no claim of correct rotary placement. |
+| Confirmed workpiece-frame tool-tip XYZ and verified constant orientation for the whole supported operation | Fixed-orientation tool on the path, without a complete machine model. |
+| Confirmed workpiece-frame tool-reference XYZ and final orientation at every sample | Rotary tool display in the same simple view. |
+| Raw machine-axis positions | Requires axis chains, signs, offsets and relevant pivot positions before producing the above poses. |
+
+A cutter centre, milling tip, ball centre, turning virtual tip and insert nose
+centre are not interchangeable. Always requesting `center` is not proof of any
+particular reference convention. Geometry-to-reference alignment must be tested.
+Missing pose support is an explicit unavailable state, not permission to guess.
+
+### 11.2 Sources and selected machine families
+
+Official Haas sources located and read online:
+
+- [UMC Series Operator's Manual Supplement - Introduction](https://www.haascnc.com/service/online-operator-s-manuals/umc-series-operator-s-manual-supplement/umc---introduction.html): identifies the series supplement and its relationship to the general Mill Operator's Manual.
+- [UMC Operation, section 6.1](https://www.haascnc.com/service/online-operator-s-manuals/umc-series-operator-s-manual-supplement/umc---operation.html): explicitly documents separate B- and C-axis work offsets and workpiece orientation. It also distinguishes the B offset rule when DWO is used.
+- [UMC G-Codes, section 8.1](https://www.haascnc.com/service/online-operator-s-manuals/umc-series-operator-s-manual-supplement/umc---g-codes.html): lists G234 TCPC separately from G254 DWO and G255 cancellation.
+- [Haas UMC-1000 product specification](https://www.haascnc.com/machines/vertical-mills/universal-machine/models/umc-1000.html): identifies the model as supporting 3+2 and simultaneous five-axis machining. The web documentation is a series manual plus a model page, not a downloaded model-specific PDF or a calibrated geometry dataset.
+
+Use the B/C workpiece-table layout as the reference for **MILL DEMO**. Separate
+FANUC and Siemens execution profiles share that demo mechanical description.
+Do not label either as an actual Haas controller, copy Haas G234/G254 semantics
+into FANUC/Siemens handlers, or claim a calibrated UMC-1000 digital twin. Any
+chosen demo signs, zeros and dimensions are explicit demo conventions.
+
+STAR sources are the user-supplied operation manuals, read locally. References
+below use printed section/page numbers because temporary attachment paths are
+not portable. Missing figures and flattened tables in the extracted Markdown
+must be checked against the original diagrams before adopting dimensions/signs.
+
+| Profile to define | Family / paths | Verified mechanical facts and source |
+| --- | --- | --- |
+| MILL DEMO | Milling / 1 per controller profile | XYZ linear positioning with B/C workpiece rotation; use a B-parent/C-child demo table chain, not the earlier A/B illustration. Haas references above. |
+| STAR SG-42 | Fixed-headstock turning / 2 | Main spindle rotates without a longitudinal headstock slide; one 10-station turret moves in X/Y/Z and serves front/back machining; subspindle translates in ZB. Six controlled axes including C1/C2. Manual No.200K0E/1-2, applicable from serial 0084, sections 3-6 to 3-8, 4-1 and 4-9. |
+| STAR SR-20R IV Type B | Sliding-headstock Swiss type / 2 | Main workpiece moves in Z1/C1; main tool post in X1/Y1; only the tilting three-spindle tool unit uses B1. Subspindle moves in X2/Z2/C2; back-tool selection also involves Y2. Manual No.200T0E/1-7, applicable from serial 0921, sections 3-6 to 3-10, 4-1 and 4-12. |
+| STAR SV-20R | Sliding-headstock Swiss type / 3 | Main spindle Z1/C1, gang post X1/Y1, back attachment X2/Z2 with subspindle rotation and Y2 back-tool selection; additional eight-station X3/Y3/Z3 turret can machine at either spindle. Supplied edition 1-2, sections 3-6 to 3-11, CNC specifications 4-3-1 and tool functions 8-24 to 8-26. Do not import the SR model's B1 tilting-unit assumption. |
+
+The SR manual's section 4-1 specifies diameter input for X1/Y1/X2/Y2; SG section
+4-1 specifies diameter input for X but radial/linear input for Y/Z/ZB. Do not
+replace these differences with a generic "all lathes use diameter X only" rule.
+Convert executable coordinates in the engine exactly once; mesh sizes and final
+plot positions are physical mm. Do not halve already-normalized plot coordinates.
+
+### 11.3 Tool ranges: carrier identity is not tool geometry
+
+Keep `tool_selection` as the controller's source of tool-call decoding. Match
+simulation assignments against the existing resolved `segment.toolNumber`,
+scoped by channel. Do not add a frontend T-code scanner or universally divide
+raw T words by 100. Named tools and numeric tools retain their exact types.
+
+Verified range candidates below describe ordinary NN00 tool calls; their mapping
+to emitted physical IDs must be verified by engine fixtures before activation:
+
+| Model | Candidate assignments | Exceptions that must remain explicit |
+| --- | --- | --- |
+| SR-20R IV B | PATH1: tool groups 1-5, 7-9, 11-12, 13-16 and B1 tools 17-19. PATH2: back unit 21-28. Sections 8-21 to 8-23. | T600 is an optional stopper. PATH2 can also call 13-19 and 31/32; not all PATH2 tools are on the back unit. T2000/T2900 are pickup/ejection positions, not cutters. T4100/T4200 are deep-hole tools. Cartridge subtool IDs such as 3111/3112 and 3221/3222/3223 require exact mappings. |
+| SV-20R | PATH1: cut-off 1, tools 2-7 for unit 1B101 or 2-6 for 1B102, and cross tools 11-15. PATH2: 21-28. PATH3: turret 31-38. Sections 8-24 to 8-26. | T1000 is an optional stopper. T2000/T2900 are pickup/ejection positions. Multi-tool unit ID suffixes distinguish actual tools; retain them rather than treating every suffix as wear offset. Turret target spindle cannot be inferred from PATH3 alone. |
+| SG-42 | Turret stations 1-10, selectable from PATH1 in M171 mode or PATH2 in M172 mode. Sections 8-15 to 8-18. | One physical turret, not one per channel. T2000 is a PATH2 pickup/ejection command. IDs such as T351/T352 distinguish tools on the same station. Channel ownership/machining target must follow the supported executed mode. |
+
+Rules for the proposed matcher:
+
+- Numeric ranges are inclusive, use safe integer bounds, and match numbers only.
+- Exact-ID lists support sparse numeric subtools and Siemens names. No numeric-string coercion.
+- Reject overlapping range/list assignments within the same channel; no first-match priority or implicit overrides.
+- A range chooses a carrier and target policy, not equal station positions or equal cutter orientation.
+- Per-tool mounting orientation remains in the program's complete tool definition. Unit/station-specific reference corrections must be explicit when required.
+- Missing mappings, tooling variants or shared-axis mode information produce a diagnostic. A declared range does not prove the engine can execute every member.
+- Retain fixed target mappings where true. For shared turret/front-back use, resolve the target during execution or reject the unsupported mode; do not guess a spindle.
+
+### 11.4 Proposed machine JSON
+
+Retain the existing top-level machine map, executable `name`, `control_type`,
+`machine_type`, `channels`, `tool_selection` and other parser/control settings.
+Add one versioned `simulation` object per profile. Its inner lowerCamelCase JSON
+is transported unchanged through the API after validation, avoiding a second
+renamed schema. Do not repurpose the existing overall `tool_range` field.
+
+Contract status: configuration validation, fingerprints and request negotiation
+are implemented in the sibling engine and both API adapters. No verified pose
+producer is installed: supportedPoseContracts is empty and pose requests are
+rejected explicitly. Pose output and frontend integration remain future work.
+The calculation responsibilities and numerical checks are specified separately
+in [Backend tool-pose calculations](backend-tool-pose-calculations.md).
+
+This is a **partial illustrative config**, not a ready-to-run machine. Parser,
+lexer and supported handler settings are deliberately omitted. The shown rotary
+directions/zeros are demo definitions, not measured Haas parameters. Positions
+use mm, angles degrees and quaternions XYZW under schema version 1.
+
+```json
+{
+	"FANUC_MILL_DEMO": {
+		"name": "FANUC_MILL_DEMO",
+		"control_type": "FANUC",
+		"machine_type": "MILL",
+		"channels": 1,
+		"axes": ["X", "Y", "Z", "B", "C"],
+		"simulation": {
+			"schemaVersion": 1,
+			"revision": 1,
+			"modelId": "MILL_DEMO",
+			"displayName": "MILL DEMO",
+			"fidelity": "demo",
+			"poseContract": "workpiece-tool-reference-v1",
+			"carriers": [
+				{"id": "millingSpindle", "role": "tool", "referenceOrientationDegrees": [0, 0, 0], "rotationChain": []},
+				{
+					"id": "tableBC",
+					"role": "workpiece",
+					"referenceOrientationDegrees": [0, 0, 0],
+					"rotationChain": [
+						{"axisId": "B", "axis": [0, 1, 0], "sign": 1, "zeroDegrees": 0},
+						{"axisId": "C", "axis": [0, 0, 1], "sign": 1, "zeroDegrees": 0}
+					]
+				}
+			],
+			"toolMounts": [
+				{
+					"channelId": "1",
+					"tools": {"kind": "numericRange", "from": 1, "to": 99},
+					"carrierId": "millingSpindle",
+					"target": {"mode": "fixed", "workpieceCarrierId": "tableBC"}
+				}
+			]
+		}
+	}
+}
+```
+
+`SIEMENS_MILL_DEMO` uses the same simulation description with its own explicit
+Siemens execution settings. The range 1-99 is a demo choice, not a Haas tool
+capacity. Named tools use explicit `identifiers` selectors. `modelId` identifies
+the shared design; it must not trigger inferred axes, hidden defaults or unknown
+controller behavior. Keep one canonical validated demo description when building
+the two profiles; do not duplicate kinematics code per controller.
+
+`rotationChain` is outermost-to-innermost; each axis vector is expressed in its
+parent frame. It describes rotation only, not a complete axis-position model.
+`referenceOrientationDegrees` is required on each configured carrier: it maps
+that carrier's zero-joint basis into the machine basis, using Rz * Ry * Rx.
+Compose this constant rotation before the outermost joint rotation. An explicit
+zero tuple is valid for MILL DEMO; omitted calibration is not an identity default.
+The actual workpiece setup basis relative to its carrier is resolved separately
+by the engine. Do not confuse carrier reference orientation with workpiece setup.
+An empty tool chain means no commanded head rotation, not no XYZ translation.
+Do not feed raw machine XYZ into this reduced model and pretend pivots are zero.
+For STAR, use physical IDs such as B1/C1/C2 and explicit execution-side channel
+bindings; C in another path must not silently reuse C1. Add chains only when their
+directions and reference offsets have been checked for the specific assembly.
+
+Example isolated SR back-unit assignment, after verifying physical IDs 21-28:
+
+```json
+{
+	"channelId": "2",
+	"tools": {"kind": "numericRange", "from": 21, "to": 28},
+	"carrierId": "backToolUnit",
+	"target": {"mode": "fixed", "workpieceCarrierId": "subSpindle"}
+}
+```
+
+For a shared turret, use an explicitly runtime-resolved target instead:
+
+```json
+{
+	"mode": "execution",
+	"allowedWorkpieceCarrierIds": ["mainSpindle", "subSpindle"]
+}
+```
+
+Exact sparse selections have the form `{"kind":"identifiers","values":[3111,3112]}`.
+Carriers, channel IDs and target references must all resolve within the profile.
+These declarations specify what is allowed; engine output specifies what happened.
+Do not mark uncalibrated STAR profiles as demo data or fill absent real-machine
+mount dimensions with zeros. Their source-backed layout can be recorded while
+unverified pose capabilities remain disabled.
+
+#### Profile discovery and validation
+
+`GET /api/machines` and CGI `action: "list_machines"` must describe the same
+loaded profiles. Each machine entry exposes `machineName`, `controlType`,
+`machineType`, `axes`, `availableChannels`, `profileRevision`,
+`supportedPoseContracts` and the validated `simulation` object when configured.
+Existing tool-selection, syntax and extension fields remain unchanged.
+
+- `simulation.revision` is a positive integer incremented for simulation-config changes. `profileRevision` is an opaque backend-produced fingerprint of all effective execution/simulation settings, including referenced model data; it also detects changes outside `simulation`.
+- `supportedPoseContracts` is an explicit array. It is empty until the loaded configuration and installed engine jointly implement the contract. Merely adding `poseContract` to JSON does not enable it. Individual NC modes may still be unsupported and must be diagnosed at execution.
+- `axes` lists actual physical axis IDs; `availableChannels` comes from configured `channels`, not file-extension entries or frontend defaults. STAR execution handlers own the binding of a channel's address C to a physical C1/C2 axis.
+- Carrier IDs are unique. Tool carrier and target references must have the correct role. Channels must exist; exact IDs and inclusive integer ranges must not overlap within a channel. Unknown fields/versions in this new object are errors, not silently discarded settings.
+- Axis vectors must be finite unit vectors; `sign` is exactly -1 or 1; `zeroDegrees` is finite. The joint angle used by the rotation chain is `sign * (executedAxisDegrees - zeroDegrees)`. Execution supplies a physical joint coordinate, not an unconverted work-offset display value.
+- Carrier reference orientations are finite degree triples; compose them once with the joint chain and the known setup basis, not again in the renderer.
+- All rotary samples needed by a chain must be present in execution state. No absent-axis-as-zero behavior. The config loader must retain and validate the object rather than ignore it.
+- Pose-mode BYOC is outside the initial version-one implementation. Reject `customMachineConfig` on a pose request rather than ignoring it or falling back to the named profile. Path-only BYOC behavior is a separate API concern.
+
+### 11.5 Why A/X, B/Y, C/Z is not enough
+
+Conventionally A rotates about X, B about Y and C about Z. X/Y/Z are translations,
+not objects rotated automatically by their paired letters. We also need to know
+which body rotates and which axis carries the next one.
+
+In the simplified MILL DEMO, B carries C on the workpiece side. With right-handed
+column-vector rotations and the explicitly defined demo signs:
+
+$$
+R_{workpiece}=R_y(B)R_z(C),\qquad
+R_{tool\ relative\ to\ workpiece}=R_{workpiece}^{-1}R_{tool}.
+$$
+
+Thus a table rotation appears inverted in the stationary-workpiece view. An
+SR B1 tool-head rotation belongs on the tool side and does not rotate every tool.
+Multiplying a generic Euler(A,B,C) onto every tool would get these cases wrong.
+
+For raw positions, the general conversion is
+`T_workpiece_tool = inverse(T_machine_workpiece) * T_machine_tool`.
+Pivot translations matter in that conversion. If the engine already returns
+workpiece-frame tool-reference XYZ, **do not transform those positions again**.
+Rotation about a pivot can be omitted in the renderer, not in an upstream
+conversion that actually needs the pivot.
+
+### 11.6 The render contract: resolved poses, not raw ABC
+
+This is the API contract **`workpiece-tool-reference-v1`**, shared by CGI
+and FastAPI. Its validation/negotiation and successful pose response are
+implemented for the bounded `MILL_DEMO` profiles only. It extends the
+existing object request and `canal` response, not a second execution endpoint.
+
+**One explicit Plot action sends one POST for every selected channel together.**
+Machine discovery happens on load/refresh, not on cursor movement. The one Plot
+response contains all paths and poses. No per-tool, per-point, selection or
+playback request is required. Later edits require another explicit Plot action.
+
+#### Pose request
+
+`poseContract` is optional only to distinguish an explicitly path-only request
+from a pose request. When supplied, it must be recognized, supported by every
+requested profile, and paired with `toolPathMode: "center"`. Never silently
+downgrade it. Pose requests accept the object shape only, with unique channel IDs.
+
+```json
+{
+	"toolPathMode": "center",
+	"poseContract": "workpiece-tool-reference-v1",
+	"machinedata": [
+		{
+			"program": "T1\nG17 G90 G1 X10 Y0 Z10 F100",
+			"machineName": "FANUC_MILL_DEMO",
+			"canalNr": "1",
+			"toolValues": [{"toolNumber": 1, "rValue": 4}],
+			"toolOffsets": [],
+			"customVariables": [],
+			"simulation": {
+				"profileRevision": "demo-profile-1",
+				"tools": [
+					{
+						"toolNumber": 1,
+						"reference": "millingTip",
+						"mountingOrientationDegrees": [0, 0, 0]
+					}
+				]
+			}
+		}
+	]
+}
+```
+
+The program and revision token are illustrative; this is not a production
+machining program. A multi-channel Plot adds entries to the same `machinedata`.
+Each entry names its exact profile and discovery fingerprint. The backend rejects
+a stale fingerprint before executing any channel and echoes the accepted one.
+It uses one detached effective config snapshot throughout execution.
+
+`simulation.tools` contains minimal, detached inputs from the program snapshot:
+
+| Field | Version-one meaning |
+| --- | --- |
+| `toolNumber` | Existing exact physical numeric/string ID, independent of offset registers; duplicate IDs within the channel are rejected. No alternative active-tool state. |
+| `reference` | `millingTip` (axial cutting extremity on the cutter centreline) or `turningVirtualTip` (the controller-defined theoretical turning tip, not the nose-radius centre). The assembly origin must match this reference. The vocabulary does not imply that both calculations are implemented. |
+| `mountingOrientationDegrees` | Explicit finite XYZ degree tuple mapping the assembly to the assigned carrier's local reference frame. Fixed extrinsic X, then Y, then Z: Rz * Ry * Rx. An explicit zero tuple is valid; absent/unknown mounting is not silently treated as zero. |
+
+For this pose contract, preserve section 3's canonical-machine meaning of program
+`orientation`: it defines the assembly's mounting orientation at the carrier's
+reference joint position, not a commanded orientation at each sample. Project it
+once at request capture using `R_mount = inverse(R_carrier_reference) * R_program`.
+Encode that known rotation in the defined degree convention. Do not silently
+reinterpret canonical-machine angles as carrier-local angles. Missing carrier
+reference calibration makes this projection unavailable. Schema-defined identity
+program orientation is a known value, unlike missing machine calibration.
+Geometry-part position/rotation remains assembly-local.
+
+No holder/cutter meshes, library IDs, material vertices or complete tool definitions
+are sent. Missing `simulation.tools` entries are not generated from the library.
+They can yield `toolMountUnavailable` only if the path coordinates are independently
+known valid. `lengthValue`, Q/R and edge/register tables remain separate execution
+inputs, never inferred from stick-out, a mesh's length or its diameter. The caller
+does not choose the active tool, target spindle, executed ABC values or final pose.
+
+Explicit `rValue: 0` is valid in tool defaults or a selected positive-numbered
+offset register. It means zero radius displacement, not missing data, cancelled
+G41/G42, or permission to use another radius. Negative/missing radii still fail
+compensation activation. Register selector zero cancels offset data; it is not
+the same as a record containing radius zero.
+
+For the initial scope, the engine/profile must establish the initial workpiece
+frame from its known setup. Client-assigned names alone do not establish a physical
+transform. Additional arbitrary setup/fixture transforms are deferred; programs
+requiring unresolved setup information cannot return a successful pose-contract run.
+
+#### Pose response
+
+Return this complete envelope, retaining existing variable/error/timing fields
+where applicable. `demo-profile-1` illustrates an opaque revision, not a literal
+fingerprint all demo profiles should share.
+
+```json
+{
+	"success": true,
+	"poseContract": "workpiece-tool-reference-v1",
+	"executionOrigin": "engine",
+	"canal": {
+		"1": {
+			"machineName": "FANUC_MILL_DEMO",
+			"profileRevision": "demo-profile-1",
+			"workpieceFrames": [
+				{
+					"frameId": "main-setup-1",
+					"workpieceId": "part-main",
+					"workpieceCarrierId": "tableBC",
+					"basis": "initialWorkpiece"
+				}
+			],
+			"segments": [
+				{
+					"lineNumber": 2,
+					"executionStep": 1,
+					"toolNumber": 1,
+					"geometry": "LINEAR",
+					"traversal": "FEED",
+					"sourceCode": "G01",
+					"frameId": "main-setup-1",
+					"toolReference": "millingTip",
+					"points": [
+						{"x": 0, "y": 0, "z": 10, "toolPose": {"status": "resolved", "orientation": [0, 0, 0, 1]}},
+						{"x": 10, "y": 0, "z": 10, "toolPose": {"status": "resolved", "orientation": [0, 0, 0, 1]}}
+					]
+				}
+			]
+		}
+	}
+}
+```
+
+This replaces the earlier illustrative segment-level workpiece fields: resolve
+`frameId` through the returned per-channel `workpieceFrames` table. Frame lookup
+is scoped by `(client runId, channelId, frameId)`; identical strings from different
+channels do not authorize overlaying their geometry.
+
+Required semantics:
+
+- A successful pose response has exactly the requested channels, exact machine/revision echoes, and the requested contract. XYZ and pose values are captured for the same sample of the same executed movement.
+- XYZ are finite physical mm in the identified right-handed workpiece frame, whose initial basis is fixed to that workpiece for the supported run. Subsequent work-offset/coordinate changes are converted to this frame, not applied to the stored material. Never return mixed frame coordinates.
+- `toolReference` states what XYZ locates. It must match the assembly origin and the requested per-tool reference when a tool is known. The initial version has no selectable ball-centre or nose-centre output and no automatic client-side reference correction.
+- `toolPose` is required at every point: either `{"status":"resolved","orientation":[x,y,z,w]}` or `{"status":"unavailable","reason":"orientationUnavailable"}`. Allowed reasons are `activeToolUnavailable`, `toolMountUnavailable`, `orientationUnavailable`, `toolReferenceUnsupported` and `kinematicsUnsupported`; orientation is absent in the unavailable variant.
+- Resolved quaternion XYZW is finite and unit length (absolute norm error at most 1e-6). It maps assembly-local geometry into the selected workpiece frame and includes the fixed mounting rotation exactly once. The renderer applies local part transforms but does not reapply program assembly orientation, Q, ABC, radius or length compensation.
+- Unavailable pose is allowed only when XYZ, reference and target/frame are already trustworthy independently of the unavailable orientation/tool mapping. It is not an escape hatch for guessed XYZ. If missing tool radius, nose correction, TCP data, target or setup makes the coordinates uncertain, fail the pose request instead.
+- Keep numeric/string tool IDs, zero and the existing unavailable sentinels exact; never synthesize tool 1. Reject invalid identifiers, negative/noninteger steps, malformed point data and inconsistent references. No generic tool-zero activation/unload inference in the frontend.
+- At least two ordered points per movement segment. Include rotary-only movements even if XYZ is unchanged. The engine must subdivide rotary motion before quaternion encoding; equal endpoint quaternions cannot encode multi-turn motion.
+- Split segments at tool, target/frame, reference or motion-semantics changes. Shared cycle execution steps and original response/pair ordinals survive frontend tessellation. An explicitly unclassified continuous path can retain null semantic fields; do not classify it from duration or drop it merely to fit a pose feature.
+- No arbitrary XYZ selection request. The existing resolver chooses the endpoint of the last subsegment in the selected occurrence. Client-local `runId` remains owned by ExecutedProgramService; no extra backend run store is required.
+
+#### Failures and explicit demos
+
+```json
+{
+	"success": false,
+	"canal": {},
+	"message": ["Pose output requires a supported TCP model"],
+	"errors": [
+		{"code": "POSE_CALCULATION_UNSUPPORTED", "channelId": "1", "lineNumber": 12, "executionStep": 5}
+	]
+}
+```
+
+Contract/config errors use codes `POSE_CONTRACT_UNSUPPORTED`,
+`PROFILE_REVISION_MISMATCH`, `SIMULATION_INPUT_INVALID`,
+`POSE_CALCULATION_UNSUPPORTED`, `POSE_COORDINATES_UNRESOLVED` or
+`ENGINE_EXECUTION_FAILED`. Include channel/source context where available, not
+fabricated line numbers. FastAPI may additionally use HTTP 4xx/5xx; both adapters
+must retain this failure envelope. Initial pose mode is all-or-nothing on fatal
+channel errors; do not attach partial new poses to an old displayed run. A valid
+no-motion execution is successful with an empty segment list.
+
+`executionOrigin: "engine"` describes normal execution, including an explicitly
+selected demo machine profile. `"demoFixture"` is reserved for a separately
+selected deterministic fixture action (future `action: "plot_demo"` with a
+registered `fixtureId`), never an automatic response to engine failure. A fixture
+must own its sample source/tool snapshot and must not masquerade as execution of
+the user's submitted NC text. Automatic mock fallback is no longer invoked by
+CGI or [main_import.py](../backend/main_import.py); engine failures and recorded
+NC errors now return unsuccessful responses.
+
+The renderer shows one workpiece frame at a time initially. Do not merge spindle
+frames or front/back setups without explicit transforms, or duplicate a shared
+turret by channel. Workpiece transfer and a common two/three-channel timeline
+are deferred; equal local `executionStep` values do not establish simultaneity.
+The contract does not authorize inventing a C angle from spindle RPM.
+
+Backend calculation details, ownership, pipeline ordering, current adapter gaps
+and required numerical fixtures are in
+[Backend tool-pose calculations](backend-tool-pose-calculations.md).
+
+### 11.7 Work performed once versus on every selection
+
+| Boundary | Work |
+| --- | --- |
+| Profile load | Validate versions, channels, carrier references, rotation chains and tool selector overlaps; build exact/range lookup tables. |
+| Explicit Plot request | Freeze program tools, mounting inputs, selected profile/revision and setup with the existing run input. No library dependency. |
+| Engine/adapter execution | Resolve active tool, target, units, reference point, compensation and rotary poses using actual executed state. |
+| Completed-run installation | Validate and retain poses per ordered subsegment; build source/occurrence index once. Build supported meshes once per used immutable tool definition, or lazily on first use. |
+| Cursor/occurrence change | Indexed segment lookup, select cached mesh, copy endpoint XYZ and quaternion, draw. No parsing, network calls, new execution, geometry generation or search through all tools. |
+| Later playback between samples | Lerp position and slerp orientation for already sampled moves; sampling/timing limits stay explicit. No new forward/inverse kinematics. |
+| Clear/replacement/disconnect | Release run-owned geometry/materials, selection and subscriptions. |
+
+Use Three.js quaternion/matrix APIs for transforms, not a new handwritten math
+engine. A transform per selected object is cheap; rebuilding meshes, reparsing NC
+code and solving kinematics per frame are the costs to avoid. Do not add a second
+global run store or event-driven active-tool state machine. The existing
+`getRunTool()` remains authoritative for a plotted run's geometry.
+
+### 11.8 Scoped delivery sequence
+
+1. **Contracts and profile transport.** Add typed/validated simulation configuration, range/exact selectors and the pose union. Teach the ncplot7py config loader to preserve the new object and both API adapters to advertise it explicitly. Replace MachineService's hardcoded XYZ/three-channel profile conversion with authoritative axes/channel information; do not infer capabilities from names. Add separately named MILL DEMO FANUC/Siemens profiles only when their handlers are defined. Real STAR profiles remain distinct by model and tooling variant.
+2. **Geometry independent of kinematics.** Build drill, flat/corner-radius end mill and ball mill meshes, plus box/cylinder/cone/profile holders from the existing validated schema. Use the documented Z-up assembly/tip convention. A successful parse is not proof of correct insert placement. Add turning insert geometry in a focused follow-up with reference-point tests; grooving/threading/custom forms remain explicitly unsupported until implemented.
+3. **Explicit demo fixture.** A selected MILL DEMO fixture returns deterministic XYZ plus B/C-derived workpiece-frame poses for at least two tools. Mark `demoFixture` visibly and do not silently substitute it for user NC execution. Test signs and multiplication order with 90-degree rotations before general arbitrary-angle cases. Actual FANUC/Siemens execution support is a separate engine gate, not established by the fixture.
+4. **Simple plot integration.** Extend BackendPlotSegment/PlotPoint mapping in ExecutedProgramService so poses survive tessellation and run snapshots. NCToolpathPlot moves one cached tool root from the current occurrence selection. Give axes, path, tool, material and highlight explicit scene roles; tool motion must not trigger Fit View. Optional material UI is independent and does not block tool rendering.
+5. **STAR fixed-target operations.** Add SG-42 fixed-headstock and SR/SV Swiss-type layout mappings from the manuals and exact engine tool-ID fixtures. Validate actual mounting/reference and diameter conventions before enabling supported operations. Support only proven targets/modes first; unavailable combinations remain visibly unavailable.
+6. **Shared assemblies and playback later.** SG M171/M172 ownership, SV turret target switches, SR shared front/back tool units, part transfer and synchronized two/three-channel time belong in engine trace support. Full machine frames/pivots are required only if converting raw machine state or animating the whole machine, not merely drawing already-resolved tool poses.
+
+Focused acceptance checks:
+
+- JSON rejects invalid versions, overlapping ranges (including endpoints), nonexistent channels/carriers and named-number coercion; unknown profiles do not inherit demo behavior.
+- Tools 0 and named tools retain exact identity; STAR subtools remain distinct; standby/ejection codes are not rendered as cutters.
+- Known XYZ reference/units fixtures, table-versus-head rotations, B-parent/C-child order, reverse C1/C2 conventions where verified, and no double application of orientation/compensation/diameter conversion.
+- Repeated XYZ with different tools/rotations, sampled arcs, rotary-only moves and multi-turn samples survive the entire backend-to-run mapping.
+- Valid shape bounds, reference tips, explicit holder transforms and geometry reuse/disposal. No accurate turning pose until virtual-tip/nose-centre tests pass.
+- Selection causes zero backend calls and zero mesh rebuilds after first use. Stale/unknown selections hide the tool without erasing valid paths.
+- Separate workpiece frames and shared physical carriers are not duplicated by channel count. No simultaneous-playback claim without shared time data.
+- Browser checks at desktop/mobile sizes verify visible meshes, rotation, tool switching, independent axes visibility and clear/disconnect behavior. No material-removal or collision-accuracy claim follows from these checks.

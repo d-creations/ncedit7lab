@@ -15,6 +15,10 @@ The transfer backend supports both `focas` and `usb` protocols. In `usb` mode, t
 
 ## Run locally
 
+The updated adapter requires the matching ncplot7py package containing
+`domain.simulation_contract`. Rebuild/redeploy the package and adapter together;
+changes to a sibling checkout do not update an already running container.
+
 The backend app entrypoint is `backend.main_import:app`.
 
 With Docker Compose:
@@ -38,6 +42,17 @@ uvicorn backend.main_import:app --host 0.0.0.0 --port 8000 --reload
 - `ENABLE_Transfer` enables or disables Transfer routes. The default is `True`.
 
 ## Notes
+
+### Plot API update (2026-09-14)
+
+- CGI and FastAPI execute all selected channels in one engine call and report `executionOrigin: "engine"`. Failed/unavailable execution or recorded NC errors return `success: false`; no automatic mock replacement. Legitimate empty output remains successful.
+- FastAPI now passes `toolPathMode` into each channel state, so `center` reaches the actual projector.
+- Explicit `rValue: 0` is valid in `toolValues` and selected positive-numbered `toolOffsets` records. It means zero radius displacement, not missing data, G41/G42 cancellation, or a fallback to another radius. Negative/missing radius still fails compensation activation. Register zero is a cancellation selector, not a stored register.
+- Discovery exposes `axes`, `availableChannels`, `profileRevision`, `supportedPoseContracts` and validated `simulation` when configured. Undeclared axes are returned as an empty array, not guessed XYZ.
+- Simulation configuration validation and pose-request negotiation are implemented. No verified pose producer is installed: `supportedPoseContracts` remains empty and pose requests are rejected before execution, never silently downgraded. Moving-tool poses, demo profile activation and frontend transport remain pending.
+
+See the [contract](../docs/tool-management-plan.md#116-the-render-contract-resolved-poses-not-raw-abc)
+and [backend calculation specification](../docs/backend-tool-pose-calculations.md).
 
 - The backend reads `ncplot7py/config/machines.json` when it is available to provide the machine list and control-specific syntax rules.
 - Static assets are served from the built frontend output first, with `public/` as a fallback for local development.

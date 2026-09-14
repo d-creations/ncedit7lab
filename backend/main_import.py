@@ -894,7 +894,10 @@ async def cgiserver_import(request: Request):
             simulation = machinedata[idx].get("simulation")
             if isinstance(simulation, dict):
                 state.extra["pose_tools"] = {
-                    tool["toolNumber"]: {"mountingOrientationDegrees": list(tool["mountingOrientationDegrees"])}
+                    tool["toolNumber"]: {
+                        "reference": tool["reference"],
+                        "mountingOrientationDegrees": list(tool["mountingOrientationDegrees"]),
+                    }
                     for tool in simulation.get("tools", [])
                 }
             init_states.append(state)

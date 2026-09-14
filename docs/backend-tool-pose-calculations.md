@@ -1,20 +1,21 @@
 # Backend tool-pose calculations
 
 Status: partially implemented, 2026-09-14. The sibling engine and both adapters
-now implement `workpiece-tool-reference-v1` for the bounded `MILL_DEMO` model.
-`FANUC_MILL_DEMO` and `SIEMENS_MILL_DEMO` advertise the contract; STAR and all
-other profiles deliberately advertise no pose contract. A pose request validates
+implement `workpiece-tool-reference-v1` for the explicit B/C `MILL_DEMO` profiles
+(`FANUC_MILL_DEMO`, `SIEMENS_MILL_DEMO`, `FANUC_MILL` and `SIEMENS_840DI`) and
+the configured STAR pose profiles. A pose request validates
 the exact profile revision, centre mode, channel/tool IDs, `millingTip` reference
 and finite mounting orientation before execution. The engine captures motion
 context, uses explicit B/C initial axes, emits one workpiece-frame pose per output
 point, interpolates B/C along a primitive, and serializes the same result through
 FastAPI and CGI. The renderer does not calculate kinematics.
 
-The remaining sections are the wider implementation specification. Features not
-needed by the verified demo remain open: real-machine calibration and targets,
-turning references, length/TCP semantics, non-demo frame changes, full-turn
-sampling and bounded adaptive subdivision. They must fail explicitly rather than
-being inferred from the current demo implementation.
+The current STAR producer uses the configured tool carrier and the executed
+workpiece target from `motionContext`. `M171` selects `mainSpindle/C1` and
+`M172` selects `subSpindle/C2`; dynamic targets are rejected when the executed
+target is absent or not allowed by the profile. The remaining wider work includes
+real-machine calibration, turning nose/Q semantics, length/TCP behavior,
+non-demo frame changes, full-turn sampling and bounded adaptive subdivision.
 
 The verified FANUC demo path includes programs with additional unsupported tool
 records. Those records do not suppress valid milling tools from the request; the
@@ -122,10 +123,12 @@ offset records own their compensation data; never merge a missing value with a
 different register or silently fall back to geometry-derived defaults.
 
 Explicit `rValue: 0` is implemented as a valid compensation value. G41/G42 remain
-selected, but the radius projector returns an unshifted path. Missing radius is
-not converted to zero; negative radius is rejected at activation. A zero radius
-in a selected positive offset register takes precedence over any nonzero tool
-default. This is different from D0/T00 cancelling the selected offset data.
+selected, but the radius projector returns an unshifted path. Missing tool or
+offset radius is also treated as an explicit zero-radius path so an undefined
+tool does not prevent toolpath output. Negative radius is rejected at activation.
+A zero radius in a selected positive offset register takes precedence over any
+nonzero tool default. This is different from D0/T00 cancelling the selected
+offset data.
 
 Verification note: existing nonzero entry/join tests currently have five failures
 (two tests plus three subtests), reproduced with the pre-update radius handler.
@@ -282,11 +285,12 @@ do not decode them a second time as wear offsets. Standby, pickup and ejection
 commands are not cutting-tool definitions. Preserve no-motion execution state
 without creating artificial path segments just to display a tool change.
 
-First enable proven fixed-target operations. Unsupported shared-axis control,
-target switches, part transfer, spindle coupling or setup changes must produce
-clear diagnostics. Workpieces remain attached to their carrier during supported
-operations, but carrier identity is not permanent part identity. No simultaneous
-three-channel scene is justified by equal executionStep integers alone.
+Fixed-target and executed-target pose projection is implemented for the configured
+SR20R, SV20R and SG42 mappings. Unsupported shared-axis control, part transfer,
+spindle coupling or setup changes must still produce clear diagnostics.
+Workpieces remain attached to their carrier during supported operations, but
+carrier identity is not permanent part identity. No simultaneous three-channel
+scene is justified by equal executionStep integers alone.
 
 ## 9. Serialization and failure policy
 
@@ -308,7 +312,9 @@ a different tool or alter a valid path.
 Do not advertise capabilities until the configured model and engine have the
 required implementation. Stale config, unsupported contract, invalid input and
 execution failure all return structured errors. No mock fallback, fabricated tool
-1, implicit zero radius, guessed target, or unknown-axis-as-zero behavior.
+1, guessed target, or unknown-axis-as-zero behavior. Missing tool/offset radius
+is the explicit zero-radius fallback for path continuity; negative or invalid
+values remain errors.
 
 ## 10. Numerical and integration gates
 

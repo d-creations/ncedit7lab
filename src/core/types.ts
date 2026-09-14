@@ -236,6 +236,9 @@ export interface MotionContext {
   channelId: string;
   startAxes: Record<string, number>;
   endAxes: Record<string, number>;
+  toolCarrierId?: string;
+  targetCarrierId?: string;
+  targetAxis?: string;
   toolOffset: {
     number?: number;
     radiusMode?: string;

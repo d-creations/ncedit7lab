@@ -61,26 +61,35 @@ def test_r0_in_explicit_register_does_not_fall_back_to_tool_radius(execution_ada
     assert result["canal"]["1"]["segments"][-1]["toolNumber"] == tool_id
 
 
-@pytest.mark.parametrize("values", [{"rValue": -1}, {}])
-def test_missing_or_negative_radius_fails_without_mock(execution_adapter, values):
+def test_negative_radius_fails_without_mock(execution_adapter):
     result = execute_adapter(execution_adapter, {"toolPathMode": "center", "machinedata": [{
         "machineName": "FANUC_MILL", "canalNr": "1", "program": "T1\nG41 G1 X10 F100",
-        "toolValues": [{"toolNumber": 1, **values}],
+        "toolValues": [{"toolNumber": 1, "rValue": -1}],
     }]})
     assert result["success"] is False
     assert result["canal"] == {}
     assert result["errors"]
 
 
+def test_undefined_tool_uses_zero_radius_and_keeps_path(execution_adapter):
+    result = execute_adapter(execution_adapter, {"toolPathMode": "center", "machinedata": [{
+        "machineName": "FANUC_MILL", "canalNr": "1",
+        "program": "T999\nG0 X0 Y0\nG41 G1 X10 Y0 F100\nG1 X20 Y0\nG40",
+    }]})
+    assert result["success"] is True
+    points = result["canal"]["1"]["segments"][-1]["points"]
+    assert points[-1]["y"] == pytest.approx(0)
+
+
 def test_pose_negotiation_never_executes_or_downgrades(execution_adapter, monkeypatch):
     def forbidden(*args, **kwargs):
         pytest.fail("Unsupported pose request must not execute")
     monkeypatch.setattr(execution_adapter, "NCExecutionEngine", forbidden)
-    config = execution_adapter.get_machine_config("FANUC_MILL")
+    config = execution_adapter.get_machine_config("FANUC_TURN")
     metadata = config.simulation_metadata()
     assert metadata["supportedPoseContracts"] == []
     payload = {"poseContract": "workpiece-tool-reference-v1", "toolPathMode": "center", "machinedata": [{
-        "machineName": "FANUC_MILL", "canalNr": "1", "program": "T1",
+        "machineName": "FANUC_TURN", "canalNr": "1", "program": "T1",
         "simulation": {"profileRevision": metadata["profileRevision"], "tools": []},
     }]}
     result = execute_adapter(execution_adapter, payload)
@@ -438,7 +447,7 @@ def test_list_machines_uses_configured_control_family(monkeypatch):
     assert body["machines"][0]["axes"] == list(config.axes)
     assert body["machines"][0]["availableChannels"] == config.channels
     assert body["machines"][0]["profileRevision"].startswith("sha256:")
-    assert body["machines"][0]["supportedPoseContracts"] == []
+    assert body["machines"][0]["supportedPoseContracts"] == ["workpiece-tool-reference-v1"]
     assert body["machines"][0]["simulationCommentSyntax"] == {
         "kind": "block", "open": "(", "close": ")",
     }
@@ -465,6 +474,20 @@ def test_machine_discovery_exposes_explicit_mill_demo_profiles():
         assert machine["simulation"]["toolMounts"][0]["carrierId"] == "millingSpindle"
 
 
+def test_machine_discovery_exposes_production_b_c_mill_profiles():
+    machines = {
+        machine["machineName"]: machine
+        for machine in api.list_machines()["machines"]
+    }
+    for name, control_type in [("FANUC_MILL", "FANUC"), ("SIEMENS_840DI", "SIEMENS")]:
+        machine = machines[name]
+        assert machine["controlType"] == control_type
+        assert machine["axes"] == ["X", "Y", "Z", "B", "C"]
+        assert machine["availableChannels"] == 1
+        assert machine["supportedPoseContracts"] == ["workpiece-tool-reference-v1"]
+        assert machine["simulation"]["modelId"] == "MILL_DEMO"
+
+
 def test_machine_discovery_exposes_requested_star_models_and_channels():
     machines = {
         machine["machineName"]: machine
@@ -480,7 +503,86 @@ def test_machine_discovery_exposes_requested_star_models_and_channels():
         assert machine["availableChannels"] == channels
         assert axis in machine["axes"]
         assert machine["simulation"]["modelId"] == model_id
-        assert machine["supportedPoseContracts"] == []
+        assert machine["supportedPoseContracts"] == ["workpiece-tool-reference-v1"]
+
+
+def test_sr20r_fixed_target_pose_projector_resolves_c1_and_turning_tip():
+    from ncplot7py.domain.machines import get_machine_config
+    from ncplot7py.domain.tool_pose import project_fixed_target_poses
+
+    config = get_machine_config("FANUC_STAR_SR20R_IV_B")
+    poses = project_fixed_target_poses(
+        [{"x": 1.0, "y": 2.0, "z": 3.0}, {"x": 2.0, "y": 2.0, "z": 3.0}],
+        {
+            "startAxes": {"X1": 0.0, "Y1": 0.0, "Z1": 0.0, "C1": 0.0},
+            "endAxes": {"X1": 0.0, "Y1": 0.0, "Z1": 0.0, "C1": 90.0},
+        },
+        [0.0, 0.0, 0.0],
+        config.simulation,
+        "1",
+        1,
+        "turningVirtualTip",
+    )
+
+    assert len(poses) == 2
+    assert poses[0]["reference"] == "turningVirtualTip"
+    assert poses[0]["frameId"] == "workpiece:mainSpindle"
+    assert poses[0]["position"] == [1.0, 2.0, 3.0]
+    _assert_close_tuple(poses[-1]["orientation"], [0, 0, -math.sqrt(0.5), math.sqrt(0.5)])
+
+
+def test_star_dynamic_target_context_uses_config_default_and_m171_m172():
+    from ncplot7py.domain.cnc_state import CNCState
+    from ncplot7py.domain.handlers.star_machine.mcode_modal import StarModalMCodeHandler
+    from ncplot7py.domain.machines import get_machine_config
+    from ncplot7py.infrastructure.machines.base_stateful_control import BaseStatefulCanal
+
+    config = get_machine_config("FANUC_STAR_SV20R")
+    state = CNCState(machine_config=config)
+    state.extra["active_tool_number"] = 31
+    canal = BaseStatefulCanal.__new__(BaseStatefulCanal)
+    canal._name = "3"
+    canal._state = state
+    canal._initialize_configured_target()
+
+    assert canal._resolve_motion_target() == {
+        "toolCarrierId": "turret",
+        "targetCarrierId": "mainSpindle",
+        "targetAxis": "C1",
+    }
+
+    handler = StarModalMCodeHandler()
+    handler._apply_machine_specific_state("M172", state)
+    assert canal._resolve_motion_target()["targetCarrierId"] == "subSpindle"
+    assert canal._resolve_motion_target()["targetAxis"] == "C2"
+
+    handler._apply_machine_specific_state("M171", state)
+    assert canal._resolve_motion_target()["targetCarrierId"] == "mainSpindle"
+    assert canal._resolve_motion_target()["targetAxis"] == "C1"
+
+
+@pytest.mark.parametrize("machine_name, channel_id, tool_number", [
+    ("FANUC_STAR_SV20R", "3", 31),
+    ("FANUC_STAR_SG42", "1", 1),
+])
+def test_dynamic_star_pose_uses_motion_target(machine_name, channel_id, tool_number):
+    from ncplot7py.domain.machines import get_machine_config
+    from ncplot7py.domain.tool_pose import project_fixed_target_poses
+
+    config = get_machine_config(machine_name)
+    poses = project_fixed_target_poses(
+        [{"x": 1.0, "y": 2.0, "z": 3.0}],
+        {
+            "startAxes": {"C1": 0.0, "C2": 0.0},
+            "endAxes": {"C1": 90.0, "C2": 90.0},
+            "targetCarrierId": "subSpindle",
+        },
+        [0.0, 0.0, 0.0], config.simulation, channel_id, tool_number,
+        "turningVirtualTip",
+    )
+
+    assert poses[0]["frameId"] == "workpiece:subSpindle"
+    _assert_close_tuple(poses[0]["orientation"], [0, 0, -math.sqrt(0.5), math.sqrt(0.5)])
 
 
 def test_cgiserver_import_preserves_o0017_g112_xy_ij_parity_for_star_machine():

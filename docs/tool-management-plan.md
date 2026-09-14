@@ -4,8 +4,8 @@
 
 The following status supersedes earlier dated milestone statements in this file.
 
-- `FANUC_MILL_DEMO` and `SIEMENS_MILL_DEMO` provide the verified
-	`workpiece-tool-reference-v1` contract. One centre-mode Plot request submits
+- `FANUC_MILL_DEMO`, `SIEMENS_MILL_DEMO`, `FANUC_MILL` and `SIEMENS_840DI`
+	provide the verified B/C `workpiece-tool-reference-v1` contract. One centre-mode Plot request submits
 	profile revision plus `simulation.tools`; FastAPI and CGI return one aligned
 	workpiece-frame position/quaternion pose per emitted point.
 - The engine uses the tool's supplied mounting orientation together with the
@@ -25,13 +25,17 @@ The following status supersedes earlier dated milestone statements in this file.
 	`drill` cutting geometry plus supported box/cylinder/cone holders. It does not
 	yet implement axial profiles, inserts, custom geometry, shared mesh caching,
 	material previews, plot-click selection or timed playback.
-- STAR profiles, turning virtual-tip poses, length/TCP behavior, real machine
-	calibration and full-machine simulation are not implemented and do not
-	advertise pose support.
+- SR20R, SV20R and SG42 expose configured STAR pose mappings. Their per-motion
+	target context includes tool carrier, workpiece carrier and target axis;
+	`M171` selects main spindle/C1 and `M172` selects subspindle/C2. Full machine
+	calibration, transfer simulation, turning Q/nose semantics, length/TCP behavior
+	and full-machine simulation remain outside the verified scope.
 
-Verification currently covers FastAPI/CGI pose parity and aligned samples (39
-backend regression tests), plot selection/tool placement (8 component tests),
-execution transport (16 service tests), and a successful frontend build.
+Verification currently covers FastAPI/CGI pose parity, B/C mill profiles and
+STAR target projection (44 backend regression tests), plot selection/tool
+placement, execution transport (16 service tests), and a successful frontend
+build. The backend compensation suite still contains five pre-existing
+nonzero-radius entry/join failures.
 
 ### Selection update (2026-09-14)
 
@@ -52,9 +56,10 @@ pose preview; focused tests cover selection, channel isolation, occurrence
 switching, highlight disposal and mesh placement.
 
 Status (2026-09-14): metadata/codec, browser library, Program Tools/offset edits,
-immutable editor Plot runs, same-view occurrence selection, bounded MILL_DEMO pose
-transport and selected milling-tool preview are implemented. Setup/material UI,
-additional geometry families, playback and non-demo machine poses remain pending.
+immutable editor Plot runs, same-view occurrence selection, B/C mill poses,
+configured STAR target poses and selected milling-tool preview are implemented.
+Setup/material UI, turning insert preview, playback, machine calibration and
+material removal remain pending.
 Section 11 contains both implemented contract details and broader future work; the
 current-status section above defines the active implementation boundary.
 
@@ -812,9 +817,10 @@ is transported unchanged through the API after validation, avoiding a second
 renamed schema. Do not repurpose the existing overall `tool_range` field.
 
 Contract status: configuration validation, fingerprints and request negotiation
-are implemented in the sibling engine and both API adapters. No verified pose
-producer is installed: supportedPoseContracts is empty and pose requests are
-rejected explicitly. Pose output and frontend integration remain future work.
+are implemented in the sibling engine and both API adapters. B/C MILL profiles
+and configured STAR target profiles advertise the contract only where their
+producer and target mapping are installed. Pose output is retained in immutable
+runs; full machine simulation remains future work.
 The calculation responsibilities and numerical checks are specified separately
 in [Backend tool-pose calculations](backend-tool-pose-calculations.md).
 
@@ -920,7 +926,10 @@ loaded profiles. Each machine entry exposes `machineName`, `controlType`,
 Existing tool-selection, syntax and extension fields remain unchanged.
 
 - `simulation.revision` is a positive integer incremented for simulation-config changes. `profileRevision` is an opaque backend-produced fingerprint of all effective execution/simulation settings, including referenced model data; it also detects changes outside `simulation`.
-- `supportedPoseContracts` is an explicit array. It is empty until the loaded configuration and installed engine jointly implement the contract. Merely adding `poseContract` to JSON does not enable it. Individual NC modes may still be unsupported and must be diagnosed at execution.
+- `supportedPoseContracts` is an explicit array. It is enabled only when the
+	loaded configuration and installed engine jointly implement the contract.
+	Individual NC modes, unresolved targets and unsupported references may still
+	be rejected at execution.
 - `axes` lists actual physical axis IDs; `availableChannels` comes from configured `channels`, not file-extension entries or frontend defaults. STAR execution handlers own the binding of a channel's address C to a physical C1/C2 axis.
 - Carrier IDs are unique. Tool carrier and target references must have the correct role. Channels must exist; exact IDs and inclusive integer ranges must not overlap within a channel. Unknown fields/versions in this new object are errors, not silently discarded settings.
 - Axis vectors must be finite unit vectors; `sign` is exactly -1 or 1; `zeroDegrees` is finite. The joint angle used by the rotation chain is `sign * (executedAxisDegrees - zeroDegrees)`. Execution supplies a physical joint coordinate, not an unconverted work-offset display value.

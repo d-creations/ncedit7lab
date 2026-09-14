@@ -21,19 +21,27 @@ The following status supersedes earlier dated milestone statements in this file.
 	also contains unsupported inserts or geometry-free tool records. To display a
 	tool, select a plotted motion after the tool call; selecting the `T2500` line
 	itself has no coordinates and therefore has no tool pose.
-- `ToolGeometryFactory` currently renders validated `endMill`, `ballMill` and
-	`drill` cutting geometry plus supported box/cylinder/cone holders. It does not
-	yet implement axial profiles, inserts, custom geometry, shared mesh caching,
-	material previews, plot-click selection or timed playback.
+- `ToolGeometryFactory` renders validated `endMill`, `ballMill` and `drill`
+	cutting geometry, box/cylinder/cone/profile holders, all currently supported
+	insert outline codes (C/D/V/W/T/S/R and E/H/O/P/L/A/B/K), and box/cylinder
+	material preview meshes. Insert/profile geometry is normalized to the local
+	virtual-tip origin and covered by focused bounds/alignment tests. Shared mesh
+	caching, custom geometry, plot-click selection and timed playback remain
+	pending.
 - SR20R, SV20R and SG42 expose configured STAR pose mappings. Their per-motion
 	target context includes tool carrier, workpiece carrier and target axis;
 	`M171` selects main spindle/C1 and `M172` selects subspindle/C2. Full machine
 	calibration, transfer simulation, turning Q/nose semantics, length/TCP behavior
 	and full-machine simulation remain outside the verified scope.
+- On STAR, `M03` resets the active physical C axis to `0` before spindle motion:
+	`C1` for the main spindle and `C2` for the subspindle. The reset is execution
+	state and is retained in the following motion context; it is not derived from
+	RPM or channel number.
 
 Verification currently covers FastAPI/CGI pose parity, B/C mill profiles and
 STAR target projection (44 backend regression tests), plot selection/tool
-placement, execution transport (16 service tests), and a successful frontend
+placement, execution transport (16 service tests), focused geometry generation
+and local virtual-tip alignment (17 frontend tests), and a successful frontend
 build. The backend compensation suite still contains five pre-existing
 nonzero-radius entry/join failures.
 
@@ -57,9 +65,10 @@ switching, highlight disposal and mesh placement.
 
 Status (2026-09-14): metadata/codec, browser library, Program Tools/offset edits,
 immutable editor Plot runs, same-view occurrence selection, B/C mill poses,
-configured STAR target poses and selected milling-tool preview are implemented.
-Setup/material UI, turning insert preview, playback, machine calibration and
-material removal remain pending.
+configured STAR target poses, selected milling-tool preview and standalone
+turning/profile/material geometry preview are implemented. Setup/material UI,
+turning execution poses, exact nose-centre/virtual-tip machine semantics,
+playback, machine calibration and material removal remain pending.
 Section 11 contains both implemented contract details and broader future work; the
 current-status section above defines the active implementation boundary.
 
@@ -94,7 +103,7 @@ of implemented turning nose, tool-length, M6 sequencing or TCP simulation.
 
 ### Implementation progress — metadata/snapshot foundation
 
-- [SimulationMetadata](../src/services/tools/SimulationMetadata.ts) defines and validates the fixed-mm schema: optional Q/R-only tools, holder box/cylinder/cone/axial profile (`points: [[z,radius], ...]`), drill/endMill/ballMill/insert cutters and box/cylinder material. Explicit transforms and first-holder-only stick-out are retained. C/D/V/W/T/S/R and extended E/H/O/P/L/A/B/K insert codes are distinct; L/A/B/K require dimensions. This validates parameters, not generated outlines or verified tip-reference placement.
+- [SimulationMetadata](../src/services/tools/SimulationMetadata.ts) defines and validates the fixed-mm schema: optional Q/R-only tools, holder box/cylinder/cone/axial profile (`points: [[z,radius], ...]`), drill/endMill/ballMill/insert cutters and box/cylinder material. Explicit transforms and first-holder-only stick-out are retained. C/D/V/W/T/S/R and extended E/H/O/P/L/A/B/K insert codes are distinct; L/A/B/K require dimensions. The frontend factory now generates preview outlines for every listed insert code and normalizes generated profile/insert geometry to a local z-origin; this remains parameter validation and preview geometry, not verified machine tip semantics.
 - [SimulationCommentCodec](../src/services/tools/SimulationCommentCodec.ts) parses/encodes SETUP and TOOL blocks with explicit caller-supplied standalone `;`, `//` or `(...)` syntax. It does not infer capabilities from machine names/regexes, choose header insertion positions or edit programs. Unknown versions/types/fields, duplicates and malformed blocks retain original text/source spans and produce diagnostics. JSON is size/depth bounded; delimiter/Unicode escaping and numbered continuations are covered by tests.
 - Continuation syntax is `key@1/N=<JSON fragment>` through `key@N/N=<JSON fragment>`, each independently commented. Records must be consecutive and ordered with a consistent total; reconstruct the JSON before parsing. The writer splits only between complete JSON escape tokens and obeys the supplied line limit. This remains an application proposal, not a released interchange standard.
 - [ProgramToolService](../src/services/tools/ProgramToolService.ts) captures the exact supplied document/program/channel identity, revision and text; parses synchronously and freezes the detached result recursively. It has no library dependency or asynchronous parse cache. Invalid snapshots cannot project overrides; missing geometry and multiple cutters have explicit status. Metadata without supplied comment syntax is diagnosed rather than guessed. Metadata-free programs remain valid.
@@ -697,7 +706,7 @@ Reuse one Web Component in a web sidebar and a VS Code WebviewView, similar to T
 3. **Program integration:** assignment state, setup restoration, single undoable metadata edits and independent-file reopening. Test CRLF/LF, repeated/named tools, duplicates, unsaved edits, undo/redo and multi-channel split/join.
 4. **Shared tool manager:** library/program tabs, geometry forms and original schematic previews; extension-host adapter and dockable view in the extension project.
 5. **Execution compatibility:** derive Q/R from shared state without changing current backend geometry support. Test payloads, unit conversions, existing programs without metadata and unchanged line mapping.
-6. **Future simulation:** parametric tool/holder meshes and execution-aware tool activation; material removal/collision checking is a separate project, not achieved simply by storing geometry.
+6. **Future simulation:** execution-aware turning tool activation and machine-reference poses; material removal/collision checking is a separate project, not achieved simply by storing or previewing geometry.
 
 Geometry tests must cover each listed supported shape (especially W versus T), IC scaling, rounded tips, positive clearance, explicit part transforms, stick-out placement, and preservation of custom/unsupported types without silently substituting geometry. Validate nonnegative radii, positive dimensions, plausible corner-radius limits and schema defaults. Test omission of channel/units/frame fields, fixed-mm import conversion, and isolation of identical tool numbers in different programs.
 
@@ -772,9 +781,9 @@ must be checked against the original diagrams before adopting dimensions/signs.
 | Profile to define | Family / paths | Verified mechanical facts and source |
 | --- | --- | --- |
 | MILL DEMO | Milling / 1 per controller profile | XYZ linear positioning with B/C workpiece rotation; use a B-parent/C-child demo table chain, not the earlier A/B illustration. Haas references above. |
-| STAR SG-42 | Fixed-headstock turning / 2 | Main spindle rotates without a longitudinal headstock slide; one 10-station turret moves in X/Y/Z and serves front/back machining; subspindle translates in ZB. Six controlled axes including C1/C2. Manual No.200K0E/1-2, applicable from serial 0084, sections 3-6 to 3-8, 4-1 and 4-9. |
-| STAR SR-20R IV Type B | Sliding-headstock Swiss type / 2 | Main workpiece moves in Z1/C1; main tool post in X1/Y1; only the tilting three-spindle tool unit uses B1. Subspindle moves in X2/Z2/C2; back-tool selection also involves Y2. Manual No.200T0E/1-7, applicable from serial 0921, sections 3-6 to 3-10, 4-1 and 4-12. |
-| STAR SV-20R | Sliding-headstock Swiss type / 3 | Main spindle Z1/C1, gang post X1/Y1, back attachment X2/Z2 with subspindle rotation and Y2 back-tool selection; additional eight-station X3/Y3/Z3 turret can machine at either spindle. Supplied edition 1-2, sections 3-6 to 3-11, CNC specifications 4-3-1 and tool functions 8-24 to 8-26. Do not import the SR model's B1 tilting-unit assumption. |
+| STAR SG-42 | Fixed-headstock turning / 2 | Main spindle rotates without a longitudinal headstock slide; one 10-station turret moves in X/Y/Z and serves front/back machining; subspindle translates in ZB. Six controlled axes including C1/C2. M03 resets the resolved C1/C2 axis to zero before spindle motion. Manual No.200K0E/1-2, applicable from serial 0084, sections 3-6 to 3-8, 4-1 and 4-9. |
+| STAR SR-20R IV Type B | Sliding-headstock Swiss type / 2 | Main workpiece moves in Z1/C1; main tool post in X1/Y1; only the tilting three-spindle tool unit uses B1. Subspindle moves in X2/Z2/C2; back-tool selection also involves Y2. M03 resets the resolved C1/C2 axis to zero before spindle motion. Manual No.200T0E/1-7, applicable from serial 0921, sections 3-6 to 3-10, 4-1 and 4-12. |
+| STAR SV-20R | Sliding-headstock Swiss type / 3 | Main spindle Z1/C1, gang post X1/Y1, back attachment X2/Z2 with subspindle rotation and Y2 back-tool selection; additional eight-station X3/Y3/Z3 turret can machine at either spindle. M03 resets the resolved C1/C2 axis to zero before spindle motion. Supplied edition 1-2, sections 3-6 to 3-11, CNC specifications 4-3-1 and tool functions 8-24 to 8-26. Do not import the SR model's B1 tilting-unit assumption. |
 
 The SR manual's section 4-1 specifies diameter input for X1/Y1/X2/Y2; SG section
 4-1 specifies diameter input for X but radial/linear input for Y/Z/ZB. Do not
@@ -1174,7 +1183,7 @@ global run store or event-driven active-tool state machine. The existing
 ### 11.8 Scoped delivery sequence
 
 1. **Contracts and profile transport.** Add typed/validated simulation configuration, range/exact selectors and the pose union. Teach the ncplot7py config loader to preserve the new object and both API adapters to advertise it explicitly. Replace MachineService's hardcoded XYZ/three-channel profile conversion with authoritative axes/channel information; do not infer capabilities from names. Add separately named MILL DEMO FANUC/Siemens profiles only when their handlers are defined. Real STAR profiles remain distinct by model and tooling variant.
-2. **Geometry independent of kinematics.** Build drill, flat/corner-radius end mill and ball mill meshes, plus box/cylinder/cone/profile holders from the existing validated schema. Use the documented Z-up assembly/tip convention. A successful parse is not proof of correct insert placement. Add turning insert geometry in a focused follow-up with reference-point tests; grooving/threading/custom forms remain explicitly unsupported until implemented.
+2. **Geometry independent of kinematics.** Build drill, flat/corner-radius end mill and ball mill meshes, plus box/cylinder/cone/profile holders and the supported C/D/V/W/T/S/R/E/H/O/P/L/A/B/K insert previews from the validated schema. Use the documented Z-up assembly/tip convention. The current factory has focused local-origin tests, but a successful preview is not proof of correct turning nose-centre, virtual-tip or machine placement. Grooving/threading/custom forms remain explicitly unsupported until implemented.
 3. **Explicit demo fixture.** A selected MILL DEMO fixture returns deterministic XYZ plus B/C-derived workpiece-frame poses for at least two tools. Mark `demoFixture` visibly and do not silently substitute it for user NC execution. Test signs and multiplication order with 90-degree rotations before general arbitrary-angle cases. Actual FANUC/Siemens execution support is a separate engine gate, not established by the fixture.
 4. **Simple plot integration.** Extend BackendPlotSegment/PlotPoint mapping in ExecutedProgramService so poses survive tessellation and run snapshots. NCToolpathPlot moves one cached tool root from the current occurrence selection. Give axes, path, tool, material and highlight explicit scene roles; tool motion must not trigger Fit View. Optional material UI is independent and does not block tool rendering.
 5. **STAR fixed-target operations.** Add SG-42 fixed-headstock and SR/SV Swiss-type layout mappings from the manuals and exact engine tool-ID fixtures. Validate actual mounting/reference and diameter conventions before enabling supported operations. Support only proven targets/modes first; unavailable combinations remain visibly unavailable.

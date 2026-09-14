@@ -42,7 +42,7 @@ function buildInsertGeometry(part: DeepReadonly<Extract<CuttingPart, { type: 'in
   if (part.shape === 'R') {
     const geometry = new THREE.CylinderGeometry(radius, radius, thickness, 32);
     geometry.rotateX(Math.PI / 2);
-    return geometry;
+    return normalizeGeometryToLocalTip(geometry);
   }
 
   const pointsByType: Record<string, Array<[number, number]>> = {
@@ -77,7 +77,7 @@ function buildInsertGeometry(part: DeepReadonly<Extract<CuttingPart, { type: 'in
   geometry.rotateX(Math.PI / 2);
   geometry.translate(0, 0, -0.5 * thickness);
   geometry.computeVertexNormals();
-  return geometry;
+  return normalizeGeometryToLocalTip(geometry);
 }
 
 function addPart(group: THREE.Group, part: DeepReadonly<HolderPart | CuttingPart>, material: THREE.Material, fromTip: boolean): void {
@@ -107,7 +107,7 @@ function addPart(group: THREE.Group, part: DeepReadonly<HolderPart | CuttingPart
   mesh.position.set(
     part.position?.[0] ?? 0,
     part.position?.[1] ?? 0,
-    part.position?.[2] ?? (fromTip ? length / 2 : (('stickOut' in part ? part.stickOut : 0) ?? 0) + length / 2),
+    part.position?.[2] ?? (fromTip ? 0 : (('stickOut' in part ? part.stickOut : 0) ?? 0) + length / 2),
   );
   if (part.rotation) {
     mesh.rotation.set(

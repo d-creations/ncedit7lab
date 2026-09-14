@@ -17,6 +17,12 @@ target is absent or not allowed by the profile. The remaining wider work include
 real-machine calibration, turning nose/Q semantics, length/TCP behavior,
 non-demo frame changes, full-turn sampling and bounded adaptive subdivision.
 
+For STAR machines, `M03` also resets the active workpiece C axis to zero before
+the spindle motion continues. The reset applies to the resolved physical axis:
+`C1` for `mainSpindle` and `C2` for `subSpindle`. It must be captured in the
+subsequent motion context and must not be replaced with spindle RPM or inferred
+from the channel number.
+
 The verified FANUC demo path includes programs with additional unsupported tool
 records. Those records do not suppress valid milling tools from the request; the
 engine receives the supported milling definitions and returns poses for movements
@@ -196,6 +202,10 @@ it must not rotate the gang tools or the back-tool unit. For ordinary spindle-RP
 turning, do not manufacture a C position from RPM. A pose can omit irrelevant
 spin only under a separately documented rotation-invariant display convention;
 the resolved rigid-pose contract cannot claim an unknown angular phase.
+
+On STAR, the modal `M03` reset is part of the executed C-axis state before this
+composition: use the reset `C1`/`C2` value selected by the resolved workpiece
+target, rather than treating `M03` as spindle direction only.
 
 Convert the composed rotation to quaternion XYZW. Normalize floating-point drift
 at the producer after validating the inputs; reject degenerate/nonfinite values.

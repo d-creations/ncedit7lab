@@ -35,9 +35,14 @@ describe('web tool library', () => {
     catalog = new ToolCatalogService(repository, bus);
   });
 
-  it('creates a versioned empty library and saves validated detached tool data', async () => {
-    const empty = await catalog.getLibrary();
-    expect(empty).toMatchObject({ schemaVersion: 1, revision: 0, tools: [] });
+  it('creates a versioned seeded library and saves validated detached tool data', async () => {
+    const seeded = await catalog.getLibrary();
+    expect(seeded).toMatchObject({ schemaVersion: 1, revision: 0 });
+    expect(seeded.tools).toHaveLength(95);
+    expect(seeded.tools.map((entry) => entry.description)).toEqual(expect.arrayContaining([
+      'Turning Insert C 12 mm', 'Turning Insert D 12 mm', 'Turning Insert V 12 mm',
+      'End Mill 0.5 mm', 'End Mill 20 mm', 'Drill 0.5 mm', 'Drill 20 mm',
+    ]));
     const changed = vi.fn();
     bus.subscribe(EVENT_NAMES.TOOL_LIBRARY_CHANGED, changed);
     const saved = await catalog.saveTool(tool());
@@ -49,6 +54,7 @@ describe('web tool library', () => {
   });
 
   it('updates by tool revision, filters, deletes and round-trips import/export', async () => {
+    await catalog.importLibrary(JSON.stringify({ schemaVersion: 1, libraryId: 'blank', revision: 0, tools: [] }));
     const first = await catalog.saveTool(tool());
     await catalog.saveTool({ ...first, description: 'Precision drill', tags: ['precision'] });
     expect((await catalog.getTools({ query: 'precision' }))).toHaveLength(1);

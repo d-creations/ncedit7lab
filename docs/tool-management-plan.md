@@ -28,6 +28,10 @@ The following status supersedes earlier dated milestone statements in this file.
 	virtual-tip origin and covered by focused bounds/alignment tests. Shared mesh
 	caching, custom geometry, plot-click selection and timed playback remain
 	pending.
+- The browser tool library now starts with editable seed definitions for the
+	supported standard turning-insert outline codes plus drills and end mills from
+	0.5 mm through 20 mm in 0.5 mm increments. Existing, malformed or newer stored
+	libraries are preserved rather than overwritten by seed upgrades.
 - SR20R, SV20R and SG42 expose configured STAR pose mappings. Their per-motion
 	target context includes tool carrier, workpiece carrier and target axis;
 	`M171` selects main spindle/C1 and `M172` selects subspindle/C2. Full machine

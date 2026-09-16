@@ -85,11 +85,12 @@ describe('NCToolManagerPanel', () => {
     (panel.shadowRoot?.querySelector('#tool-description') as HTMLInputElement).value = 'Finisher 10';
     (panel.shadowRoot?.querySelector('#tool-q') as HTMLInputElement).value = '3';
     (panel.shadowRoot?.querySelector('#tool-form') as HTMLFormElement).requestSubmit();
-    await vi.waitFor(async () => expect((await catalog.getTools()).map((tool) => tool.description)).toEqual(['Finisher 10']));
+    await vi.waitFor(async () => expect((await catalog.getTools()).map((tool) => tool.description)).toContain('Finisher 10'));
     const stored = JSON.parse(localStorage.getItem('nc-edit7:tool-library')!);
     expect(stored).toMatchObject({ schemaVersion: 1, revision: 1 });
-    expect(stored.tools[0]).toMatchObject({ description: 'Finisher 10', Q: 3 });
-    expect(stored.tools[0].cutting[0]).toMatchObject({ type: 'endMill', diameter: 10, length: 30 });
+    const storedTool = stored.tools.find((entry: { description?: string }) => entry.description === 'Finisher 10');
+    expect(storedTool).toMatchObject({ description: 'Finisher 10', Q: 3 });
+    expect(storedTool.cutting[0]).toMatchObject({ type: 'endMill', diameter: 10, length: 30 });
   });
 
   it('updates the insert outline preview when the selected shape changes', async () => {

@@ -1,4 +1,5 @@
 import { freezeMetadata, validateProgramTool } from './SimulationMetadata';
+import { getDefaultToolLibraryTools } from './DefaultToolLibrary';
 import type { LibraryToolDefinition, IToolLibraryRepository, ToolLibraryEnvelope } from './ToolLibraryTypes';
 import { toProgramToolDefinition } from './ToolLibraryTypes';
 import { ToolLibraryStorageError } from './ToolLibraryTypes';
@@ -44,7 +45,7 @@ export class WebToolLibraryRepository implements IToolLibraryRepository {
 
   async loadLibrary(): Promise<ToolLibraryEnvelope> {
     const raw = this.storage.getItem(TOOL_LIBRARY_STORAGE_KEY);
-    if (!raw) return { schemaVersion: 1, libraryId: createId(), revision: 0, tools: [] };
+    if (!raw) return parseToolLibrary({ schemaVersion: 1, libraryId: createId(), revision: 0, tools: getDefaultToolLibraryTools() });
     try {
       return parseToolLibrary(JSON.parse(raw));
     } catch (cause) {

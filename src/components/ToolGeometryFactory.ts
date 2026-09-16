@@ -35,16 +35,7 @@ function buildProfileGeometry(points: ReadonlyArray<readonly [number, number]>):
   return normalizeGeometryToLocalTip(geometry);
 }
 
-function buildInsertGeometry(part: DeepReadonly<Extract<CuttingPart, { type: 'insert' }>>): THREE.BufferGeometry {
-  const thickness = Math.max(0.2, part.thickness);
-  const radius = Math.max(0.1, part.ic / 2);
-
-  if (part.shape === 'R') {
-    const geometry = new THREE.CylinderGeometry(radius, radius, thickness, 32);
-    geometry.rotateX(Math.PI / 2);
-    return normalizeGeometryToLocalTip(geometry);
-  }
-
+export function getInsertOutline(shape: DeepReadonly<Extract<CuttingPart, { type: 'insert' }>>['shape'], radius: number): Array<[number, number]> {
   const pointsByType: Record<string, Array<[number, number]>> = {
     C: [[0, -radius], [0.68 * radius, -0.28 * radius], [radius, 0], [0.68 * radius, 0.28 * radius], [0, radius], [-0.68 * radius, 0.28 * radius], [-radius, 0], [-0.68 * radius, -0.28 * radius]],
     D: [[0, -radius], [radius, -0.22 * radius], [radius, 0.22 * radius], [0, radius], [-radius, 0.22 * radius], [-radius, -0.22 * radius]],
@@ -61,8 +52,20 @@ function buildInsertGeometry(part: DeepReadonly<Extract<CuttingPart, { type: 'in
     B: [[0, -radius], [0.8 * radius, -0.74 * radius], [radius * 0.24, radius], [-radius * 0.24, radius], [-0.8 * radius, -0.74 * radius]],
     K: [[0, -radius], [0.82 * radius, -0.74 * radius], [radius, 0.2 * radius], [-radius, 0.2 * radius], [-0.82 * radius, -0.74 * radius]],
   };
+  return pointsByType[shape] ?? pointsByType.D;
+}
 
-  const polygon = pointsByType[part.shape] ?? pointsByType.D;
+function buildInsertGeometry(part: DeepReadonly<Extract<CuttingPart, { type: 'insert' }>>): THREE.BufferGeometry {
+  const thickness = Math.max(0.2, part.thickness);
+  const radius = Math.max(0.1, part.ic / 2);
+
+  if (part.shape === 'R') {
+    const geometry = new THREE.CylinderGeometry(radius, radius, thickness, 32);
+    geometry.rotateX(Math.PI / 2);
+    return normalizeGeometryToLocalTip(geometry);
+  }
+
+  const polygon = getInsertOutline(part.shape, radius);
   const shape = new THREE.Shape();
   shape.moveTo(polygon[0][0], polygon[0][1]);
   for (let i = 1; i < polygon.length; i++) {
@@ -119,7 +122,7 @@ function addPart(group: THREE.Group, part: DeepReadonly<HolderPart | CuttingPart
   group.add(mesh);
 }
 
-/** Creates a milling tool where local origin is the cutting reference (tip). */
+/** Creates a tool assembly with its cutting reference at the local origin. */
 export class ToolGeometryFactory {
   create(tool: DeepReadonly<ProgramToolDefinition>): THREE.Group | undefined {
     const cutting = tool.cutting ?? [];

@@ -71,6 +71,7 @@ export const EVENT_NAMES = {
   PROGRAM_TOOL_UPDATE_RESULT: 'program:tool_update_result',
   PROGRAM_OFFSETS_UPDATE_REQUEST: 'program:offsets_update_request',
   PROGRAM_OFFSETS_UPDATE_RESULT: 'program:offsets_update_result',
+  TOOL_MANAGER_OPEN_REQUEST: 'tool:manager_open_request',
   PLOT_CLEARED: 'plot:cleared',
   ERROR_OCCURRED: 'error:occurred',
   EDITOR_CURSOR_MOVED: 'editor:cursor_moved',

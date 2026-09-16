@@ -13,9 +13,11 @@ import { PlotService } from '@services/PlotService';
 import { EventBus, EVENT_NAMES, type EventSubscription } from '@services/EventBus';
 import { ExecutedProgramService } from '@services/ExecutedProgramService';
 import { StateService } from '@services/StateService';
-import type { PlotMetadata, CustomVariable, ChannelId } from '@core/types';
+import type { PlotMetadata, CustomVariable, ChannelId, ParseArtifacts } from '@core/types';
 import type { ProgramToolService, ProgramSource } from '@services/tools/ProgramToolService';
+import type { ProgramToolSnapshot } from '@services/tools/ProgramToolService';
 import { programIdentityKey } from '@services/tools/ProgramToolService';
+import type { ToolIdentifier } from '@services/tools/SimulationMetadata';
 import { createPlotSelectionResolver, type PlotSourceLocation } from '@services/tools/PlotSelectionResolver';
 import type { IFileManagerService } from '@services/IFileManagerService';
 import type { PlotRunInput } from '@services/tools/PlotRunSnapshot';
@@ -49,6 +51,7 @@ export class NCToolpathPlot extends HTMLElement {
   private selectedExecutionStep?: number;
   private requestGeneration = 0;
   private stale = false;
+  private readonly detectedToolsByChannel = new Map<string, ToolIdentifier[]>();
 
   constructor() {
     super();
@@ -123,6 +126,15 @@ export class NCToolpathPlot extends HTMLElement {
       EVENT_NAMES.CUSTOM_VARIABLES_CHANGED, EVENT_NAMES.PARSE_COMPLETED]) {
       this.subscriptions.push(this.eventBus.subscribe(name, () => this.refreshStaleness()));
     }
+
+    // Cache detected tool numbers per channel so Plot can check completeness without reparsing.
+    this.subscriptions.push(this.eventBus.subscribe(
+      EVENT_NAMES.PARSE_COMPLETED,
+      (data: { channelId?: string; artifacts?: ParseArtifacts }) => {
+        if (!data.channelId || !data.artifacts) return;
+        this.detectedToolsByChannel.set(data.channelId, data.artifacts.toolRegisters.map((tool) => tool.toolNumber));
+      },
+    ));
 
     // Listen for cursor movement to highlight segments
     this.subscriptions.push(this.eventBus.subscribe(EVENT_NAMES.EDITOR_CURSOR_MOVED, (data: unknown) => {
@@ -539,7 +551,7 @@ export class NCToolpathPlot extends HTMLElement {
         throw new Error('No channels to plot');
       }
 
-      const inputs: PlotRunInput[] = channelsToPlot.map((channel) => {
+      const channelChecks = channelsToPlot.map((channel) => {
         const source = this.readProgramSource(channel.id);
         if (!source) throw new Error(`No source program for channel ${channel.id}`);
         const snapshot = this.programTools.captureProgramSnapshot(
@@ -548,18 +560,33 @@ export class NCToolpathPlot extends HTMLElement {
         if (!snapshot.valid) {
           throw new Error(`Channel ${channel.id}: ${snapshot.diagnostics.map((diagnostic) => diagnostic.message).join('; ')}`);
         }
-        return {
-          snapshot,
-          machineName,
-          machineProfile: state.activeMachine,
-          toolValues: this.programTools.getExecutionToolValues(snapshot),
-          toolOffsets: this.programTools.getExecutionToolOffsets(
-            snapshot,
-            state.activeMachine?.toolSelection,
-          ),
-          customVariables: this.readCustomVariables(channel.id),
-        };
+        return { channel, source, snapshot };
       });
+
+      for (const { channel, snapshot } of channelChecks) {
+        const missing = this.findUndefinedTools(channel.id, snapshot);
+        if (missing.length) {
+          this.eventBus.publish(EVENT_NAMES.TOOL_MANAGER_OPEN_REQUEST, { channelId: channel.id, missing });
+          if (statusElement && generation === this.requestGeneration) {
+            statusElement.textContent =
+              `Define Q/R or geometry for tool${missing.length > 1 ? 's' : ''} ` +
+              `${missing.map((id) => this.formatToolIdentifier(id)).join(', ')} on channel ${channel.id} — opened Tool Manager`;
+          }
+          return;
+        }
+      }
+
+      const inputs: PlotRunInput[] = channelChecks.map(({ channel, snapshot }) => ({
+        snapshot,
+        machineName,
+        machineProfile: state.activeMachine,
+        toolValues: this.programTools.getExecutionToolValues(snapshot),
+        toolOffsets: this.programTools.getExecutionToolOffsets(
+          snapshot,
+          state.activeMachine?.toolSelection,
+        ),
+        customVariables: this.readCustomVariables(channel.id),
+      }));
       // Optional holder/cutting lengths and edge geometry are captured here, never fetched per cursor move.
       // The run event owns rendering; the promise handles busy/failure state only.
       await this.executedProgramService.executePlotRun(inputs, targetChannelId !== undefined);
@@ -584,6 +611,33 @@ export class NCToolpathPlot extends HTMLElement {
       revision: program.lastModified,
       text: program.content,
     } : undefined;
+  }
+
+  /** Tool calls detected in the code without a managed definition or Q/R value block Plot. */
+  private findUndefinedTools(channelId: ChannelId, snapshot: ProgramToolSnapshot): ToolIdentifier[] {
+    const detected = this.detectedToolsByChannel.get(channelId);
+    if (!detected?.length) return [];
+    const definedKeys = new Set<string>([
+      ...snapshot.tools.map((tool) => this.toolKey(tool.toolNumber)),
+      ...this.programTools.getExecutionToolValues(snapshot).map((value) => this.toolKey(value.toolNumber)),
+    ]);
+    const missing: ToolIdentifier[] = [];
+    const seen = new Set<string>();
+    for (const toolNumber of detected) {
+      const key = this.toolKey(toolNumber);
+      if (definedKeys.has(key) || seen.has(key)) continue;
+      seen.add(key);
+      missing.push(toolNumber);
+    }
+    return missing;
+  }
+
+  private toolKey(id: ToolIdentifier): string {
+    return JSON.stringify([typeof id, id]);
+  }
+
+  private formatToolIdentifier(id: ToolIdentifier): string {
+    return typeof id === 'number' ? `T${id}` : id;
   }
 
   private readCustomVariables(channelId: ChannelId): CustomVariable[] {
@@ -636,8 +690,14 @@ export class NCToolpathPlot extends HTMLElement {
     this.camera.position.set(50, 50, 50);
     this.camera.lookAt(0, 0, 0);
 
-    // Renderer setup
-    this.renderer = new THREE.WebGLRenderer({ antialias: true });
+    // Renderer setup — WebGL is unavailable in some browsers/sandboxes/headless hosts.
+    try {
+      this.renderer = new THREE.WebGLRenderer({ antialias: true });
+    } catch (error) {
+      console.error('Failed to create a WebGL renderer:', error);
+      this.showWebglUnavailable(container);
+      return;
+    }
     this.renderer.setSize(container.clientWidth, container.clientHeight);
     this.renderer.setPixelRatio(window.devicePixelRatio);
     container.appendChild(this.renderer.domElement);
@@ -673,6 +733,19 @@ export class NCToolpathPlot extends HTMLElement {
 
     // Start animation loop
     this.animateScene();
+  }
+
+  /** Leaves Plot status/controls usable; only the 3D view is unavailable. */
+  private showWebglUnavailable(container: HTMLElement): void {
+    const notice = document.createElement('div');
+    notice.style.cssText =
+      'display:flex; align-items:center; justify-content:center; height:100%; padding:16px; ' +
+      'text-align:center; color:var(--vscode-descriptionForeground,#7f848e); font-size:12px;';
+    notice.textContent =
+      '3D view unavailable: this browser/environment could not create a WebGL context.';
+    container.appendChild(notice);
+    const statusElement = this.shadowRoot?.getElementById('plot-status');
+    if (statusElement) statusElement.textContent = '3D view unavailable (no WebGL context)';
   }
 
   private setupThemeObserver() {
@@ -826,7 +899,6 @@ export class NCToolpathPlot extends HTMLElement {
 
     const poseIndex = Math.min((segment.subsegmentIndex ?? 0) + 1, segment.poses.length - 1);
     const pose = segment.poses[poseIndex];
-    if (pose.reference !== 'millingTip') return;
     const mesh = this.toolGeometryFactory.create(tool);
     if (!mesh) return;
 

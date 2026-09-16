@@ -77,6 +77,29 @@ describe('editor Plot actions', () => {
     await registry.disposeAll();
   });
 
+  it('blocks Plot and asks for undefined tools instead of executing', async () => {
+    source.text = 'T5\nG1 X1';
+    bus.publish(EVENT_NAMES.PARSE_COMPLETED, { channelId: '1', artifacts: { toolRegisters: [{ toolNumber: 5 }] } });
+    const openRequest = vi.fn();
+    bus.subscribe(EVENT_NAMES.TOOL_MANAGER_OPEN_REQUEST, openRequest);
+
+    await plot.plotNCCode('1');
+
+    expect(requestPlot).not.toHaveBeenCalled();
+    expect(openRequest).toHaveBeenCalledWith({ channelId: '1', missing: [5] });
+    expect(plot.shadowRoot?.getElementById('plot-status')?.textContent).toContain('T5');
+  });
+
+  it('plots normally once the missing tool gets a Q/R value', async () => {
+    source.text = 'T5\nG1 X1';
+    bus.publish(EVENT_NAMES.PARSE_COMPLETED, { channelId: '1', artifacts: { toolRegisters: [{ toolNumber: 5 }] } });
+    tools.setTemporaryToolValues(source.identity, [{ toolNumber: 5, rValue: 2 }]);
+
+    await plot.plotNCCode('1');
+
+    expect(requestPlot).toHaveBeenCalledTimes(1);
+  });
+
   it.each(['1', undefined])('renders once from the completed run for channel/global Plot %s', async (channelId) => {
     bus.publish(EVENT_NAMES.PLOT_REQUEST, { channelId });
     await vi.waitFor(() => expect(render).toHaveBeenCalledTimes(1));
@@ -153,6 +176,27 @@ describe('editor Plot actions', () => {
     expect(plot.toolObject).not.toBeNull();
     expect(plot.toolObject!.position.toArray()).toEqual([5, 6, 7]);
     expect(plot.toolObject!.quaternion.toArray()).toEqual([0, 0, 1, 0]);
+  });
+
+  it('shows a turning tool at a turning virtual-tip endpoint pose', async () => {
+    source.text = new SimulationCommentCodec().encodeTool({ toolNumber: 2, description: 'D turning insert',
+      cutting: [{ type: 'insert', shape: 'D', ic: 9.525, thickness: 3.97, noseRadius: 0.4, clearanceAngle: 7 }],
+    }, syntax);
+    requestPlot.mockResolvedValue({ canal: { '1': { segments: [{
+      traversal: 'FEED', geometry: 'LINEAR', lineNumber: 1, executionStep: 0, toolNumber: 2,
+      points: [{ x: 1, y: 2, z: 3 }, { x: 4, y: 5, z: 6 }],
+      poses: [
+        { position: [1, 2, 3], orientation: [0, 0, 0, 1], reference: 'turningVirtualTip', frameId: 'workpiece:tableBC' },
+        { position: [4, 5, 6], orientation: [0, 0, 0, 1], reference: 'turningVirtualTip', frameId: 'workpiece:tableBC' },
+      ],
+    }] } } });
+    plot.scene = new THREE.Scene();
+
+    await plot.plotNCCode('1');
+    bus.publish(EVENT_NAMES.EDITOR_CURSOR_MOVED, { channelId: '1', lineNumber: 1, source });
+
+    expect(plot.toolObject).not.toBeNull();
+    expect(plot.toolObject!.position.toArray()).toEqual([4, 5, 6]);
   });
 
   it('does not replace the old plot on invalid metadata or a failed request', async () => {

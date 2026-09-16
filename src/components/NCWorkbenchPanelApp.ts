@@ -255,14 +255,15 @@ export class NCWorkbenchPanelApp extends HTMLElement {
   }
 
   private async parseAvailableChannels() {
-    const regexPatterns = this.stateService.getState().activeMachine?.regexPatterns;
+    const activeMachine = this.stateService.getState().activeMachine;
+    const regexPatterns = activeMachine?.regexPatterns;
     const activeChannels = this.stateService.getActiveChannels();
 
     for (const channel of activeChannels) {
       const activeProgram = this.fileManager.getActiveProgram(channel.id);
       if (!activeProgram) continue;
 
-      await this.parserService.parse(activeProgram.content, channel.id, { regexPatterns });
+      await this.parserService.parse(activeProgram.content, channel.id, { regexPatterns, controlType: activeMachine?.controlType });
     }
   }
 

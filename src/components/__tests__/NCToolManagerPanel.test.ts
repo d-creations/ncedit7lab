@@ -92,6 +92,26 @@ describe('NCToolManagerPanel', () => {
     expect(stored.tools[0].cutting[0]).toMatchObject({ type: 'endMill', diameter: 10, length: 30 });
   });
 
+  it('updates the insert outline preview when the selected shape changes', async () => {
+    (panel.shadowRoot?.querySelector('#new-library-tool') as HTMLButtonElement).click();
+    (panel.shadowRoot?.querySelector('#cutting-type') as HTMLSelectElement).value = 'insert';
+    (panel.shadowRoot?.querySelector('#cutting-type') as HTMLSelectElement).dispatchEvent(new Event('change'));
+    (panel.shadowRoot?.querySelector('#insert-ic') as HTMLInputElement).value = '10';
+    (panel.shadowRoot?.querySelector('#insert-ic') as HTMLInputElement).dispatchEvent(new Event('input'));
+
+    const shape = panel.shadowRoot?.querySelector('#insert-shape') as HTMLSelectElement;
+    const path = () => panel.shadowRoot?.querySelector('.preview-insert path')?.getAttribute('d');
+    shape.value = 'C';
+    shape.dispatchEvent(new Event('change'));
+    const cOutline = path();
+    shape.value = 'W';
+    shape.dispatchEvent(new Event('change'));
+
+    expect(cOutline).toBeTruthy();
+    expect(path()).toBeTruthy();
+    expect(path()).not.toBe(cOutline);
+  });
+
   it('shows the selected machine simulation data without claiming unavailable pose output', async () => {
     (panel.shadowRoot?.querySelector('[data-manager-tab="simulation"]') as HTMLButtonElement).click();
     await vi.waitFor(() => expect(panel.shadowRoot?.textContent).toContain('Mill demo'));

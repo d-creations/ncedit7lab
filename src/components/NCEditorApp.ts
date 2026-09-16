@@ -674,6 +674,15 @@ export class NCEditorApp extends HTMLElement {
       }
     });
 
+    // A blocked Plot request switches to the Tool Manager so missing tools can be filled in
+    this.eventBus.subscribe(EVENT_NAMES.TOOL_MANAGER_OPEN_REQUEST, () => {
+      this.setPlotViewerVisible(true);
+      this.switchSidePanelView('tools');
+      if (window.innerWidth <= 768) {
+        this.switchMobileView('tools');
+      }
+    });
+
     // Hide bar to close the plot panel
     const plotHideBar = this.querySelector('#plot-hide-bar');
     plotHideBar?.addEventListener('click', () => {

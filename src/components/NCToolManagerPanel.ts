@@ -29,6 +29,7 @@ import type {
   ProgramToolUpdateRequest,
   ProgramToolUpdateResult,
 } from '@services/tools/ProgramMetadataEditService';
+import { getInsertOutline } from './ToolGeometryFactory';
 
 const CHANNELS: ChannelId[] = ['1', '2', '3'];
 const INSERT_SHAPES: InsertShape[] = ['C', 'D', 'V', 'W', 'T', 'S', 'R', 'E', 'H', 'O', 'P', 'L', 'A', 'B', 'K'];
@@ -112,6 +113,10 @@ export class NCToolManagerPanel extends HTMLElement {
         if (data.channelId !== this.channelId) return;
         this.detectedIdentifiers = this.uniqueIdentifiers(data.artifacts.toolRegisters.map((tool) => tool.toolNumber));
       }),
+      this.eventBus.subscribe(
+        EVENT_NAMES.TOOL_MANAGER_OPEN_REQUEST,
+        (data: { channelId: ChannelId; missing: ToolIdentifier[] }) => void this.handleToolManagerOpenRequest(data),
+      ),
     );
     await Promise.all([this.loadLibrary(false), this.loadProgram(false)]);
     this.render();
@@ -169,6 +174,7 @@ export class NCToolManagerPanel extends HTMLElement {
     }
     const parse = await this.parserService.parse(this.programSource.text, this.channelId, {
       regexPatterns: machine?.regexPatterns,
+      controlType: machine?.controlType,
     });
     this.detectedIdentifiers = this.uniqueIdentifiers([
       ...parse.artifacts.toolRegisters.map((tool) => tool.toolNumber),
@@ -192,6 +198,28 @@ export class NCToolManagerPanel extends HTMLElement {
 
   private get selectedProgramIdentifier(): ToolIdentifier | undefined {
     return this.detectedIdentifiers.find((id) => exactKey(id) === this.selectedProgramKey);
+  }
+
+  /** A blocked Plot request lands here: switch to the missing tool so it can be filled in immediately. */
+  private async handleToolManagerOpenRequest(data: { channelId: ChannelId; missing: ToolIdentifier[] }): Promise<void> {
+    this.channelId = data.channelId;
+    this.stateService.setWorkbenchSelectedChannel(this.channelId);
+    this.activeTab = 'program';
+    await this.loadProgram(false);
+    const first = data.missing[0];
+    if (first !== undefined) {
+      this.selectedProgramKey = exactKey(first);
+      this.programDraft = structuredClone(
+        this.programDefinitions.find((tool) => exactKey(tool.toolNumber) === this.selectedProgramKey) ??
+        this.newProgramTool(first),
+      );
+    }
+    const names = data.missing.map((id) => (typeof id === 'number' ? `T${id}` : id)).join(', ');
+    this.setStatus(
+      `Plot needs Q/R or geometry for tool${data.missing.length > 1 ? 's' : ''} ${names} on channel ${this.channelId}`,
+      'error', false,
+    );
+    this.render();
   }
 
   private uniqueIdentifiers(values: ToolIdentifier[]): ToolIdentifier[] {
@@ -319,8 +347,29 @@ export class NCToolManagerPanel extends HTMLElement {
             <button class="button" id="copy-library-tool">Use Library Geometry</button>
           </div>
           ${this.renderToolForm(this.programDraft, 'program')}
+          ${this.renderProgramOffsetSettings()}
         ` : '<div class="empty">Select a detected tool or create an assignment.</div>'}
       </main>`;
+  }
+
+  private renderProgramOffsetSettings(): string {
+    const policy = this.stateService.getState().activeMachine?.toolSelection;
+    if (!policy || policy.offsetScope !== 'global') return '';
+    const address = policy.offsetAddress ?? 'offset';
+    return `
+      <section class="inline-offsets">
+        <div class="section-heading"><h3>Channel Offset Q/R</h3><span>${this.escape(address)} registers are shared by this channel</span></div>
+        <div class="offset-table" role="table" aria-label="Channel Q/R offsets">
+          ${this.offsetDrafts.length ? this.offsetDrafts.map((offset, index) => `
+            <div class="offset-row inline-offset-row" data-offset-row="${index}" role="row">
+              <label>Offset<input data-offset-field="number" type="number" min="0" step="1" value="${offset.offsetNumber}"></label>
+              <label>Q<input data-offset-field="q" type="number" step="any" value="${offset.qValue ?? ''}" placeholder="Tool default"></label>
+              <label>R<input data-offset-field="r" type="number" step="any" value="${offset.rValue ?? ''}" placeholder="Tool default"></label>
+              <button class="icon-button" data-remove-offset="${index}" type="button" title="Remove offset" aria-label="Remove offset">×</button>
+            </div>`).join('') : '<div class="empty">No explicit offsets. Tool-level Q/R defaults are used.</div>'}
+        </div>
+        <div class="form-actions"><button class="button" id="add-offset" type="button">+ Add Offset</button><button class="button primary" id="save-offsets" type="button">Apply Offset Q/R</button></div>
+      </section>`;
   }
 
   private renderOffsets(): string {
@@ -476,7 +525,7 @@ export class NCToolManagerPanel extends HTMLElement {
         <section>
           <div class="section-heading"><h3>Preview</h3><span>Parametric setup preview, not collision geometry</span></div>
           <div class="tool-preview" data-preview-holder="${holder?.type ?? 'none'}" data-preview-cutter="${cutter?.type ?? 'none'}">
-            <div class="preview-clamp"></div><div class="preview-holder"></div><div class="preview-cutter"></div><div class="preview-tip"></div>
+            <div class="preview-clamp"></div><div class="preview-holder"></div><div class="preview-cutter">${cutter?.type === 'insert' ? this.renderInsertPreview(cutter.shape, cutter.ic) : ''}</div><div class="preview-tip"></div>
           </div>
         </section>
 
@@ -559,6 +608,8 @@ export class NCToolManagerPanel extends HTMLElement {
     this.shadowRoot?.querySelector<HTMLButtonElement>('#save-program-to-library')?.addEventListener('click', () => void this.saveProgramCopy());
     this.shadowRoot?.querySelector<HTMLSelectElement>('#holder-type')?.addEventListener('change', () => this.updateGeometryVisibility());
     this.shadowRoot?.querySelector<HTMLSelectElement>('#cutting-type')?.addEventListener('change', () => this.updateGeometryVisibility());
+    this.shadowRoot?.querySelector<HTMLSelectElement>('#insert-shape')?.addEventListener('change', () => this.updateGeometryVisibility());
+    this.shadowRoot?.querySelector<HTMLInputElement>('#insert-ic')?.addEventListener('input', () => this.updateGeometryVisibility());
     this.shadowRoot?.querySelector<HTMLButtonElement>('#export-library')?.addEventListener('click', () => void this.exportLibrary());
     this.shadowRoot?.querySelector<HTMLButtonElement>('#add-offset')?.addEventListener('click', () => {
       this.offsetDrafts.push(this.newOffset());
@@ -589,7 +640,20 @@ export class NCToolManagerPanel extends HTMLElement {
     if (preview) {
       preview.dataset.previewHolder = holderType;
       preview.dataset.previewCutter = cutterType;
+      const shape = this.shadowRoot?.querySelector<HTMLSelectElement>('#insert-shape')?.value as InsertShape | undefined;
+      const ic = Number(this.shadowRoot?.querySelector<HTMLInputElement>('#insert-ic')?.value);
+      const cutter = preview.querySelector<HTMLElement>('.preview-cutter');
+      if (cutter && cutterType === 'insert' && shape && Number.isFinite(ic) && ic > 0) {
+        cutter.innerHTML = this.renderInsertPreview(shape, ic);
+      }
     }
+  }
+
+  private renderInsertPreview(shape: InsertShape, ic: number): string {
+    const points = getInsertOutline(shape, ic / 2);
+    const scale = 34 / Math.max(...points.flatMap(([x, y]) => [Math.abs(x), Math.abs(y)]), 0.1);
+    const path = points.map(([x, y], index) => `${index ? 'L' : 'M'}${(50 + x * scale).toFixed(1)},${(50 - y * scale).toFixed(1)}`).join(' ') + ' Z';
+    return `<svg class="preview-insert" viewBox="0 0 100 100" role="img" aria-label="${this.escape(shape)} insert outline"><path d="${path}"></path></svg>`;
   }
 
   private buildToolFromForm(toolNumber: ToolIdentifier): ProgramToolDefinition {
@@ -975,12 +1039,14 @@ export class NCToolManagerPanel extends HTMLElement {
       .preview-clamp,.preview-holder,.preview-cutter,.preview-tip { position:absolute; top:50%; transform:translateY(-50%); }
       .preview-clamp { right:16px; width:22px; height:72px; background:#6f7782; }
       .preview-holder { right:38px; width:48%; height:28px; background:#8793a1; }
-      .preview-cutter { left:18%; width:35%; height:18px; background:#d9a441; }
+      .preview-cutter { left:18%; width:35%; height:30px; background:#d9a441; }
       .preview-tip { left:9%; width:0; height:0; border-top:9px solid transparent; border-bottom:9px solid transparent; border-right:22px solid #d9a441; }
       .tool-preview[data-preview-holder="none"] .preview-holder,.tool-preview[data-preview-cutter="none"] .preview-cutter,.tool-preview[data-preview-cutter="none"] .preview-tip { display:none; }
       .tool-preview[data-preview-holder="box"] .preview-holder { height:42px; }
       .tool-preview[data-preview-cutter="ballMill"] .preview-tip { width:18px; height:18px; border:0; border-radius:50%; background:#d9a441; left:12%; }
-      .tool-preview[data-preview-cutter="insert"] .preview-cutter { left:20%; width:30px; height:30px; transform:translateY(-50%) rotate(45deg); }
+      .preview-insert { display:block; width:44px; height:44px; overflow:visible; transform:translateY(-50%); }
+      .preview-insert path { fill:#d9a441; stroke:#f4d58b; stroke-width:2; vector-effect:non-scaling-stroke; }
+      .tool-preview[data-preview-cutter="insert"] .preview-cutter { left:20%; width:44px; height:44px; background:transparent; }
       .tool-preview[data-preview-cutter="insert"] .preview-tip { display:none; }
       @media (max-width:700px) { .manager-body { grid-template-columns:1fr; grid-template-rows:minmax(145px,32%) minmax(0,68%); } .tool-list-pane { border-right:0; border-bottom:1px solid var(--vscode-editorGroup-border,#d0d7de); } .manager-header { padding:9px; } .manager-header p { display:none; } .transform-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
     `;

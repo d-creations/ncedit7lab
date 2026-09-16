@@ -80,7 +80,7 @@ export class ExecutedProgramService {
     let results: ExecutedProgramResult[];
     try {
       const response = await this.backend.requestPlot(this.buildPlotRequest(requests));
-      if (response.success === false) throw new Error('Backend rejected the plot request');
+      if (response.success === false) throw new Error(this.rejectionMessage(response));
       results = requests.map((request) => this.parseExecutionResponse(response, request.channelId));
     } catch (error) {
       if (generation === this.plotGeneration) {
@@ -274,6 +274,16 @@ export class ExecutedProgramService {
     // Do not replace with ';' if the backend already supports \n and \r\n,
     // or at least handle \r to avoid double-splitting \r;
     return program.replace(/\r?\n/g, '\n');
+  }
+
+  /** The backend reports NC alarms in `errors[]`; `message` only carries the generic rejection text. */
+  private rejectionMessage(response: PlotResponse): string {
+    const details = (response.errors ?? [])
+      .map((error) => `Line ${error.line} (canal ${error.canal}): ${error.message}`)
+      .join('; ');
+    if (details) return details;
+    const message = Array.isArray(response.message) ? response.message.join('; ') : response.message;
+    return message || 'Backend rejected the plot request';
   }
 
   private parseExecutionResponse(

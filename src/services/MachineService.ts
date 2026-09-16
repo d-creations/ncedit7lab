@@ -20,6 +20,7 @@ function toToolSelectionPolicy(
     namedTools: source.named_tools ?? false,
     offsetScope: source.offset_scope ?? 'global',
     offsetAddress: source.offset_address,
+    toolDigits: source.tool_digits,
     offsetDigits: source.offset_digits,
     subtoolCodes: source.subtool_codes,
   };

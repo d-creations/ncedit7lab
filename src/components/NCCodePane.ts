@@ -598,7 +598,7 @@ export class NCCodePane extends HTMLElement {
     const activeMachine = this.stateService.getState().activeMachine;
     const regexPatterns = activeMachine?.regexPatterns;
 
-    this.parserService.parse(value, this.channelId, { regexPatterns });
+    this.parserService.parse(value, this.channelId, { regexPatterns, controlType: activeMachine?.controlType });
   }
 
   private isSettingValue = false;

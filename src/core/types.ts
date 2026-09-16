@@ -92,10 +92,11 @@ export interface MachineRegexPatterns {
 }
 
 export interface ToolSelectionPolicy {
-  mode: 'direct' | 'packed' | 'station';
+  mode: 'direct' | 'packed' | 'station' | 'star';
   namedTools: boolean;
   offsetScope: 'global' | 'tool';
   offsetAddress?: string;
+  toolDigits?: number;
   offsetDigits?: number;
   subtoolCodes?: number[];
 }
@@ -105,6 +106,7 @@ export interface ServerToolSelectionPolicy {
   named_tools?: boolean;
   offset_scope?: ToolSelectionPolicy['offsetScope'];
   offset_address?: string;
+  tool_digits?: number;
   offset_digits?: number;
   subtool_codes?: number[];
 }

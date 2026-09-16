@@ -70,4 +70,50 @@ describe('ParserService tool detection', () => {
 
     expect(parse.artifacts.toolRegisters).toEqual([{ toolNumber: 0 }, { toolNumber: 12 }]);
   });
+
+  it('ignores tools mentioned inside FANUC parenthesis comments', async () => {
+    const parse = await new ParserService(new EventBus()).parse(
+      '(TOOL T25 UNUSED)\nT12 (SPARE T99)', '1', { controlType: 'FANUC' });
+
+    expect(parse.artifacts.toolRegisters).toEqual([{ toolNumber: 12 }]);
+  });
+
+  it('ignores tools mentioned inside Siemens semicolon comments', async () => {
+    const parse = await new ParserService(new EventBus()).parse(
+      '; old T25\nT12 ; spare T99', '1', { controlType: 'SIEMENS' });
+
+    expect(parse.artifacts.toolRegisters).toEqual([{ toolNumber: 12 }]);
+  });
+
+  it('detects a STAR full tool and ignores its separate offset selector', async () => {
+    const parse = await new ParserService(new EventBus()).parse(
+      'T2500\nG0X0Y0T25(OFFSET)\nG1 X5',
+      '1',
+      {
+        regexPatterns: {
+          ...sharedPatterns,
+          tools: {
+            pattern: 'T\\s*(?=0*[0-9]{4}(?![\\d.]))0*([1-9][0-9]{0,3})(?![\\d.])',
+            description: 'STAR four-digit physical tools',
+          },
+        },
+        controlType: 'FANUC',
+      },
+    );
+
+    expect(parse.artifacts.toolRegisters).toEqual([{ toolNumber: 2500 }]);
+  });
+
+  it('ignores keywords mentioned inside comments', async () => {
+    const patterns: MachineRegexPatterns = {
+      ...sharedPatterns,
+      tools: { pattern: 'T(\\d+)', description: 'Tools' },
+      keywords: { pattern: '\\bM30\\b', description: 'Keywords' },
+    };
+
+    const parse = await new ParserService(new EventBus()).parse(
+      '(M30 in a comment)\nM31', '1', { regexPatterns: patterns, controlType: 'FANUC' });
+
+    expect(parse.artifacts.keywords).toEqual([]);
+  });
 });

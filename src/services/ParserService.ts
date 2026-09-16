@@ -12,6 +12,20 @@ import { EventBus, EVENT_NAMES } from './EventBus';
 
 export interface ParseOptions {
   regexPatterns?: MachineRegexPatterns;
+  controlType?: string;
+}
+
+/**
+ * Blanks out comment text so tool/keyword/variable detection never matches inside it.
+ * FANUC-family controls use parenthesized comments; Siemens uses `;` to end of line.
+ * Length is preserved (replaced with spaces) so unrelated column-based logic is unaffected.
+ */
+function stripCommentsForDetection(line: string, controlType?: string): string {
+  if (controlType?.toUpperCase() === 'SIEMENS') {
+    const index = line.indexOf(';');
+    return index === -1 ? line : line.slice(0, index) + ' '.repeat(line.length - index);
+  }
+  return line.replace(/\([^)]*\)/g, (match) => ' '.repeat(match.length));
 }
 
 export class ParserService {
@@ -74,11 +88,12 @@ export class ParserService {
 
       lines.forEach((line, index) => {
         const lineNumber = index + 1;
+        const codeOnlyLine = stripCommentsForDetection(line, options?.controlType);
 
         // Reset regex lastIndex for each line to avoid state issues
         keywordPattern.lastIndex = 0;
         let match;
-        while ((match = keywordPattern.exec(line)) !== null) {
+        while ((match = keywordPattern.exec(codeOnlyLine)) !== null) {
           keywords.push({
             keyword: match[0].toUpperCase(),
             lineNumber,
@@ -87,7 +102,7 @@ export class ParserService {
 
         // Find tool changes - reset lastIndex
         toolPattern.lastIndex = 0;
-        const toolMatch = toolPattern.exec(line);
+        const toolMatch = toolPattern.exec(codeOnlyLine);
         if (toolMatch) {
           let toolVal: number | string | null = null;
 
@@ -107,7 +122,7 @@ export class ParserService {
         // Find variables
         variablePattern.lastIndex = 0;
         let varMatch;
-        while ((varMatch = variablePattern.exec(line)) !== null) {
+        while ((varMatch = variablePattern.exec(codeOnlyLine)) !== null) {
           if (varMatch[1]) {
             const varNumber = parseInt(varMatch[1]);
             if (!isNaN(varNumber) && !variableSnapshot.has(varNumber)) {

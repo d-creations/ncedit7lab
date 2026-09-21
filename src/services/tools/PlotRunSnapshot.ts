@@ -1,4 +1,4 @@
-import type { CustomVariable, MachineProfile, PlotMetadata, ToolValue, ToolOffsetValue } from '@core/types';
+import type { CustomVariable, MachineProfile, PlotMetadata, ToolPathMode, ToolValue, ToolOffsetValue } from '@core/types';
 import type { ProgramToolSnapshot } from './ProgramToolService';
 import type { DeepReadonly } from './SimulationMetadata';
 
@@ -25,7 +25,7 @@ export function executionProgram(snapshot: ProgramToolSnapshot): string {
 /** Client-owned context. Geometry, source text and profile never enter the wire request. */
 export type PlotRunSnapshot = DeepReadonly<{
   runId: string;
-  toolPathMode: 'center';
+  toolPathMode: ToolPathMode;
   inputs: PlotRunInput[];
   plotMetadata: PlotMetadata;
 }>;

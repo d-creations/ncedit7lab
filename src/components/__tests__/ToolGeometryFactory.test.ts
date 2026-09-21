@@ -18,7 +18,7 @@ describe('ToolGeometryFactory', () => {
     expect(group!.children.length).toBeGreaterThan(1);
 
     const meshes = group!.children.filter((child) => child instanceof THREE.Mesh);
-    const insert = meshes.find((mesh) => mesh.material instanceof THREE.MeshStandardMaterial && mesh.material.color.getHexString() === '5fd2a2');
+    const insert = meshes.find((mesh) => mesh.material instanceof THREE.MeshStandardMaterial && mesh.material.color.getHexString() === 'f4c542');
     expect(insert).toBeTruthy();
     const geometry = (insert as THREE.Mesh).geometry as THREE.BufferGeometry;
     geometry.computeBoundingBox();
@@ -29,8 +29,9 @@ describe('ToolGeometryFactory', () => {
     const worldMinZ = (insert as THREE.Mesh).position.z + geometry.boundingBox!.min.z;
     expect(worldMinZ).toBeLessThanOrEqual(0.001);
 
-    const holder = meshes.find((mesh) => mesh.material instanceof THREE.MeshStandardMaterial && mesh.material.color.getHexString() === 'b9c2cb');
+    const holder = meshes.find((mesh) => mesh.material instanceof THREE.MeshStandardMaterial && mesh.material.color.getHexString() === 'f4c542');
     expect(holder).toBeTruthy();
+    expect(meshes.every((mesh) => mesh.material instanceof THREE.MeshStandardMaterial && mesh.material.color.getHexString() === 'f4c542')).toBe(true);
     const holderGeometry = (holder as THREE.Mesh).geometry as THREE.BufferGeometry;
     holderGeometry.computeBoundingBox();
     expect(holderGeometry.boundingBox).toBeTruthy();
@@ -55,6 +56,19 @@ describe('ToolGeometryFactory', () => {
     expect(geometry.boundingBox).toBeTruthy();
     expect(geometry.boundingBox!.min.z).toBeLessThanOrEqual(0.001);
     expect(geometry.boundingBox!.max.z).toBeGreaterThan(0);
+  });
+
+  it.each(['endMill', 'drill'] as const)('puts %s cutting zero at the front of the tool', (type) => {
+    const factory = new ToolGeometryFactory();
+    const cutting = type === 'drill'
+      ? { type, diameter: 8, length: 48, tipAngle: 118 }
+      : { type, diameter: 8, length: 24 };
+    const group = factory.create({ toolNumber: 1, description: type, cutting: [cutting] });
+    const mesh = group!.children[0] as THREE.Mesh;
+    const geometry = mesh.geometry as THREE.BufferGeometry;
+    geometry.computeBoundingBox();
+    expect(geometry.boundingBox!.min.z).toBeCloseTo(0, 6);
+    expect(geometry.boundingBox!.max.z).toBeCloseTo(cutting.length, 6);
   });
 
   it('creates a material mesh for box and cylinder material definitions', () => {

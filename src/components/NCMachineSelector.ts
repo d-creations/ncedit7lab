@@ -3,7 +3,7 @@ import { MACHINE_SERVICE_TOKEN, STATE_SERVICE_TOKEN, EVENT_BUS_TOKEN } from '@co
 import { MachineService } from '@services/MachineService';
 import { StateService } from '@services/StateService';
 import { EventBus, EVENT_NAMES } from '@services/EventBus';
-import type { MachineType, MachineProfile } from '@core/types';
+import type { MachineType, MachineProfile, ToolPathMode } from '@core/types';
 
 export class NCMachineSelector extends HTMLElement {
   private machineService: MachineService;
@@ -145,7 +145,10 @@ export class NCMachineSelector extends HTMLElement {
         <select id="selector">
           <option value="">Select Machine...</option>
         </select>
-        <span class="tool-path-mode" title="Plots always request the tool-center path; accuracy depends on backend support">Center path</span>
+        <select id="tool-path-mode" title="Select the path returned by the backend" aria-label="Toolpath mode">
+          <option value="effective">Effective path</option>
+          <option value="center">Tool-center path</option>
+        </select>
         <div class="machine-type-filter" role="group" aria-label="Machine type filter">
           <button type="button" data-machine-type="all" class="active" title="Show all machines">All</button>
           <button type="button" data-machine-type="mill" title="Show mill machines">Mill</button>
@@ -195,6 +198,12 @@ export class NCMachineSelector extends HTMLElement {
         this.stateService.setGlobalMachine(machineType);
       }
     });
+
+    const toolPathMode = this.shadowRoot?.getElementById('tool-path-mode') as HTMLSelectElement;
+    toolPathMode?.addEventListener('change', () => {
+      this.stateService.setToolPathMode(toolPathMode.value as ToolPathMode);
+    });
+    if (toolPathMode) toolPathMode.value = this.stateService.getState().toolPathMode;
 
     this.shadowRoot?.querySelectorAll<HTMLButtonElement>('[data-machine-type]').forEach((button) => {
       button.addEventListener('click', () => {

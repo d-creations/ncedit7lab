@@ -31,7 +31,10 @@ The following status supersedes earlier dated milestone statements in this file.
 - The browser tool library now starts with editable seed definitions for the
 	supported standard turning-insert outline codes plus drills and end mills from
 	0.5 mm through 20 mm in 0.5 mm increments. Existing, malformed or newer stored
-	libraries are preserved rather than overwritten by seed upgrades.
+	libraries are preserved rather than overwritten by seed upgrades. Front mill
+	and drill presets use assembly orientation [0, 270, 0], counter-face presets
+	use [270, 0, 0], and primitive cutter geometry uses the tool front/tip as its
+	local zero reference.
 - SR20R, SV20R and SG42 expose configured STAR pose mappings. Their per-motion
 	target context includes tool carrier, workpiece carrier and target axis;
 	`M171` selects main spindle/C1 and `M172` selects subspindle/C2. Full machine

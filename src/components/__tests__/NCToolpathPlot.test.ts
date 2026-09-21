@@ -77,17 +77,18 @@ describe('editor Plot actions', () => {
     await registry.disposeAll();
   });
 
-  it('blocks Plot and asks for undefined tools instead of executing', async () => {
+  it('plots with default end-mill geometry for undefined tools', async () => {
     source.text = 'T5\nG1 X1';
     bus.publish(EVENT_NAMES.PARSE_COMPLETED, { channelId: '1', artifacts: { toolRegisters: [{ toolNumber: 5 }] } });
-    const openRequest = vi.fn();
-    bus.subscribe(EVENT_NAMES.TOOL_MANAGER_OPEN_REQUEST, openRequest);
-
     await plot.plotNCCode('1');
 
-    expect(requestPlot).not.toHaveBeenCalled();
-    expect(openRequest).toHaveBeenCalledWith({ channelId: '1', missing: [5] });
-    expect(plot.shadowRoot?.getElementById('plot-status')?.textContent).toContain('T5');
+    expect(requestPlot).toHaveBeenCalledTimes(1);
+    expect(service.getPlotRun('plot-1')?.inputs[0].snapshot.tools).toContainEqual(
+      expect.objectContaining({
+        toolNumber: 5,
+        cutting: [{ type: 'endMill', diameter: 10, length: 30 }],
+      }),
+    );
   });
 
   it('plots normally once the missing tool gets a Q/R value', async () => {
@@ -105,7 +106,7 @@ describe('editor Plot actions', () => {
     await vi.waitFor(() => expect(render).toHaveBeenCalledTimes(1));
     expect(requestPlot).toHaveBeenCalledTimes(1);
     const wire = requestPlot.mock.calls[0][0];
-    expect(wire.toolPathMode).toBe('center');
+    expect(wire.toolPathMode).toBe('effective');
     expect(wire.machinedata).toHaveLength(channelId ? 1 : 2);
     // An empty pending editor must not fall back to stale file/state content.
     expect(wire.machinedata[0].program).toBe('');
@@ -169,6 +170,7 @@ describe('editor Plot actions', () => {
       ],
     }] } } });
     plot.scene = new THREE.Scene();
+    (plot.shadowRoot?.getElementById('toggle-simulation') as HTMLButtonElement).click();
 
     await plot.plotNCCode('1');
     bus.publish(EVENT_NAMES.EDITOR_CURSOR_MOVED, { channelId: '1', lineNumber: 1, source });
@@ -191,6 +193,7 @@ describe('editor Plot actions', () => {
       ],
     }] } } });
     plot.scene = new THREE.Scene();
+    (plot.shadowRoot?.getElementById('toggle-simulation') as HTMLButtonElement).click();
 
     await plot.plotNCCode('1');
     bus.publish(EVENT_NAMES.EDITOR_CURSOR_MOVED, { channelId: '1', lineNumber: 1, source });

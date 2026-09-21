@@ -7,8 +7,9 @@ import type {
   ProgramToolDefinition,
 } from '@services/tools/SimulationMetadata';
 
-const TOOL_MATERIAL = new THREE.MeshStandardMaterial({ color: 0xb9c2cb, metalness: 0.8, roughness: 0.3 });
-const CUTTING_MATERIAL = new THREE.MeshStandardMaterial({ color: 0x5fd2a2, metalness: 0.55, roughness: 0.25 });
+const TOOL_COLOR = 0xf4c542;
+const TOOL_MATERIAL = new THREE.MeshStandardMaterial({ color: TOOL_COLOR, metalness: 0.8, roughness: 0.3 });
+const CUTTING_MATERIAL = new THREE.MeshStandardMaterial({ color: TOOL_COLOR, metalness: 0.55, roughness: 0.25 });
 const MATERIAL_MESH_MATERIAL = new THREE.MeshStandardMaterial({ color: 0xd9c7a6, metalness: 0.25, roughness: 0.8 });
 
 function normalizeGeometryToLocalTip(geometry: THREE.BufferGeometry): THREE.BufferGeometry {
@@ -86,12 +87,14 @@ function buildInsertGeometry(part: DeepReadonly<Extract<CuttingPart, { type: 'in
 function addPart(group: THREE.Group, part: DeepReadonly<HolderPart | CuttingPart>, material: THREE.Material, fromTip: boolean): void {
   let geometry: THREE.BufferGeometry;
   let length: number;
+  let axisAlignedPrimitive = false;
   if (part.type === 'box') {
     geometry = new THREE.BoxGeometry(part.width, part.height, part.length);
     length = part.length;
   } else if (part.type === 'cylinder' || part.type === 'endMill' || part.type === 'ballMill' || part.type === 'drill') {
     geometry = new THREE.CylinderGeometry(part.diameter / 2, part.diameter / 2, part.length, 24);
     length = part.length;
+    axisAlignedPrimitive = fromTip;
   } else if (part.type === 'cone') {
     geometry = new THREE.CylinderGeometry(part.endDiameter / 2, part.startDiameter / 2, part.length, 24);
     length = part.length;
@@ -105,8 +108,11 @@ function addPart(group: THREE.Group, part: DeepReadonly<HolderPart | CuttingPart
     return;
   }
 
+  if (axisAlignedPrimitive) geometry.rotateX(Math.PI / 2);
+  if (fromTip) geometry = normalizeGeometryToLocalTip(geometry);
+
   const mesh = new THREE.Mesh(geometry, material);
-  mesh.rotation.x = Math.PI / 2;
+  mesh.rotation.x = axisAlignedPrimitive ? 0 : Math.PI / 2;
   mesh.position.set(
     part.position?.[0] ?? 0,
     part.position?.[1] ?? 0,
@@ -114,7 +120,7 @@ function addPart(group: THREE.Group, part: DeepReadonly<HolderPart | CuttingPart
   );
   if (part.rotation) {
     mesh.rotation.set(
-      THREE.MathUtils.degToRad(part.rotation[0]) + Math.PI / 2,
+      THREE.MathUtils.degToRad(part.rotation[0]) + (axisAlignedPrimitive ? 0 : Math.PI / 2),
       THREE.MathUtils.degToRad(part.rotation[1]),
       THREE.MathUtils.degToRad(part.rotation[2]),
     );

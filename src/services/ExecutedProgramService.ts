@@ -47,7 +47,9 @@ export class ExecutedProgramService {
   }
 
   /** Detach all inputs before the first await; publish only the latest fully assembled run. */
-  async executePlotRun(inputs: PlotRunInput[], singleChannel = false): Promise<PlotRunSnapshot> {
+  async executePlotRun(
+    inputs: PlotRunInput[], singleChannel = false, toolPathMode: ToolPathMode = 'effective',
+  ): Promise<PlotRunSnapshot> {
     const generation = ++this.plotGeneration;
     const runId = `plot-${generation}`;
     if (!inputs.length || (singleChannel && inputs.length !== 1)) {
@@ -79,7 +81,7 @@ export class ExecutedProgramService {
     freezeMetadata(captured);
     let results: ExecutedProgramResult[];
     try {
-      const response = await this.backend.requestPlot(this.buildPlotRequest(requests));
+      const response = await this.backend.requestPlot(this.buildPlotRequest(requests, toolPathMode));
       if (response.success === false) throw new Error(this.rejectionMessage(response));
       results = requests.map((request) => this.parseExecutionResponse(response, request.channelId));
     } catch (error) {
@@ -92,7 +94,7 @@ export class ExecutedProgramService {
     }
     const run = freezeMetadata({
       runId,
-      toolPathMode: 'center' as const,
+      toolPathMode,
       inputs: captured,
       plotMetadata: structuredClone({
         points: results.flatMap((result) => result.plotMetadata?.points ?? []),
@@ -216,12 +218,10 @@ export class ExecutedProgramService {
     }
   }
 
-  private buildPlotRequest(requests: ExecutionRequest[]): PlotRequest {
-    // Enforce at the shared boundary, including channel-header and host-triggered plots.
-    // This requests the reference path; it does not certify backend compensation accuracy.
+  private buildPlotRequest(requests: ExecutionRequest[], toolPathMode: ToolPathMode = 'effective'): PlotRequest {
     const includesPoseRequest = requests.length > 0 && requests.every((request) => request.simulation !== undefined);
     return {
-      toolPathMode: 'center',
+      toolPathMode,
       ...(includesPoseRequest ? { poseContract: WORKPIECE_TOOL_REFERENCE_POSE_CONTRACT } : {}),
       machinedata: requests.map((request) => ({
         program: this.preprocessProgram(request.program),

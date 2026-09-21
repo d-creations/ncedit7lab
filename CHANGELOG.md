@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-09-21
+
+### Added
+- **Toolpath Mode Selection**: Added selectable `Effective path` and `Tool-center path` plotting modes. Effective mode returns the programmed contour; center mode returns the backend-compensated tool-center path.
+- **Tool Simulation**: Added an optional plot simulation toggle that displays the selected tool at its emitted backend pose alongside the plotted path.
+- **Path Mode Persistence**: The selected toolpath mode is preserved in application state and captured in immutable plot runs.
+
 ## [1.0.7] - 2026-08-13
 
 ### Added

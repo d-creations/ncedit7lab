@@ -47,7 +47,17 @@ export class WebToolLibraryRepository implements IToolLibraryRepository {
     const raw = this.storage.getItem(TOOL_LIBRARY_STORAGE_KEY);
     if (!raw) return parseToolLibrary({ schemaVersion: 1, libraryId: createId(), revision: 0, tools: getDefaultToolLibraryTools() });
     try {
-      return parseToolLibrary(JSON.parse(raw));
+      const library = parseToolLibrary(JSON.parse(raw));
+      const existingIds = new Set(library.tools.map((tool) => tool.id));
+      const missingDefaults = getDefaultToolLibraryTools().filter((tool) => !existingIds.has(tool.id));
+      if (!missingDefaults.length) return library;
+      const merged = parseToolLibrary({
+        ...library,
+        revision: library.revision + 1,
+        tools: [...library.tools, ...missingDefaults],
+      });
+      await this.saveLibrary(merged, library.revision);
+      return merged;
     } catch (cause) {
       throw new ToolLibraryStorageError(`Stored tool library was preserved: ${cause instanceof Error ? cause.message : String(cause)}`);
     }

@@ -660,6 +660,7 @@ export class NCEditorApp extends HTMLElement {
     const plotRequest = this.querySelector('#plot-request');
     plotRequest?.addEventListener('click', () => {
       this.setPlotViewerVisible(true);
+      this.switchSidePanelView('plot');
       this.eventBus.publish(EVENT_NAMES.PLOT_REQUEST, undefined);
     });
 
@@ -667,6 +668,7 @@ export class NCEditorApp extends HTMLElement {
     this.eventBus.subscribe(EVENT_NAMES.PLOT_REQUEST, () => {
       // Always open the plot viewer (so channel plot opens the panel on desktop too)
       this.setPlotViewerVisible(true);
+      this.switchSidePanelView('plot');
 
       // On mobile, also switch to the dedicated plot view
       if (window.innerWidth <= 768) {

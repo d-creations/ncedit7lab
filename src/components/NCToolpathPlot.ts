@@ -17,7 +17,7 @@ import type { PlotMetadata, CustomVariable, ChannelId, ParseArtifacts } from '@c
 import type { ProgramToolService, ProgramSource } from '@services/tools/ProgramToolService';
 import type { ProgramToolSnapshot } from '@services/tools/ProgramToolService';
 import { programIdentityKey } from '@services/tools/ProgramToolService';
-import type { ToolIdentifier } from '@services/tools/SimulationMetadata';
+import type { ToolIdentifier, ProgramToolDefinition } from '@services/tools/SimulationMetadata';
 import { createPlotSelectionResolver, type PlotSourceLocation } from '@services/tools/PlotSelectionResolver';
 import type { IFileManagerService } from '@services/IFileManagerService';
 import type { PlotRunInput } from '@services/tools/PlotRunSnapshot';
@@ -41,6 +41,9 @@ export class NCToolpathPlot extends HTMLElement {
   private highlightObject: THREE.Object3D | null = null;
   private toolObject: THREE.Group | null = null;
   private readonly toolGeometryFactory = new ToolGeometryFactory();
+  private simulationEnabled = false;
+  private selectedSegment?: PlotSegment;
+  private selectedTool?: ReturnType<ExecutedProgramService['getRunTool']>;
   private themeObserver?: MutationObserver;
   private programTools: ProgramToolService;
   private fileManager: IFileManagerService;
@@ -164,6 +167,8 @@ export class NCToolpathPlot extends HTMLElement {
   }
 
   private clearSelection(): void {
+    this.selectedSegment = undefined;
+    this.selectedTool = undefined;
     this.highlightSegment();
     this.updateToolMesh();
     this.selectionLocation = undefined;
@@ -421,6 +426,7 @@ export class NCToolpathPlot extends HTMLElement {
         <div id="plot-menu-content">
           <div class="plot-controls">
             <button class="plot-button" id="clear-plot">🗑️ Clear Plot</button>
+            <button class="plot-button" id="toggle-simulation" aria-pressed="false">Simulation</button>
             <button class="plot-button" id="reset-camera">Reset View</button>
             <button class="plot-button" id="toggle-axes">Axes</button>
             <button class="plot-button active" id="toggle-orbit">🔄 Orbit</button>
@@ -461,6 +467,15 @@ export class NCToolpathPlot extends HTMLElement {
     });
     const clearButton = this.shadowRoot?.getElementById('clear-plot');
     clearButton?.addEventListener('click', () => this.clearPlot());
+
+    const simulationButton = this.shadowRoot?.getElementById('toggle-simulation');
+    simulationButton?.addEventListener('click', () => {
+      this.simulationEnabled = !this.simulationEnabled;
+      simulationButton.classList.toggle('active', this.simulationEnabled);
+      simulationButton.setAttribute('aria-pressed', String(this.simulationEnabled));
+      simulationButton.textContent = this.simulationEnabled ? 'Simulation on' : 'Simulation';
+      this.updateToolMesh();
+    });
 
     const resetButton = this.shadowRoot?.getElementById('reset-camera');
     resetButton?.addEventListener('click', () => this.zoomToFit());
@@ -563,21 +578,8 @@ export class NCToolpathPlot extends HTMLElement {
         return { channel, source, snapshot };
       });
 
-      for (const { channel, snapshot } of channelChecks) {
-        const missing = this.findUndefinedTools(channel.id, snapshot);
-        if (missing.length) {
-          this.eventBus.publish(EVENT_NAMES.TOOL_MANAGER_OPEN_REQUEST, { channelId: channel.id, missing });
-          if (statusElement && generation === this.requestGeneration) {
-            statusElement.textContent =
-              `Define Q/R or geometry for tool${missing.length > 1 ? 's' : ''} ` +
-              `${missing.map((id) => this.formatToolIdentifier(id)).join(', ')} on channel ${channel.id} — opened Tool Manager`;
-          }
-          return;
-        }
-      }
-
       const inputs: PlotRunInput[] = channelChecks.map(({ channel, snapshot }) => ({
-        snapshot,
+        snapshot: this.withDefaultTools(channel.id, snapshot),
         machineName,
         machineProfile: state.activeMachine,
         toolValues: this.programTools.getExecutionToolValues(snapshot),
@@ -589,7 +591,9 @@ export class NCToolpathPlot extends HTMLElement {
       }));
       // Optional holder/cutting lengths and edge geometry are captured here, never fetched per cursor move.
       // The run event owns rendering; the promise handles busy/failure state only.
-      await this.executedProgramService.executePlotRun(inputs, targetChannelId !== undefined);
+      await this.executedProgramService.executePlotRun(
+        inputs, targetChannelId !== undefined, state.toolPathMode,
+      );
     } catch (error) {
       console.error('Failed to plot NC code:', error);
       if (statusElement && generation === this.requestGeneration) {
@@ -598,6 +602,21 @@ export class NCToolpathPlot extends HTMLElement {
     } finally {
       if (generation === this.requestGeneration) this.isPlotting = false;
     }
+  }
+
+  private withDefaultTools(channelId: ChannelId, snapshot: ProgramToolSnapshot): ProgramToolSnapshot {
+    const missing = this.findUndefinedTools(channelId, snapshot);
+    if (!missing.length) return snapshot;
+
+    const tools = structuredClone(snapshot.tools) as ProgramToolDefinition[];
+    for (const toolNumber of missing) {
+      tools.push({
+        toolNumber,
+        description: 'Default end mill',
+        cutting: [{ type: 'endMill', diameter: 10, length: 30 }],
+      });
+    }
+    return { ...snapshot, tools } as ProgramToolSnapshot;
   }
 
   private readProgramSource(channelId: ChannelId): ProgramSource | undefined {
@@ -634,10 +653,6 @@ export class NCToolpathPlot extends HTMLElement {
 
   private toolKey(id: ToolIdentifier): string {
     return JSON.stringify([typeof id, id]);
-  }
-
-  private formatToolIdentifier(id: ToolIdentifier): string {
-    return typeof id === 'number' ? `T${id}` : id;
   }
 
   private readCustomVariables(channelId: ChannelId): CustomVariable[] {
@@ -891,10 +906,17 @@ export class NCToolpathPlot extends HTMLElement {
   }
 
   private updateToolMesh(segment?: PlotSegment, tool?: ReturnType<ExecutedProgramService['getRunTool']>): void {
+    if (segment !== undefined) {
+      this.selectedSegment = segment;
+      this.selectedTool = tool;
+    }
     if (this.toolObject) {
       this.removeOwnedPlotObject(this.toolObject);
       this.toolObject = null;
     }
+    if (!this.simulationEnabled) return;
+    segment = segment ?? this.selectedSegment;
+    tool = tool ?? this.selectedTool;
     if (!this.scene || !segment || !tool || !segment.poses?.length) return;
 
     const poseIndex = Math.min((segment.subsegmentIndex ?? 0) + 1, segment.poses.length - 1);

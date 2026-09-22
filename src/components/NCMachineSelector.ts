@@ -148,6 +148,7 @@ export class NCMachineSelector extends HTMLElement {
         <select id="tool-path-mode" title="Select the path returned by the backend" aria-label="Toolpath mode">
           <option value="effective">Effective path</option>
           <option value="center">Tool-center path</option>
+          <option value="simulation">Simulation</option>
         </select>
         <div class="machine-type-filter" role="group" aria-label="Machine type filter">
           <button type="button" data-machine-type="all" class="active" title="Show all machines">All</button>

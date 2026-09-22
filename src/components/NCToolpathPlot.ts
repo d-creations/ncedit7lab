@@ -102,6 +102,7 @@ export class NCToolpathPlot extends HTMLElement {
       const run = this.executedProgramService.getPlotRun(data.runId);
       if (!run || data.runId === this.displayedRunId) return;
       this.displayedRunId = run.runId;
+      this.simulationEnabled = run.toolPathMode === 'simulation';
       this.clearSelection();
       this.resolveSelection = createPlotSelectionResolver(run);
       this.stale = false;
@@ -426,7 +427,6 @@ export class NCToolpathPlot extends HTMLElement {
         <div id="plot-menu-content">
           <div class="plot-controls">
             <button class="plot-button" id="clear-plot">🗑️ Clear Plot</button>
-            <button class="plot-button" id="toggle-simulation" aria-pressed="false">Simulation</button>
             <button class="plot-button" id="reset-camera">Reset View</button>
             <button class="plot-button" id="toggle-axes">Axes</button>
             <button class="plot-button active" id="toggle-orbit">🔄 Orbit</button>
@@ -467,15 +467,6 @@ export class NCToolpathPlot extends HTMLElement {
     });
     const clearButton = this.shadowRoot?.getElementById('clear-plot');
     clearButton?.addEventListener('click', () => this.clearPlot());
-
-    const simulationButton = this.shadowRoot?.getElementById('toggle-simulation');
-    simulationButton?.addEventListener('click', () => {
-      this.simulationEnabled = !this.simulationEnabled;
-      simulationButton.classList.toggle('active', this.simulationEnabled);
-      simulationButton.setAttribute('aria-pressed', String(this.simulationEnabled));
-      simulationButton.textContent = this.simulationEnabled ? 'Simulation on' : 'Simulation';
-      this.updateToolMesh();
-    });
 
     const resetButton = this.shadowRoot?.getElementById('reset-camera');
     resetButton?.addEventListener('click', () => this.zoomToFit());
@@ -925,7 +916,8 @@ export class NCToolpathPlot extends HTMLElement {
     if (!mesh) return;
 
     mesh.position.fromArray(pose.position);
-    mesh.quaternion.fromArray(pose.orientation);
+    const poseQuaternion = new THREE.Quaternion().fromArray(pose.orientation);
+    mesh.quaternion.premultiply(poseQuaternion);
     mesh.userData.isToolMesh = true;
     mesh.renderOrder = 1000;
     this.toolObject = mesh;

@@ -36,5 +36,6 @@ export function toProgramToolDefinition(tool: LibraryToolDefinition, toolNumber:
     ...(tool.holder === undefined ? {} : { holder: structuredClone(tool.holder) }),
     ...(tool.cutting === undefined ? {} : { cutting: structuredClone(tool.cutting) }),
     ...(tool.orientation === undefined ? {} : { orientation: structuredClone(tool.orientation) }),
+    ...(tool.turning === undefined ? {} : { turning: structuredClone(tool.turning) }),
   };
 }

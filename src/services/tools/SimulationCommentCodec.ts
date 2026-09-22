@@ -169,7 +169,7 @@ export class SimulationCommentCodec {
     return this.encode(
       'TOOL',
       tool,
-      ['toolNumber', 'description', 'Q', 'R', 'holder', 'cutting', 'orientation'],
+      ['toolNumber', 'description', 'Q', 'R', 'holder', 'cutting', 'orientation', 'turning'],
       syntax,
       eol,
     );

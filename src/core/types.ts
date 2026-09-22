@@ -12,7 +12,8 @@ export type ChannelId = '1' | '2' | '3';
 
 export type MachineType = string;
 
-export type ToolPathMode = 'effective' | 'center';
+/** Application plot modes. Simulation is sent as center mode plus pose metadata. */
+export type ToolPathMode = 'effective' | 'center' | 'simulation';
 
 export const WORKPIECE_TOOL_REFERENCE_POSE_CONTRACT = 'workpiece-tool-reference-v1';
 export type ToolReference = 'millingTip' | 'turningVirtualTip';
@@ -298,7 +299,7 @@ export interface CustomVariable {
 }
 
 export interface PlotRequest {
-  toolPathMode: ToolPathMode;
+  toolPathMode: 'effective' | 'center';
   poseContract?: typeof WORKPIECE_TOOL_REFERENCE_POSE_CONTRACT;
   machinedata: Array<{
     program: string;

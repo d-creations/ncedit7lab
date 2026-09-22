@@ -524,7 +524,7 @@ export class NCToolManagerPanel extends HTMLElement {
 
         <section>
           <div class="section-heading"><h3>Preview</h3><span>Parametric setup preview, not collision geometry</span></div>
-          <div class="tool-preview" data-preview-holder="${holder?.type ?? 'none'}" data-preview-cutter="${cutter?.type ?? 'none'}">
+          <div class="tool-preview" data-preview-holder="${holder?.type ?? 'none'}" data-preview-cutter="${cutter?.type ?? 'none'}" data-preview-mount="${tool.turning?.mount ?? 'front'}">
             <div class="preview-clamp"></div><div class="preview-holder"></div><div class="preview-cutter">${cutter?.type === 'insert' ? this.renderInsertPreview(cutter.shape, cutter.ic) : ''}</div><div class="preview-tip"></div>
           </div>
         </section>
@@ -1038,11 +1038,14 @@ export class NCToolManagerPanel extends HTMLElement {
       .tool-preview { position:relative; height:110px; overflow:hidden; border:1px solid var(--vscode-widget-border,#d0d7de); background:repeating-linear-gradient(0deg,transparent 0 19px,color-mix(in srgb,var(--vscode-widget-border,#d0d7de) 35%,transparent) 20px),repeating-linear-gradient(90deg,transparent 0 19px,color-mix(in srgb,var(--vscode-widget-border,#d0d7de) 35%,transparent) 20px); }
       .preview-clamp,.preview-holder,.preview-cutter,.preview-tip { position:absolute; top:50%; transform:translateY(-50%); }
       .preview-clamp { right:16px; width:22px; height:72px; background:#6f7782; }
-      .preview-holder { right:38px; width:48%; height:28px; background:#8793a1; }
+      .preview-holder { right:38px; width:48%; height:28px; background:#8793a1; clip-path:polygon(0 25%,72% 25%,86% 0,100% 0,100% 100%,20% 100%,0 72%); }
       .preview-cutter { left:18%; width:35%; height:30px; background:#d9a441; }
       .preview-tip { left:9%; width:0; height:0; border-top:9px solid transparent; border-bottom:9px solid transparent; border-right:22px solid #d9a441; }
       .tool-preview[data-preview-holder="none"] .preview-holder,.tool-preview[data-preview-cutter="none"] .preview-cutter,.tool-preview[data-preview-cutter="none"] .preview-tip { display:none; }
       .tool-preview[data-preview-holder="box"] .preview-holder { height:42px; }
+      .tool-preview[data-preview-holder="turningHolderProfile"] .preview-holder { height:44px; }
+      .tool-preview[data-preview-mount="back"] .preview-holder { clip-path:polygon(0 0,14% 0,28% 25%,100% 25%,100% 72%,80% 100%,0 100%); }
+      .tool-preview[data-preview-mount="center"] .preview-holder { clip-path:polygon(0 25%,34% 25%,50% 0,66% 25%,100% 25%,100% 100%,0 100%); }
       .tool-preview[data-preview-cutter="ballMill"] .preview-tip { width:18px; height:18px; border:0; border-radius:50%; background:#d9a441; left:12%; }
       .preview-insert { display:block; width:44px; height:44px; overflow:visible; transform:translateY(-50%); }
       .preview-insert path { fill:#d9a441; stroke:#f4d58b; stroke-width:2; vector-effect:non-scaling-stroke; }

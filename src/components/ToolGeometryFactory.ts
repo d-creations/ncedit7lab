@@ -33,7 +33,7 @@ function buildProfileGeometry(points: ReadonlyArray<readonly [number, number]>):
     ordered.map((point) => new THREE.Vector2(point.radius, point.z)),
     32,
   );
-  return normalizeGeometryToLocalTip(geometry);
+  return geometry;
 }
 
 export function getInsertOutline(shape: DeepReadonly<Extract<CuttingPart, { type: 'insert' }>>['shape'], radius: number): Array<[number, number]> {
@@ -56,7 +56,20 @@ export function getInsertOutline(shape: DeepReadonly<Extract<CuttingPart, { type
   return pointsByType[shape] ?? pointsByType.D;
 }
 
-function buildInsertGeometry(part: DeepReadonly<Extract<CuttingPart, { type: 'insert' }>>): THREE.BufferGeometry {
+function activeCornerOffset(
+  polygon: Array<[number, number]>,
+  corner: 'front-right' | 'front-left' | 'back-right' | 'back-left' | 'center' | undefined,
+): [number, number] {
+  if (!corner || corner === 'center') return [0, 0];
+  const x = corner.endsWith('right') ? Math.max(...polygon.map(([value]) => value)) : Math.min(...polygon.map(([value]) => value));
+  const y = corner.startsWith('front') ? Math.min(...polygon.map(([, value]) => value)) : Math.max(...polygon.map(([, value]) => value));
+  return [x, y];
+}
+
+function buildInsertGeometry(
+  part: DeepReadonly<Extract<CuttingPart, { type: 'insert' }>>,
+  activeCorner?: 'front-right' | 'front-left' | 'back-right' | 'back-left' | 'center',
+): THREE.BufferGeometry {
   const thickness = Math.max(0.2, part.thickness);
   const radius = Math.max(0.1, part.ic / 2);
 
@@ -67,6 +80,13 @@ function buildInsertGeometry(part: DeepReadonly<Extract<CuttingPart, { type: 'in
   }
 
   const polygon = getInsertOutline(part.shape, radius);
+  if (part.width !== undefined && part.length !== undefined && ['A', 'B', 'K', 'L'].includes(part.shape)) {
+    const widthScale = part.width / (2 * radius);
+    const lengthScale = part.length / (2 * radius);
+    polygon.forEach((point) => { point[0] *= widthScale; point[1] *= lengthScale; });
+  }
+  const [offsetX, offsetY] = activeCornerOffset(polygon, activeCorner);
+  polygon.forEach((point) => { point[0] -= offsetX; point[1] -= offsetY; });
   const shape = new THREE.Shape();
   shape.moveTo(polygon[0][0], polygon[0][1]);
   for (let i = 1; i < polygon.length; i++) {
@@ -76,7 +96,10 @@ function buildInsertGeometry(part: DeepReadonly<Extract<CuttingPart, { type: 'in
 
   const geometry = new THREE.ExtrudeGeometry(shape, {
     depth: thickness,
-    bevelEnabled: false,
+    bevelEnabled: part.noseRadius > 0,
+    bevelSegments: 3,
+    bevelSize: Math.min(part.noseRadius, thickness / 3),
+    bevelThickness: Math.min(part.noseRadius, thickness / 3),
   });
   geometry.rotateX(Math.PI / 2);
   geometry.translate(0, 0, -0.5 * thickness);
@@ -84,43 +107,69 @@ function buildInsertGeometry(part: DeepReadonly<Extract<CuttingPart, { type: 'in
   return normalizeGeometryToLocalTip(geometry);
 }
 
-function addPart(group: THREE.Group, part: DeepReadonly<HolderPart | CuttingPart>, material: THREE.Material, fromTip: boolean): void {
+function buildTurningHolderGeometry(
+  part: DeepReadonly<Extract<HolderPart, { type: 'turningHolderProfile' }>>,
+): THREE.BufferGeometry {
+  const shape = new THREE.Shape();
+  shape.moveTo(part.outline[0][0], part.outline[0][1]);
+  part.outline.slice(1).forEach(([x, z]) => shape.lineTo(x, z));
+  shape.closePath();
+  const geometry = new THREE.ExtrudeGeometry(shape, { depth: part.depth, bevelEnabled: false });
+  geometry.rotateX(Math.PI / 2);
+  geometry.translate(0, part.depth / 2, 0);
+  return geometry;
+}
+
+function addPart(
+  group: THREE.Group,
+  part: DeepReadonly<HolderPart | CuttingPart>,
+  material: THREE.Material,
+  fromTip: boolean,
+  activeCorner?: 'front-right' | 'front-left' | 'back-right' | 'back-left' | 'center',
+): void {
   let geometry: THREE.BufferGeometry;
   let length: number;
-  let axisAlignedPrimitive = false;
-  if (part.type === 'box') {
+  let needsAxisCorrection = false;
+  if (part.type === 'turningHolderProfile') {
+    geometry = buildTurningHolderGeometry(part);
+    length = Math.max(...part.outline.map(([, z]) => z)) - Math.min(...part.outline.map(([, z]) => z));
+  } else if (part.type === 'box') {
     geometry = new THREE.BoxGeometry(part.width, part.height, part.length);
     length = part.length;
   } else if (part.type === 'cylinder' || part.type === 'endMill' || part.type === 'ballMill' || part.type === 'drill') {
     geometry = new THREE.CylinderGeometry(part.diameter / 2, part.diameter / 2, part.length, 24);
     length = part.length;
-    axisAlignedPrimitive = fromTip;
+    needsAxisCorrection = true;
   } else if (part.type === 'cone') {
     geometry = new THREE.CylinderGeometry(part.endDiameter / 2, part.startDiameter / 2, part.length, 24);
     length = part.length;
+    needsAxisCorrection = true;
   } else if (part.type === 'profile') {
     geometry = buildProfileGeometry(part.points as ReadonlyArray<readonly [number, number]>);
     length = Math.max(...part.points.map(([z]) => z)) - Math.min(...part.points.map(([z]) => z));
+    needsAxisCorrection = true;
   } else if (part.type === 'insert') {
-    geometry = buildInsertGeometry(part);
+    geometry = buildInsertGeometry(part, activeCorner);
     length = Math.max(0.2, part.thickness);
   } else {
     return;
   }
 
-  if (axisAlignedPrimitive) geometry.rotateX(Math.PI / 2);
+  // Three.js cylinders and lathed profiles use Y as their length axis; persisted tool
+  // transforms always use the canonical assembly Z axis.
+  if (needsAxisCorrection) geometry.rotateX(Math.PI / 2);
   if (fromTip) geometry = normalizeGeometryToLocalTip(geometry);
 
   const mesh = new THREE.Mesh(geometry, material);
-  mesh.rotation.x = axisAlignedPrimitive ? 0 : Math.PI / 2;
   mesh.position.set(
     part.position?.[0] ?? 0,
     part.position?.[1] ?? 0,
     part.position?.[2] ?? (fromTip ? 0 : (('stickOut' in part ? part.stickOut : 0) ?? 0) + length / 2),
   );
   if (part.rotation) {
+    mesh.rotation.order = 'ZYX';
     mesh.rotation.set(
-      THREE.MathUtils.degToRad(part.rotation[0]) + (axisAlignedPrimitive ? 0 : Math.PI / 2),
+      THREE.MathUtils.degToRad(part.rotation[0]),
       THREE.MathUtils.degToRad(part.rotation[1]),
       THREE.MathUtils.degToRad(part.rotation[2]),
     );
@@ -136,8 +185,16 @@ export class ToolGeometryFactory {
 
     const group = new THREE.Group();
     group.name = `tool-${String(tool.toolNumber)}`;
-    cutting.forEach((part) => addPart(group, part, CUTTING_MATERIAL, true));
-    tool.holder?.forEach((part) => addPart(group, part, TOOL_MATERIAL, false));
+    cutting.forEach((part) => addPart(group, part, CUTTING_MATERIAL, true, tool.turning?.activeCorner));
+    tool.holder?.forEach((part) => addPart(group, part, TOOL_MATERIAL, false, tool.turning?.activeCorner));
+    if (tool.orientation) {
+      group.rotation.order = 'ZYX';
+      group.rotation.set(
+        THREE.MathUtils.degToRad(tool.orientation[0]),
+        THREE.MathUtils.degToRad(tool.orientation[1]),
+        THREE.MathUtils.degToRad(tool.orientation[2]),
+      );
+    }
     return group;
   }
 

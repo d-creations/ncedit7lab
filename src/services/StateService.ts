@@ -121,7 +121,8 @@ export class StateService {
     const raw = JSON.parse(jsonStr);
     return {
       ...raw,
-      toolPathMode: raw.toolPathMode === 'center' ? 'center' : 'effective',
+      toolPathMode: raw.toolPathMode === 'center' || raw.toolPathMode === 'simulation'
+        ? raw.toolPathMode : 'effective',
       channels: new Map(raw.channels),
       activeProgramIds: new Map(raw.activeProgramIds || [])
     };

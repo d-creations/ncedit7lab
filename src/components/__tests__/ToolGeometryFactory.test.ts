@@ -71,6 +71,38 @@ describe('ToolGeometryFactory', () => {
     expect(geometry.boundingBox!.max.z).toBeCloseTo(cutting.length, 6);
   });
 
+  it('applies the declared extrinsic tool orientation to the complete assembly', () => {
+    const factory = new ToolGeometryFactory();
+    const group = factory.create({
+      toolNumber: 1,
+      description: 'Oriented turning insert',
+      orientation: [90, 90, 0],
+      cutting: [{ type: 'insert', shape: 'A', ic: 9.525, thickness: 2.18, noseRadius: 0.4, clearanceAngle: 7 }],
+    });
+
+    expect(group).toBeTruthy();
+    expect(group!.rotation.order).toBe('ZYX');
+    expect(group!.rotation.x).toBeCloseTo(Math.PI / 2);
+    expect(group!.rotation.y).toBeCloseTo(Math.PI / 2);
+    expect(group!.rotation.z).toBeCloseTo(0);
+  });
+
+  it('keeps a box holder length on local Z without a hidden rotation', () => {
+    const factory = new ToolGeometryFactory();
+    const group = factory.create({
+      toolNumber: 1,
+      description: 'Turning holder',
+      holder: [{ type: 'box', width: 12, height: 12, length: 39, position: [6, 20, -6] }],
+      cutting: [{ type: 'insert', shape: 'A', ic: 3.525, thickness: 2.18, noseRadius: 0.4, clearanceAngle: 7 }],
+    });
+    const holder = group!.children.find((child) => child instanceof THREE.Mesh && child.position.x === 6) as THREE.Mesh;
+
+    expect(holder.rotation.toArray()).toEqual([0, 0, 0, 'XYZ']);
+    const geometry = holder.geometry as THREE.BufferGeometry;
+    geometry.computeBoundingBox();
+    expect(geometry.boundingBox!.getSize(new THREE.Vector3()).z).toBeCloseTo(39);
+  });
+
   it('creates a material mesh for box and cylinder material definitions', () => {
     const factory = new ToolGeometryFactory();
     const box = factory.createMaterialMesh({ type: 'box', width: 100, depth: 60, height: 20, position: [50, 30, -10] });

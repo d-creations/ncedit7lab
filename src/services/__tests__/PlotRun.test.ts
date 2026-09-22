@@ -65,7 +65,7 @@ describe('completed plot runs', () => {
     expect(() => Object.assign(run.plotMetadata.segments[0].endPoint, { x: 999 })).toThrow();
     const wire = vi.mocked(backend.requestPlot).mock.calls[0][0];
     expect(Object.keys(wire)).toEqual(['toolPathMode', 'machinedata']);
-    expect(wire.toolPathMode).toBe('center');
+    expect(wire.toolPathMode).toBe('effective');
     expect(Object.keys(wire.machinedata[0])).toEqual(['program', 'machineName', 'canalNr', 'toolValues', 'customVariables']);
     expect(wire.machinedata[0].program).not.toContain('@NCE-SIM');
     expect(wire.machinedata[0].program).toContain('(ordinary comment)\nG1 X1');
@@ -83,7 +83,7 @@ describe('completed plot runs', () => {
         poseContract: 'workpiece-tool-reference-v1', carriers: [], toolMounts: [],
       },
     };
-    await service.executePlotRun([first], true);
+    await service.executePlotRun([first], true, 'simulation');
     expect(vi.mocked(backend.requestPlot).mock.calls[0][0]).toMatchObject({
       toolPathMode: 'center', poseContract: 'workpiece-tool-reference-v1',
       machinedata: [{ simulation: {
@@ -91,6 +91,35 @@ describe('completed plot runs', () => {
         tools: [{ toolNumber: 0, reference: 'millingTip', mountingOrientationDegrees: [0, 0, 0] }],
       } }],
     });
+  });
+
+  it('sends effective mode as a path-only request without pose metadata', async () => {
+    const first = input();
+    first.machineProfile = {
+      machineName: 'FANUC_MILL_DEMO', controlType: 'FANUC', axes: ['X', 'Y', 'Z', 'B', 'C'],
+      feedLimits: { min: 0, max: 1000 }, defaultTools: [], availableChannels: 1,
+      profileRevision: 'sha256:demo', supportedPoseContracts: ['workpiece-tool-reference-v1'],
+      simulation: {
+        schemaVersion: 1, revision: 1, modelId: 'MILL_DEMO', displayName: 'MILL DEMO', fidelity: 'demo',
+        poseContract: 'workpiece-tool-reference-v1', carriers: [], toolMounts: [],
+      },
+    };
+    await service.executePlotRun([first], true, 'effective');
+    const wire = vi.mocked(backend.requestPlot).mock.calls[0][0];
+    expect(wire.toolPathMode).toBe('effective');
+    expect(wire.poseContract).toBeUndefined();
+    expect(wire.machinedata[0].simulation).toBeUndefined();
+  });
+
+  it('sends center mode with tool compensation data but without pose metadata', async () => {
+    const first = input();
+    first.toolValues = [{ toolNumber: 0, rValue: 2 }];
+    await service.executePlotRun([first], true, 'center');
+    const wire = vi.mocked(backend.requestPlot).mock.calls[0][0];
+    expect(wire.toolPathMode).toBe('center');
+    expect(wire.poseContract).toBeUndefined();
+    expect(wire.machinedata[0].toolValues).toEqual([{ toolNumber: 0, rValue: 2 }]);
+    expect(wire.machinedata[0].simulation).toBeUndefined();
   });
 
   it('isolates exact tool IDs and never resolves unavailable tools or other programs', async () => {

@@ -38,7 +38,7 @@ describe('web tool library', () => {
   it('creates a versioned seeded library and saves validated detached tool data', async () => {
     const seeded = await catalog.getLibrary();
     expect(seeded).toMatchObject({ schemaVersion: 1, revision: 0 });
-    expect(seeded.tools).toHaveLength(255);
+    expect(seeded.tools).toHaveLength(285);
     expect(seeded.tools.map((entry) => entry.description)).toEqual(expect.arrayContaining([
       'Turning Insert C 9.5 mm', 'Turning Insert D 9.5 mm', 'Turning Insert V 9.5 mm',
       'End Mill 0.5 mm', 'End Mill 20 mm', 'Drill 0.5 mm', 'Drill 20 mm',
@@ -48,11 +48,27 @@ describe('web tool library', () => {
     expect(seeded.tools.find((entry) => entry.id === 'default-front-endmill-10mm')?.orientation).toEqual([0, 270, 0]);
     expect(seeded.tools.find((entry) => entry.id === 'default-counter-face-drill-10mm')?.orientation).toEqual([90, 0, 0]);
     expect(seeded.tools.find((entry) => entry.id === 'default-turning-insert-C')?.holder?.[0]).toMatchObject({
-      type: 'box', width: 12, height: 12, length: 40, stickOut: 15,
+      type: 'turningHolderProfile', width: 12, depth: 12, stickOut: 15,
+    });
+    expect(seeded.tools.find((entry) => entry.id === 'default-turning-insert-C')?.turning).toEqual({
+      hand: 'right', mount: 'front', approachAngle: 93,
+      activeCorner: 'front-right', reference: 'virtualTip',
     });
     expect(seeded.tools.find((entry) => entry.id === 'default-turning-insert-C')?.cutting?.[0]).toMatchObject({
       type: 'insert', shape: 'C', ic: 9.525, thickness: 3.18, noseRadius: 0.4,
     });
+    const turningVariants = ['C', 'D', 'V', 'W', 'T'].flatMap((shape) => [
+      seeded.tools.find((entry) => entry.id === `default-turning-insert-${shape}`),
+      seeded.tools.find((entry) => entry.id === `default-turning-insert-${shape}-back-left`),
+      seeded.tools.find((entry) => entry.id === `default-turning-insert-${shape}-center`),
+    ]);
+    expect(turningVariants).toHaveLength(15);
+    expect(turningVariants.every((entry) => entry?.holder?.[0]?.type === 'turningHolderProfile')).toBe(true);
+    expect(turningVariants.map((entry) => entry?.turning?.mount)).toEqual([
+      'front', 'back', 'center', 'front', 'back', 'center', 'front', 'back', 'center',
+      'front', 'back', 'center', 'front', 'back', 'center',
+    ]);
+    expect(new Set(turningVariants.map((entry) => JSON.stringify(entry?.holder?.[0]))).size).toBe(3);
     const changed = vi.fn();
     bus.subscribe(EVENT_NAMES.TOOL_LIBRARY_CHANGED, changed);
     const saved = await catalog.saveTool(tool());
@@ -74,7 +90,7 @@ describe('web tool library', () => {
     const merged = await repository.loadLibrary();
 
     expect(merged.revision).toBe(8);
-    expect(merged.tools).toHaveLength(255);
+    expect(merged.tools).toHaveLength(285);
     expect(merged.tools.find((entry) => entry.id === 'default-drill-20mm')).toBeTruthy();
     expect(merged.tools[0].description).toBe('My custom turning tool');
     expect(JSON.parse(storage.getItem(TOOL_LIBRARY_STORAGE_KEY)!).revision).toBe(8);

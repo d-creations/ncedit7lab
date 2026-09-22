@@ -219,9 +219,10 @@ export class ExecutedProgramService {
   }
 
   private buildPlotRequest(requests: ExecutionRequest[], toolPathMode: ToolPathMode = 'effective'): PlotRequest {
-    const includesPoseRequest = requests.length > 0 && requests.every((request) => request.simulation !== undefined);
+    const includesPoseRequest = toolPathMode === 'simulation' &&
+      requests.length > 0 && requests.every((request) => request.simulation !== undefined);
     return {
-      toolPathMode,
+      toolPathMode: toolPathMode === 'simulation' ? 'center' : toolPathMode,
       ...(includesPoseRequest ? { poseContract: WORKPIECE_TOOL_REFERENCE_POSE_CONTRACT } : {}),
       machinedata: requests.map((request) => ({
         program: this.preprocessProgram(request.program),

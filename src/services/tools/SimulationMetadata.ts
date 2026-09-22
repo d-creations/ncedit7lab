@@ -5,11 +5,22 @@ export interface PartTransform {
   position?: Vector3;
   rotation?: Vector3;
 }
+export type TurningHand = 'right' | 'left' | 'neutral';
+export type TurningMount = 'front' | 'back' | 'center';
+export type TurningActiveCorner = 'front-right' | 'front-left' | 'back-right' | 'back-left' | 'center';
+export interface TurningDefinition {
+  hand: TurningHand;
+  mount: TurningMount;
+  approachAngle: number;
+  activeCorner: TurningActiveCorner;
+  reference: 'virtualTip';
+}
 export type HolderPart = PartTransform & { stickOut?: number } & (
     | { type: 'box'; width: number; height: number; length: number }
     | { type: 'cylinder'; diameter: number; length: number }
     | { type: 'cone'; startDiameter: number; endDiameter: number; length: number }
     | { type: 'profile'; points: [number, number][] }
+    | { type: 'turningHolderProfile'; width: number; depth: number; outline: [number, number][] }
   );
 export type InsertShape =
   'C' | 'D' | 'V' | 'W' | 'T' | 'S' | 'R' | 'E' | 'H' | 'O' | 'P' | 'L' | 'A' | 'B' | 'K';
@@ -37,6 +48,7 @@ export interface ProgramToolDefinition {
   holder?: HolderPart[];
   cutting?: CuttingPart[];
   orientation?: Vector3;
+  turning?: TurningDefinition;
 }
 export interface ProgramToolOffsetDefinition {
   offsetNumber: number;
@@ -219,6 +231,19 @@ function validateHolder(value: unknown, index: number): void {
       if (!hasRadius || part.points[0][0] === lastZ) fail('Profile needs axial and radial extent');
       break;
     }
+    case 'turningHolderProfile': {
+      keys(part, [...common, 'width', 'depth', 'outline']);
+      size(part.width, 'width');
+      size(part.depth, 'depth');
+      if (!Array.isArray(part.outline) || part.outline.length < 3 || part.outline.length > 128)
+        fail('Invalid turning holder outline');
+      part.outline.forEach((point) => {
+        if (!Array.isArray(point) || point.length !== 2) fail('Holder outline points require [x,z]');
+        finite(point[0], 'holder outline x');
+        finite(point[1], 'holder outline z');
+      });
+      break;
+    }
     default:
       fail(`Unsupported holder type: ${String(part.type)}`);
   }
@@ -301,11 +326,22 @@ function validateCutting(value: unknown): void {
 
 export function validateProgramTool(value: unknown): ProgramToolDefinition {
   const tool = record(value);
-  keys(tool, ['toolNumber', 'description', 'Q', 'R', 'holder', 'cutting', 'orientation']);
+  keys(tool, ['toolNumber', 'description', 'Q', 'R', 'holder', 'cutting', 'orientation', 'turning']);
   validateToolIdentifier(tool.toolNumber);
   text(tool.description, 'description', 4096);
   validateCompensation(tool);
   if (tool.orientation !== undefined) vector(tool.orientation, 'orientation');
+  if (tool.turning !== undefined) {
+    const turning = record(tool.turning);
+    keys(turning, ['hand', 'mount', 'approachAngle', 'activeCorner', 'reference']);
+    if (!['right', 'left', 'neutral'].includes(turning.hand as string)) fail('Invalid turning hand');
+    if (!['front', 'back', 'center'].includes(turning.mount as string)) fail('Invalid turning mount');
+    finite(turning.approachAngle, 'approach angle');
+    if (turning.approachAngle <= 0 || turning.approachAngle >= 180) fail('Invalid approach angle');
+    if (!['front-right', 'front-left', 'back-right', 'back-left', 'center'].includes(turning.activeCorner as string))
+      fail('Invalid turning active corner');
+    if (turning.reference !== 'virtualTip') fail('Turning reference must be virtualTip');
+  }
   for (const key of ['holder', 'cutting'] as const) {
     const parts = tool[key];
     if (parts === undefined) continue; // Q/R-only definitions remain useful without invented geometry.

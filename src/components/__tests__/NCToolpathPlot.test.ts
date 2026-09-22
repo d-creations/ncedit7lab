@@ -35,6 +35,7 @@ describe('editor Plot actions', () => {
   let source: ProgramSource;
   let requestPlot: ReturnType<typeof vi.fn>;
   let render: ReturnType<typeof vi.spyOn>;
+  let selectedMode: 'effective' | 'center' | 'simulation';
   const syntax = { kind: 'line', prefix: ';' } as const;
 
   beforeEach(async () => {
@@ -42,6 +43,7 @@ describe('editor Plot actions', () => {
     bus = new EventBus();
     tools = new ProgramToolService(new SimulationCommentCodec());
     requestPlot = vi.fn().mockResolvedValue({ canal: { '1': { segments: [] }, '2': { segments: [] } } });
+    selectedMode = 'effective';
     service = new ExecutedProgramService({ requestPlot } as unknown as BackendGateway, bus);
     source = { identity: { documentId: 'doc', programId: 'one', channelId: '1' }, revision: 0, text: '' };
     registry.register(EVENT_BUS_TOKEN, () => bus);
@@ -52,7 +54,11 @@ describe('editor Plot actions', () => {
       getActiveProgram: () => ({ id: 'one', sourceFileId: 'doc', content: 'STALE FILE TEXT', lastModified: 0 }),
     }) as unknown as IFileManagerService);
     registry.register(STATE_SERVICE_TOKEN, () => ({
-      getState: () => ({ globalMachine: 'test', activeMachine: { machineName: 'test', simulationCommentSyntax: syntax } }),
+      getState: () => ({
+        globalMachine: 'test',
+        toolPathMode: selectedMode,
+        activeMachine: { machineName: 'test', simulationCommentSyntax: syntax },
+      }),
       getActiveChannels: () => [{ id: '1', program: 'STALE STATE TEXT' }, { id: '2', program: 'OTHER' }],
     }) as unknown as StateService);
     for (const channelId of ['1', '2'] as const) {
@@ -170,7 +176,7 @@ describe('editor Plot actions', () => {
       ],
     }] } } });
     plot.scene = new THREE.Scene();
-    (plot.shadowRoot?.getElementById('toggle-simulation') as HTMLButtonElement).click();
+    selectedMode = 'simulation';
 
     await plot.plotNCCode('1');
     bus.publish(EVENT_NAMES.EDITOR_CURSOR_MOVED, { channelId: '1', lineNumber: 1, source });
@@ -193,7 +199,7 @@ describe('editor Plot actions', () => {
       ],
     }] } } });
     plot.scene = new THREE.Scene();
-    (plot.shadowRoot?.getElementById('toggle-simulation') as HTMLButtonElement).click();
+    selectedMode = 'simulation';
 
     await plot.plotNCCode('1');
     bus.publish(EVENT_NAMES.EDITOR_CURSOR_MOVED, { channelId: '1', lineNumber: 1, source });

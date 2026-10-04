@@ -29,7 +29,8 @@ import type {
   ProgramToolUpdateRequest,
   ProgramToolUpdateResult,
 } from '@services/tools/ProgramMetadataEditService';
-import { getInsertOutline } from './ToolGeometryFactory';
+import './NCToolPreview';
+import type { NCToolPreview } from './NCToolPreview';
 
 const CHANNELS: ChannelId[] = ['1', '2', '3'];
 const INSERT_SHAPES: InsertShape[] = ['C', 'D', 'V', 'W', 'T', 'S', 'R', 'E', 'H', 'O', 'P', 'L', 'A', 'B', 'K'];
@@ -78,6 +79,7 @@ export class NCToolManagerPanel extends HTMLElement {
   private programDraft?: ProgramToolDefinition;
   private offsetDrafts: ToolOffsetValue[] = [];
   private pendingRequestId?: string;
+  private previewElement?: NCToolPreview;
   private status = '';
   private statusKind: 'info' | 'success' | 'error' = 'info';
 
@@ -283,6 +285,7 @@ export class NCToolManagerPanel extends HTMLElement {
       </div>
     `;
     this.attachListeners();
+    this.mountPreview();
     this.updateGeometryVisibility();
   }
 
@@ -304,6 +307,7 @@ export class NCToolManagerPanel extends HTMLElement {
         <div class="library-actions">
           <button class="button" id="import-library">Import</button>
           <button class="button" id="export-library">Export</button>
+          <button class="button" id="reset-defaults" title="Reset standard tools to latest defaults">Reset Defaults</button>
           <input id="library-file" type="file" accept="application/json,.json" hidden>
         </div>
       </aside>
@@ -473,6 +477,7 @@ export class NCToolManagerPanel extends HTMLElement {
             ${this.option('box', 'Box', holder?.type)}
             ${this.option('cone', 'Cone', holder?.type)}
             ${this.option('profile', 'Axial Profile (preserved)', holder?.type)}
+            ${this.option('turningHolderProfile', 'Turning Holder Profile (preserved)', holder?.type)}
           </select></label>
           ${holder?.type === 'profile' ? '<div class="notice warning">Axial profile points are preserved but are not editable in this first form.</div>' : ''}
           ${(tool.holder?.length ?? 0) > 1 ? `<div class="notice warning">${tool.holder!.length - 1} additional holder part(s) are preserved unchanged.</div>` : ''}
@@ -517,16 +522,15 @@ export class NCToolManagerPanel extends HTMLElement {
               <label>Clearance angle<input id="insert-clearance" type="number" step="any" value="${cutter?.type === 'insert' ? cutter.clearanceAngle : 0}"></label>
               <label>Width<input id="insert-width" type="number" min="0" step="any" value="${cutter?.type === 'insert' ? cutter.width ?? '' : ''}" placeholder="L/A/B/K"></label>
               <label>Length<input id="insert-length" type="number" min="0" step="any" value="${cutter?.type === 'insert' ? cutter.length ?? '' : ''}" placeholder="L/A/B/K"></label>
+              <label>Zero vertex<input id="insert-zero-vertex" type="number" min="0" max="255" step="1" value="${cutter?.type === 'insert' ? cutter.zeroVertex ?? '' : ''}" placeholder="Auto" title="Plate outline vertex used as tool zero; stored in the NC program. Click a vertex in the preview."></label>
             </div>
           </div>
           ${this.renderTransformFields('cutting', cutterPosition, cutterRotation)}
         </section>
 
         <section>
-          <div class="section-heading"><h3>Preview</h3><span>Parametric setup preview, not collision geometry</span></div>
-          <div class="tool-preview" data-preview-holder="${holder?.type ?? 'none'}" data-preview-cutter="${cutter?.type ?? 'none'}" data-preview-mount="${tool.turning?.mount ?? 'front'}">
-            <div class="preview-clamp"></div><div class="preview-holder"></div><div class="preview-cutter">${cutter?.type === 'insert' ? this.renderInsertPreview(cutter.shape, cutter.ic) : ''}</div><div class="preview-tip"></div>
-          </div>
+          <div class="section-heading"><h3>Preview</h3><span>Live setup preview, not collision geometry</span></div>
+          <div id="tool-preview-slot"></div>
         </section>
 
         <div class="form-actions">
@@ -610,7 +614,10 @@ export class NCToolManagerPanel extends HTMLElement {
     this.shadowRoot?.querySelector<HTMLSelectElement>('#cutting-type')?.addEventListener('change', () => this.updateGeometryVisibility());
     this.shadowRoot?.querySelector<HTMLSelectElement>('#insert-shape')?.addEventListener('change', () => this.updateGeometryVisibility());
     this.shadowRoot?.querySelector<HTMLInputElement>('#insert-ic')?.addEventListener('input', () => this.updateGeometryVisibility());
+    this.shadowRoot?.querySelector<HTMLFormElement>('#tool-form')?.addEventListener('input', () => this.refreshPreview());
+    this.shadowRoot?.querySelector<HTMLFormElement>('#tool-form')?.addEventListener('change', () => this.refreshPreview());
     this.shadowRoot?.querySelector<HTMLButtonElement>('#export-library')?.addEventListener('click', () => void this.exportLibrary());
+    this.shadowRoot?.querySelector<HTMLButtonElement>('#reset-defaults')?.addEventListener('click', () => void this.resetDefaults());
     this.shadowRoot?.querySelector<HTMLButtonElement>('#add-offset')?.addEventListener('click', () => {
       this.offsetDrafts.push(this.newOffset());
       this.render();
@@ -636,24 +643,36 @@ export class NCToolManagerPanel extends HTMLElement {
     this.shadowRoot?.querySelectorAll<HTMLElement>('[data-cutting-fields]').forEach((element) => {
       element.hidden = !element.dataset.cuttingFields?.split(' ').includes(cutterType);
     });
-    const preview = this.shadowRoot?.querySelector<HTMLElement>('.tool-preview');
-    if (preview) {
-      preview.dataset.previewHolder = holderType;
-      preview.dataset.previewCutter = cutterType;
-      const shape = this.shadowRoot?.querySelector<HTMLSelectElement>('#insert-shape')?.value as InsertShape | undefined;
-      const ic = Number(this.shadowRoot?.querySelector<HTMLInputElement>('#insert-ic')?.value);
-      const cutter = preview.querySelector<HTMLElement>('.preview-cutter');
-      if (cutter && cutterType === 'insert' && shape && Number.isFinite(ic) && ic > 0) {
-        cutter.innerHTML = this.renderInsertPreview(shape, ic);
-      }
-    }
   }
 
-  private renderInsertPreview(shape: InsertShape, ic: number): string {
-    const points = getInsertOutline(shape, ic / 2);
-    const scale = 34 / Math.max(...points.flatMap(([x, y]) => [Math.abs(x), Math.abs(y)]), 0.1);
-    const path = points.map(([x, y], index) => `${index ? 'L' : 'M'}${(50 + x * scale).toFixed(1)},${(50 - y * scale).toFixed(1)}`).join(' ') + ' Z';
-    return `<svg class="preview-insert" viewBox="0 0 100 100" role="img" aria-label="${this.escape(shape)} insert outline"><path d="${path}"></path></svg>`;
+  /** The preview element survives re-renders so its WebGL context is not recreated. */
+  private mountPreview(): void {
+    const slot = this.shadowRoot?.querySelector<HTMLElement>('#tool-preview-slot');
+    if (!slot) {
+      this.previewElement = undefined;
+      return;
+    }
+    if (!this.previewElement) {
+      this.previewElement = document.createElement('nc-tool-preview') as NCToolPreview;
+      this.previewElement.addEventListener('zero-vertex-pick', (event) => {
+        const index = (event as CustomEvent<{ index: number }>).detail.index;
+        const input = this.shadowRoot?.querySelector<HTMLInputElement>('#insert-zero-vertex');
+        if (!input) return;
+        input.value = String(index);
+        this.refreshPreview();
+      });
+    }
+    slot.replaceWith(this.previewElement);
+    this.refreshPreview();
+  }
+
+  private refreshPreview(): void {
+    if (!this.previewElement || !this.shadowRoot?.querySelector('#tool-form')) return;
+    try {
+      this.previewElement.setTool(this.buildToolFromForm(1));
+    } catch (cause) {
+      this.previewElement.setMessage(cause instanceof Error ? cause.message : String(cause), true);
+    }
   }
 
   private buildToolFromForm(toolNumber: ToolIdentifier): ProgramToolDefinition {
@@ -676,6 +695,12 @@ export class NCToolManagerPanel extends HTMLElement {
     if (holderType === 'profile' && sourceTool?.holder?.[0]?.type === 'profile') {
       holder.push(structuredClone(sourceTool.holder[0]));
     }
+    if (holderType === 'turningHolderProfile' && sourceTool?.holder?.[0]?.type === 'turningHolderProfile') {
+      const part = structuredClone(sourceTool.holder[0]) as HolderPart;
+      delete part.position;
+      delete part.rotation;
+      holder.push({ ...part, ...holderTransform });
+    }
     const stickOut = optionalNumber(query<HTMLInputElement>('#holder-stickout'));
     if (holder.length && stickOut !== undefined) holder[0].stickOut = stickOut;
     if (holderType !== 'none' && sourceTool?.holder && sourceTool.holder.length > 1) {
@@ -691,7 +716,8 @@ export class NCToolManagerPanel extends HTMLElement {
     if (cuttingType === 'insert') cutting.push({ type: 'insert', shape: query<HTMLSelectElement>('#insert-shape')!.value as InsertShape,
       ic: requiredNumber(query('#insert-ic')), thickness: requiredNumber(query('#insert-thickness')),
       noseRadius: requiredNumber(query('#insert-nose-radius')), clearanceAngle: requiredNumber(query('#insert-clearance')),
-      ...optionalField('width', optionalNumber(query('#insert-width'))), ...optionalField('length', optionalNumber(query('#insert-length'))), ...cuttingTransform });
+      ...optionalField('width', optionalNumber(query('#insert-width'))), ...optionalField('length', optionalNumber(query('#insert-length'))),
+      ...optionalField('zeroVertex', optionalNumber(query('#insert-zero-vertex'))), ...cuttingTransform });
     if (cuttingType !== 'none' && sourceTool?.cutting && sourceTool.cutting.length > 1) {
       cutting.push(...structuredClone(sourceTool.cutting.slice(1)));
     }
@@ -704,6 +730,7 @@ export class NCToolManagerPanel extends HTMLElement {
       ...(holder.length ? { holder } : {}),
       ...(cutting.length ? { cutting } : {}),
       ...(orientation.some((value) => value !== 0) ? { orientation } : {}),
+      ...(sourceTool?.turning ? { turning: structuredClone(sourceTool.turning) } : {}),
     };
     validateProgramTool(definition);
     return definition;
@@ -749,6 +776,7 @@ export class NCToolManagerPanel extends HTMLElement {
         ...(definition.holder ? { holder: definition.holder } : {}),
         ...(definition.cutting ? { cutting: definition.cutting } : {}),
         ...(definition.orientation ? { orientation: definition.orientation } : {}),
+        ...(definition.turning ? { turning: definition.turning } : {}),
       });
       this.selectedLibraryId = saved.id;
       this.libraryDraft = saved;
@@ -830,6 +858,7 @@ export class NCToolManagerPanel extends HTMLElement {
         ...(definition.holder ? { holder: definition.holder } : {}),
         ...(definition.cutting ? { cutting: definition.cutting } : {}),
         ...(definition.orientation ? { orientation: definition.orientation } : {}),
+        ...(definition.turning ? { turning: definition.turning } : {}),
       });
       this.selectedLibraryId = saved.id;
       this.setStatus('Program tool copied to the local library', 'success', false);
@@ -850,6 +879,19 @@ export class NCToolManagerPanel extends HTMLElement {
       link.click();
       URL.revokeObjectURL(url);
       this.setStatus('Tool library exported', 'success');
+    } catch (cause) {
+      this.setStatus(cause instanceof Error ? cause.message : String(cause), 'error');
+    }
+  }
+
+  private async resetDefaults(): Promise<void> {
+    if (!window.confirm('Reset all standard tools to default definitions? Your custom tools will be kept.')) return;
+    try {
+      await this.catalog.resetDefaults();
+      this.selectedLibraryId = undefined;
+      this.libraryDraft = undefined;
+      this.setStatus('Standard tools reset to defaults', 'success', false);
+      await this.loadLibrary();
     } catch (cause) {
       this.setStatus(cause instanceof Error ? cause.message : String(cause), 'error');
     }
@@ -1035,22 +1077,6 @@ export class NCToolManagerPanel extends HTMLElement {
       .notice.warning { border-left:3px solid #b7791f; } .notice.error { border-left:3px solid #cf222e; }
       .status { min-height:30px; padding:7px 10px; border-top:1px solid var(--vscode-editorGroup-border,#d0d7de); color:var(--vscode-descriptionForeground,#57606a); font-size:11px; }
       .status.success { color:#2f8f4e; } .status.error { color:var(--vscode-inputValidation-errorBackground,#cf222e); }
-      .tool-preview { position:relative; height:110px; overflow:hidden; border:1px solid var(--vscode-widget-border,#d0d7de); background:repeating-linear-gradient(0deg,transparent 0 19px,color-mix(in srgb,var(--vscode-widget-border,#d0d7de) 35%,transparent) 20px),repeating-linear-gradient(90deg,transparent 0 19px,color-mix(in srgb,var(--vscode-widget-border,#d0d7de) 35%,transparent) 20px); }
-      .preview-clamp,.preview-holder,.preview-cutter,.preview-tip { position:absolute; top:50%; transform:translateY(-50%); }
-      .preview-clamp { right:16px; width:22px; height:72px; background:#6f7782; }
-      .preview-holder { right:38px; width:48%; height:28px; background:#8793a1; clip-path:polygon(0 25%,72% 25%,86% 0,100% 0,100% 100%,20% 100%,0 72%); }
-      .preview-cutter { left:18%; width:35%; height:30px; background:#d9a441; }
-      .preview-tip { left:9%; width:0; height:0; border-top:9px solid transparent; border-bottom:9px solid transparent; border-right:22px solid #d9a441; }
-      .tool-preview[data-preview-holder="none"] .preview-holder,.tool-preview[data-preview-cutter="none"] .preview-cutter,.tool-preview[data-preview-cutter="none"] .preview-tip { display:none; }
-      .tool-preview[data-preview-holder="box"] .preview-holder { height:42px; }
-      .tool-preview[data-preview-holder="turningHolderProfile"] .preview-holder { height:44px; }
-      .tool-preview[data-preview-mount="back"] .preview-holder { clip-path:polygon(0 0,14% 0,28% 25%,100% 25%,100% 72%,80% 100%,0 100%); }
-      .tool-preview[data-preview-mount="center"] .preview-holder { clip-path:polygon(0 25%,34% 25%,50% 0,66% 25%,100% 25%,100% 100%,0 100%); }
-      .tool-preview[data-preview-cutter="ballMill"] .preview-tip { width:18px; height:18px; border:0; border-radius:50%; background:#d9a441; left:12%; }
-      .preview-insert { display:block; width:44px; height:44px; overflow:visible; transform:translateY(-50%); }
-      .preview-insert path { fill:#d9a441; stroke:#f4d58b; stroke-width:2; vector-effect:non-scaling-stroke; }
-      .tool-preview[data-preview-cutter="insert"] .preview-cutter { left:20%; width:44px; height:44px; background:transparent; }
-      .tool-preview[data-preview-cutter="insert"] .preview-tip { display:none; }
       @media (max-width:700px) { .manager-body { grid-template-columns:1fr; grid-template-rows:minmax(145px,32%) minmax(0,68%); } .tool-list-pane { border-right:0; border-bottom:1px solid var(--vscode-editorGroup-border,#d0d7de); } .manager-header { padding:9px; } .manager-header p { display:none; } .transform-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
     `;
   }

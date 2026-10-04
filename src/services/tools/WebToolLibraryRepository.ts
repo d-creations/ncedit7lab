@@ -6,6 +6,28 @@ import { ToolLibraryStorageError } from './ToolLibraryTypes';
 
 export const TOOL_LIBRARY_STORAGE_KEY = 'nc-edit7:tool-library';
 
+// Untouched library defaults from before zeroVertex, orientation, holder or size fix; edited tools (revision > 1 or renamed) are never replaced.
+function isStaleDefault(tool: LibraryToolDefinition, current?: LibraryToolDefinition): boolean {
+  if (!current || tool.revision !== 1 || tool.createdAt !== 0 || tool.updatedAt !== 0) {
+    return false;
+  }
+  const isDefaultName = tool.description === current.description ||
+    /^Turning Insert [A-Z](?: \d+(?:\.\d+)? mm)?(?: [A-Za-z ]+)?$/.test(tool.description);
+  if (!isDefaultName) return false;
+
+  const cutting = tool.cutting?.[0];
+  const curCutting = current.cutting?.[0];
+  const missingZeroVertex = cutting?.type === 'insert' && cutting.zeroVertex === undefined;
+  const orientationChanged = JSON.stringify(tool.orientation ?? [0, 0, 0]) !== JSON.stringify(current.orientation ?? [0, 0, 0]);
+  const qOrRChanged = tool.Q !== current.Q || tool.R !== current.R;
+  const insertGeometryChanged = cutting?.type === 'insert' && curCutting?.type === 'insert' &&
+    (cutting.ic !== curCutting.ic || cutting.thickness !== curCutting.thickness);
+  const descriptionChanged = tool.description !== current.description;
+  const holderChanged = JSON.stringify(tool.holder ?? []) !== JSON.stringify(current.holder ?? []);
+  const turningChanged = JSON.stringify(tool.turning ?? null) !== JSON.stringify(current.turning ?? null);
+  return missingZeroVertex || orientationChanged || qOrRChanged || insertGeometryChanged || descriptionChanged || holderChanged || turningChanged;
+}
+
 function createId(): string {
   return globalThis.crypto?.randomUUID?.() ?? `library-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
@@ -48,13 +70,17 @@ export class WebToolLibraryRepository implements IToolLibraryRepository {
     if (!raw) return parseToolLibrary({ schemaVersion: 1, libraryId: createId(), revision: 0, tools: getDefaultToolLibraryTools() });
     try {
       const library = parseToolLibrary(JSON.parse(raw));
+      const defaults = getDefaultToolLibraryTools();
+      const defaultsById = new Map(defaults.map((tool) => [tool.id, tool]));
+      const tools = library.tools.map((tool) => (isStaleDefault(tool, defaultsById.get(tool.id)) ? defaultsById.get(tool.id)! : tool));
+      const upgraded = tools.some((tool, index) => tool !== library.tools[index]);
       const existingIds = new Set(library.tools.map((tool) => tool.id));
-      const missingDefaults = getDefaultToolLibraryTools().filter((tool) => !existingIds.has(tool.id));
-      if (!missingDefaults.length) return library;
+      const missingDefaults = defaults.filter((tool) => !existingIds.has(tool.id));
+      if (!missingDefaults.length && !upgraded) return library;
       const merged = parseToolLibrary({
         ...library,
         revision: library.revision + 1,
-        tools: [...library.tools, ...missingDefaults],
+        tools: [...tools, ...missingDefaults],
       });
       await this.saveLibrary(merged, library.revision);
       return merged;

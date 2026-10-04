@@ -1,6 +1,7 @@
 import type { EventBus } from '../EventBus';
 import { EVENT_NAMES } from '../EventBus';
 import { freezeMetadata, validateProgramTool } from './SimulationMetadata';
+import { getDefaultToolLibraryTools } from './DefaultToolLibrary';
 import type { IToolLibraryRepository, LibraryToolDefinition, ToolLibraryEnvelope, ToolLibraryFilter } from './ToolLibraryTypes';
 import { toProgramToolDefinition } from './ToolLibraryTypes';
 import { parseToolLibrary } from './WebToolLibraryRepository';
@@ -78,5 +79,20 @@ export class ToolCatalogService {
 
   async exportLibrary(): Promise<string> {
     return JSON.stringify(await this.getLibrary(), null, 2);
+  }
+
+  async resetDefaults(): Promise<void> {
+    const current = await this.getLibrary();
+    const defaults = getDefaultToolLibraryTools();
+    const defaultIds = new Set(defaults.map((tool) => tool.id));
+    const userTools = current.tools.filter((tool) => !defaultIds.has(tool.id));
+    const next = parseToolLibrary({
+      ...current,
+      revision: current.revision + 1,
+      tools: [...userTools, ...defaults],
+    });
+    await this.repository.saveLibrary(next, current.revision);
+    this.library = next;
+    this.eventBus.publish(EVENT_NAMES.TOOL_LIBRARY_CHANGED, { revision: next.revision });
   }
 }

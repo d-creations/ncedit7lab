@@ -112,7 +112,7 @@ describe('editor Plot actions', () => {
     await vi.waitFor(() => expect(render).toHaveBeenCalledTimes(1));
     expect(requestPlot).toHaveBeenCalledTimes(1);
     const wire = requestPlot.mock.calls[0][0];
-    expect(wire.toolPathMode).toBe('effective');
+    expect(wire.toolPathMode).toBe('center');
     expect(wire.machinedata).toHaveLength(channelId ? 1 : 2);
     // An empty pending editor must not fall back to stale file/state content.
     expect(wire.machinedata[0].program).toBe('');
@@ -206,6 +206,34 @@ describe('editor Plot actions', () => {
 
     expect(plot.toolObject).not.toBeNull();
     expect(plot.toolObject!.position.toArray()).toEqual([4, 5, 6]);
+  });
+
+  it('applies the emitted pose orientation directly without double-applying tool mounting orientation', async () => {
+    source.text = new SimulationCommentCodec().encodeTool({
+      toolNumber: 3,
+      description: 'Oriented turning insert',
+      orientation: [90, 90, 0],
+      cutting: [{ type: 'insert', shape: 'C', ic: 9.525, thickness: 3.18, noseRadius: 0.4, clearanceAngle: 7 }],
+    }, syntax);
+    requestPlot.mockResolvedValue({ canal: { '1': { segments: [{
+      traversal: 'FEED', geometry: 'LINEAR', lineNumber: 1, executionStep: 0, toolNumber: 3,
+      points: [{ x: 1, y: 2, z: 3 }, { x: 4, y: 5, z: 6 }],
+      poses: [
+        { position: [1, 2, 3], orientation: [0.5, 0.5, -0.5, 0.5], reference: 'turningVirtualTip', frameId: 'workpiece:mainSpindle' },
+        { position: [4, 5, 6], orientation: [0.5, 0.5, -0.5, 0.5], reference: 'turningVirtualTip', frameId: 'workpiece:mainSpindle' },
+      ],
+    }] } } });
+    plot.scene = new THREE.Scene();
+    selectedMode = 'simulation';
+
+    await plot.plotNCCode('1');
+    bus.publish(EVENT_NAMES.EDITOR_CURSOR_MOVED, { channelId: '1', lineNumber: 1, source });
+
+    expect(plot.toolObject).not.toBeNull();
+    expect(plot.toolObject!.quaternion.x).toBeCloseTo(0.5);
+    expect(plot.toolObject!.quaternion.y).toBeCloseTo(0.5);
+    expect(plot.toolObject!.quaternion.z).toBeCloseTo(-0.5);
+    expect(plot.toolObject!.quaternion.w).toBeCloseTo(0.5);
   });
 
   it('does not replace the old plot on invalid metadata or a failed request', async () => {

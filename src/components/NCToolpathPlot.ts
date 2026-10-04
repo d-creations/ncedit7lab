@@ -916,8 +916,7 @@ export class NCToolpathPlot extends HTMLElement {
     if (!mesh) return;
 
     mesh.position.fromArray(pose.position);
-    const poseQuaternion = new THREE.Quaternion().fromArray(pose.orientation);
-    mesh.quaternion.premultiply(poseQuaternion);
+    mesh.quaternion.fromArray(pose.orientation);
     mesh.userData.isToolMesh = true;
     mesh.renderOrder = 1000;
     this.toolObject = mesh;

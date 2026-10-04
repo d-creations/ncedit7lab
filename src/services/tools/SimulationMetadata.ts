@@ -38,6 +38,8 @@ export type CuttingPart = PartTransform &
         clearanceAngle: number;
         width?: number;
         length?: number;
+        /** Outline vertex (see InsertOutline) that is the virtual tip / tool zero. */
+        zeroVertex?: number;
       }
   );
 export interface ProgramToolDefinition {
@@ -304,6 +306,7 @@ function validateCutting(value: unknown): void {
         'clearanceAngle',
         'width',
         'length',
+        'zeroVertex',
       ]);
       if (!insertShapes.includes(part.shape as InsertShape))
         fail('Unsupported insert shape; explicit supplier geometry required');
@@ -318,6 +321,13 @@ function validateCutting(value: unknown): void {
         if (['L', 'A', 'B', 'K'].includes(part.shape as string) || part[key] !== undefined)
           size(part[key], key);
       }
+      if (
+        part.zeroVertex !== undefined &&
+        (!Number.isSafeInteger(part.zeroVertex) ||
+          (part.zeroVertex as number) < 0 ||
+          (part.zeroVertex as number) > 255)
+      )
+        fail('Invalid zeroVertex');
       break;
     default:
       fail(`Unsupported cutting type: ${String(part.type)}`);

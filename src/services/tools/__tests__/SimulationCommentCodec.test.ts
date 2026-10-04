@@ -72,6 +72,25 @@ describe('SimulationCommentCodec', () => {
     },
   );
 
+  it('stores the plate zero vertex, turning data and holder profile in the NC program', () => {
+    const turningTool: ProgramToolDefinition = {
+      toolNumber: 300,
+      description: 'Turning Insert A 9.5 mm',
+      orientation: [90, 90, 0],
+      holder: [{ type: 'turningHolderProfile', width: 12, depth: 12, outline: [[-0.5, 1], [-0.5, 40], [-12.5, 40]], stickOut: 15 }],
+      cutting: [{ type: 'insert', shape: 'A', ic: 9.525, thickness: 3.18, noseRadius: 0.4, clearanceAngle: 7,
+        width: 6, length: 12.5, zeroVertex: 2, rotation: [0, -44.5, 0] }],
+      turning: { hand: 'right', mount: 'front', approachAngle: 93, activeCorner: 'front-right', reference: 'virtualTip' },
+    };
+    for (const syntax of [semicolon, parentheses]) {
+      const encoded = codec.encodeTool(turningTool, syntax);
+      expect(encoded).toContain('"zeroVertex":2');
+      const parsed = codec.parse(`${encoded}\nT300\nG1 X10`, syntax);
+      expect(parsed.diagnostics).toEqual([]);
+      expect(parsed.tools).toEqual([turningTool]);
+    }
+  });
+
   it('preserves exact source spans and mixed LF/CRLF endings without rewriting unrelated code', () => {
     const raw = codec.encodeTool(drill, semicolon, '\r\n');
     const prefix = '%\r\nO1234\n; ordinary comment\r\n';

@@ -23,6 +23,14 @@ import type {
 
 const syntax = { kind: 'block', open: '(', close: ')' } as const;
 
+// jsdom has no canvas; the live preview then falls back to its no-WebGL notice.
+beforeEach(() => {
+  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null);
+});
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
 describe('NCToolManagerPanel', () => {
   const registry = ServiceRegistry.getInstance();
   let eventBus: EventBus;
@@ -93,24 +101,47 @@ describe('NCToolManagerPanel', () => {
     expect(storedTool.cutting[0]).toMatchObject({ type: 'endMill', diameter: 10, length: 30 });
   });
 
-  it('updates the insert outline preview when the selected shape changes', async () => {
+  it('drives the live preview from the form and stores a picked zero vertex with the tool', async () => {
     (panel.shadowRoot?.querySelector('#new-library-tool') as HTMLButtonElement).click();
-    (panel.shadowRoot?.querySelector('#cutting-type') as HTMLSelectElement).value = 'insert';
-    (panel.shadowRoot?.querySelector('#cutting-type') as HTMLSelectElement).dispatchEvent(new Event('change'));
-    (panel.shadowRoot?.querySelector('#insert-ic') as HTMLInputElement).value = '10';
-    (panel.shadowRoot?.querySelector('#insert-ic') as HTMLInputElement).dispatchEvent(new Event('input'));
+    const field = <T extends HTMLElement>(selector: string) => panel.shadowRoot!.querySelector(selector) as T;
+    const change = (element: HTMLElement) => element.dispatchEvent(new Event('change', { bubbles: true }));
+    const set = (selector: string, value: string) => {
+      field<HTMLInputElement>(selector).value = value;
+      change(field(selector));
+    };
+    set('#tool-description', 'V plate');
+    set('#cutting-type', 'insert');
+    set('#insert-ic', '10');
+    set('#insert-thickness', '4');
+    set('#insert-nose-radius', '0.4');
+    set('#insert-clearance', '7');
+    set('#insert-shape', 'V');
 
-    const shape = panel.shadowRoot?.querySelector('#insert-shape') as HTMLSelectElement;
-    const path = () => panel.shadowRoot?.querySelector('.preview-insert path')?.getAttribute('d');
-    shape.value = 'C';
-    shape.dispatchEvent(new Event('change'));
-    const cOutline = path();
-    shape.value = 'W';
-    shape.dispatchEvent(new Event('change'));
+    const preview = field<HTMLElement & { getTool(): { cutting?: Array<Record<string, unknown>> } | undefined; pickVertex(index: number): void }>('nc-tool-preview');
+    expect(preview.getTool()?.cutting?.[0]).toMatchObject({ type: 'insert', shape: 'V', ic: 10 });
+    set('#insert-shape', 'W');
+    expect(preview.getTool()?.cutting?.[0]).toMatchObject({ shape: 'W' });
 
-    expect(cOutline).toBeTruthy();
-    expect(path()).toBeTruthy();
-    expect(path()).not.toBe(cOutline);
+    preview.pickVertex(2);
+    expect(field<HTMLInputElement>('#insert-zero-vertex').value).toBe('2');
+    expect(preview.getTool()?.cutting?.[0]).toMatchObject({ zeroVertex: 2 });
+
+    field<HTMLFormElement>('#tool-form').requestSubmit();
+    await vi.waitFor(async () => expect((await catalog.getTools()).map((tool) => tool.description)).toContain('V plate'));
+    const saved = (await catalog.getTools()).find((tool) => tool.description === 'V plate');
+    expect(saved?.cutting?.[0]).toMatchObject({ type: 'insert', shape: 'W', zeroVertex: 2 });
+  });
+
+  it('keeps turning metadata and the holder profile when a library tool is saved', async () => {
+    await vi.waitFor(() => expect(panel.shadowRoot?.querySelector('[data-library-id="default-turning-insert-A"]')).toBeTruthy());
+    (panel.shadowRoot!.querySelector('[data-library-id="default-turning-insert-A"]') as HTMLButtonElement).click();
+    (panel.shadowRoot!.querySelector('#tool-form') as HTMLFormElement).requestSubmit();
+    await vi.waitFor(async () => expect((await catalog.getTool('default-turning-insert-A'))?.revision).toBe(2));
+    expect(await catalog.getTool('default-turning-insert-A')).toMatchObject({
+      turning: { mount: 'front', approachAngle: 93 },
+      holder: [{ type: 'turningHolderProfile' }],
+      cutting: [{ type: 'insert', shape: 'A', zeroVertex: 0 }],
+    });
   });
 
   it('shows the selected machine simulation data without claiming unavailable pose output', async () => {

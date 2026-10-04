@@ -121,8 +121,7 @@ export class StateService {
     const raw = JSON.parse(jsonStr);
     return {
       ...raw,
-      toolPathMode: raw.toolPathMode === 'center' || raw.toolPathMode === 'simulation'
-        ? raw.toolPathMode : 'effective',
+      toolPathMode: raw.toolPathMode === 'simulation' ? 'simulation' : 'center',
       channels: new Map(raw.channels),
       activeProgramIds: new Map(raw.activeProgramIds || [])
     };
@@ -138,7 +137,7 @@ export class StateService {
       ]),
       activeProgramIds: new Map(),
       workbenchSelectedChannel: '1',
-      toolPathMode: 'effective',
+      toolPathMode: 'center',
       uiSettings: {
         timeGutterPosition: 'left',
         keywordListPosition: 'left',
@@ -230,12 +229,13 @@ export class StateService {
   }
 
   setToolPathMode(toolPathMode: ToolPathMode): void {
-    if (this.state.toolPathMode === toolPathMode) return;
+    const normalizedMode = toolPathMode === 'simulation' ? 'simulation' : 'center';
+    if (this.state.toolPathMode === normalizedMode) return;
 
     this.saveStateToHistory();
-    this.state.toolPathMode = toolPathMode;
+    this.state.toolPathMode = normalizedMode;
     this.persistState();
-    this.eventBus.publish(EVENT_NAMES.STATE_CHANGED, { toolPathMode });
+    this.eventBus.publish(EVENT_NAMES.STATE_CHANGED, { toolPathMode: normalizedMode });
   }
 
   updateUISettings(settings: Partial<UISettings>): void {

@@ -57,6 +57,10 @@ describe('simulation schema validation', () => {
     { cutting: [{ type: 'insert', shape: 'L', ic: 8, thickness: 4, noseRadius: 0, clearanceAngle: 7 }] },
     { cutting: [{ type: 'insert', shape: 'M', ic: 8, thickness: 4, noseRadius: 0, clearanceAngle: 7 }] },
     { cutting: [{ type: 'insert', shape: 'C', ic: 8, thickness: 4, noseRadius: 5, clearanceAngle: 7 }] },
+    { cutting: [{ type: 'insert', shape: 'C', ic: 8, thickness: 4, noseRadius: 0, clearanceAngle: 7, zeroVertex: -1 }] },
+    { cutting: [{ type: 'insert', shape: 'C', ic: 8, thickness: 4, noseRadius: 0, clearanceAngle: 7, zeroVertex: 1.5 }] },
+    { turning: { hand: 'right', mount: 'front', approachAngle: 93, activeCorner: 'front-right', reference: 'machineTip' } },
+    { holder: [{ type: 'turningHolderProfile', width: 12, depth: 12, outline: [[0, 0], [1, 1]] }] },
   ])('rejects invalid, ambiguous or unsupported geometry: %j', (patch) => {
     expect(() => validateProgramTool({ ...base, ...patch })).toThrow();
   });

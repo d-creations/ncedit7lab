@@ -222,7 +222,7 @@ export class ExecutedProgramService {
     const includesPoseRequest = toolPathMode === 'simulation' &&
       requests.length > 0 && requests.every((request) => request.simulation !== undefined);
     return {
-      toolPathMode: toolPathMode === 'simulation' ? 'center' : toolPathMode,
+      toolPathMode: 'center',
       ...(includesPoseRequest ? { poseContract: WORKPIECE_TOOL_REFERENCE_POSE_CONTRACT } : {}),
       machinedata: requests.map((request) => ({
         program: this.preprocessProgram(request.program),

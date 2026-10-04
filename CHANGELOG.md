@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **Cutting Edge Q Orientation (0–9)**: Added theoretical tool-tip alignment for turning inserts based on controller cutting edge direction $Q$ (1–9, 0) and nose radius $R$. The tool assembly shifts automatically so the tangential touch-off point (virtual tip) aligns with $(0, 0, 0)$.
+- **Reset Defaults in Tool Library**: Added a `Reset Defaults` button in the Tool Manager Library tab to reset standard default tools to factory presets while preserving custom user tools.
+
+### Changed
+- **Default Turning Insert Size**: Scaled standard turning insert presets from IC $9.525\,\text{mm}$ ($3/8^{\prime\prime}$) down to IC $4.7625\,\text{mm}$ ($\approx 4.8\,\text{mm}$ / $3/16^{\prime\prime}$), thickness to $1.59\,\text{mm}$, and nose radius to $0.2\,\text{mm}$ to match typical Swiss-lathe tooling.
+- **Default Tool Mounting Orientations**: Standardized turning inserts to `[0, 90, 0]`, front/radial milling tools to `[0, 90, 0]`, and counter-face tools to `[270, 0, 0]`.
+- **Automatic Library Migration**: Extended default-tool detection to automatically upgrade older stored standard library tools (including $12\,\text{mm}$ and $9.5\,\text{mm}$ inserts) to the new geometry, orientation, and $Q/R$ defaults upon loading.
+
+### Fixed
+- **Plot Tool Simulation Orientation**: Fixed double-application of tool mounting orientation in `NCToolpathPlot` where `pose.orientation` was premultiplied onto an already-oriented tool mesh, ensuring 3D plot orientation matches the preview 1:1.
+
 ## [1.1.0] - 2026-09-21
 
 ### Added

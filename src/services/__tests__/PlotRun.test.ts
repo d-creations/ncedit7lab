@@ -65,7 +65,7 @@ describe('completed plot runs', () => {
     expect(() => Object.assign(run.plotMetadata.segments[0].endPoint, { x: 999 })).toThrow();
     const wire = vi.mocked(backend.requestPlot).mock.calls[0][0];
     expect(Object.keys(wire)).toEqual(['toolPathMode', 'machinedata']);
-    expect(wire.toolPathMode).toBe('effective');
+    expect(wire.toolPathMode).toBe('center');
     expect(Object.keys(wire.machinedata[0])).toEqual(['program', 'machineName', 'canalNr', 'toolValues', 'customVariables']);
     expect(wire.machinedata[0].program).not.toContain('@NCE-SIM');
     expect(wire.machinedata[0].program).toContain('(ordinary comment)\nG1 X1');
@@ -93,7 +93,7 @@ describe('completed plot runs', () => {
     });
   });
 
-  it('sends effective mode as a path-only request without pose metadata', async () => {
+  it('normalizes legacy effective mode to a center path without pose metadata', async () => {
     const first = input();
     first.machineProfile = {
       machineName: 'FANUC_MILL_DEMO', controlType: 'FANUC', axes: ['X', 'Y', 'Z', 'B', 'C'],
@@ -106,7 +106,7 @@ describe('completed plot runs', () => {
     };
     await service.executePlotRun([first], true, 'effective');
     const wire = vi.mocked(backend.requestPlot).mock.calls[0][0];
-    expect(wire.toolPathMode).toBe('effective');
+    expect(wire.toolPathMode).toBe('center');
     expect(wire.poseContract).toBeUndefined();
     expect(wire.machinedata[0].simulation).toBeUndefined();
   });

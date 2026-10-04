@@ -5,7 +5,9 @@ import type {
   HolderPart,
   ProgramMaterialDefinition,
   ProgramToolDefinition,
+  TurningActiveCorner,
 } from '@services/tools/SimulationMetadata';
+import { buildInsertContour } from '@services/tools/InsertOutline';
 
 const TOOL_COLOR = 0xf4c542;
 const TOOL_MATERIAL = new THREE.MeshStandardMaterial({ color: TOOL_COLOR, metalness: 0.8, roughness: 0.3 });
@@ -36,75 +38,90 @@ function buildProfileGeometry(points: ReadonlyArray<readonly [number, number]>):
   return geometry;
 }
 
-export function getInsertOutline(shape: DeepReadonly<Extract<CuttingPart, { type: 'insert' }>>['shape'], radius: number): Array<[number, number]> {
-  const pointsByType: Record<string, Array<[number, number]>> = {
-    C: [[0, -radius], [0.68 * radius, -0.28 * radius], [radius, 0], [0.68 * radius, 0.28 * radius], [0, radius], [-0.68 * radius, 0.28 * radius], [-radius, 0], [-0.68 * radius, -0.28 * radius]],
-    D: [[0, -radius], [radius, -0.22 * radius], [radius, 0.22 * radius], [0, radius], [-radius, 0.22 * radius], [-radius, -0.22 * radius]],
-    V: [[0, -radius], [radius, -0.62 * radius], [radius * 0.68, 0], [0, radius], [-radius * 0.68, 0], [-radius, -0.62 * radius]],
-    W: [[0, -radius], [0.8 * radius, -0.75 * radius], [radius, -0.12 * radius], [0.62 * radius, 0.42 * radius], [-0.62 * radius, 0.42 * radius], [-radius, -0.12 * radius], [-0.8 * radius, -0.75 * radius]],
-    T: [[0, -radius], [radius, -0.7 * radius], [0.56 * radius, radius], [-0.56 * radius, radius], [-radius, -0.7 * radius]],
-    S: [[0, -radius], [radius, -0.92 * radius], [radius, 0.92 * radius], [-radius, 0.92 * radius], [-radius, -0.92 * radius]],
-    E: [[0, -radius], [0.9 * radius, -0.28 * radius], [radius, -0.12 * radius], [0.68 * radius, radius], [-0.68 * radius, radius], [-radius, -0.12 * radius], [-0.9 * radius, -0.28 * radius]],
-    H: [[0, -radius], [0.82 * radius, -0.66 * radius], [radius, -0.18 * radius], [0.7 * radius, radius], [-0.7 * radius, radius], [-radius, -0.18 * radius], [-0.82 * radius, -0.66 * radius]],
-    O: [[0, -radius], [0.92 * radius, -0.72 * radius], [radius, -0.26 * radius], [radius, 0.26 * radius], [0.92 * radius, 0.72 * radius], [0, radius], [-0.92 * radius, 0.72 * radius], [-radius, 0.26 * radius], [-radius, -0.26 * radius], [-0.92 * radius, -0.72 * radius]],
-    P: [[0, -radius], [0.8 * radius, -0.72 * radius], [radius, -0.24 * radius], [0.72 * radius, radius], [-0.72 * radius, radius], [-radius, -0.24 * radius], [-0.8 * radius, -0.72 * radius]],
-    L: [[0, -radius], [radius, -radius], [radius, radius], [-radius, radius], [-radius, -0.22 * radius]],
-    A: [[0, -radius], [0.84 * radius, -0.74 * radius], [radius * 0.2, radius], [-radius * 0.2, radius], [-0.84 * radius, -0.74 * radius]],
-    B: [[0, -radius], [0.8 * radius, -0.74 * radius], [radius * 0.24, radius], [-radius * 0.24, radius], [-0.8 * radius, -0.74 * radius]],
-    K: [[0, -radius], [0.82 * radius, -0.74 * radius], [radius, 0.2 * radius], [-radius, 0.2 * radius], [-0.82 * radius, -0.74 * radius]],
-  };
-  return pointsByType[shape] ?? pointsByType.D;
+type InsertPart = DeepReadonly<Extract<CuttingPart, { type: 'insert' }>>;
+
+function insertContour(part: InsertPart, corner?: TurningActiveCorner) {
+  return buildInsertContour({
+    shape: part.shape, ic: part.ic, noseRadius: part.noseRadius,
+    width: part.width, length: part.length, zeroVertex: part.zeroVertex,
+  }, corner);
 }
 
-function activeCornerOffset(
-  polygon: Array<[number, number]>,
-  corner: 'front-right' | 'front-left' | 'back-right' | 'back-left' | 'center' | undefined,
-): [number, number] {
-  if (!corner || corner === 'center') return [0, 0];
-  const x = corner.endsWith('right') ? Math.max(...polygon.map(([value]) => value)) : Math.min(...polygon.map(([value]) => value));
-  const y = corner.startsWith('front') ? Math.min(...polygon.map(([, value]) => value)) : Math.max(...polygon.map(([, value]) => value));
-  return [x, y];
-}
-
-function buildInsertGeometry(
-  part: DeepReadonly<Extract<CuttingPart, { type: 'insert' }>>,
-  activeCorner?: 'front-right' | 'front-left' | 'back-right' | 'back-left' | 'center',
-): THREE.BufferGeometry {
+function buildInsertGeometry(part: InsertPart, corner?: TurningActiveCorner): THREE.BufferGeometry {
   const thickness = Math.max(0.2, part.thickness);
-  const radius = Math.max(0.1, part.ic / 2);
-
-  if (part.shape === 'R') {
-    const geometry = new THREE.CylinderGeometry(radius, radius, thickness, 32);
-    geometry.rotateX(Math.PI / 2);
-    return normalizeGeometryToLocalTip(geometry);
-  }
-
-  const polygon = getInsertOutline(part.shape, radius);
-  if (part.width !== undefined && part.length !== undefined && ['A', 'B', 'K', 'L'].includes(part.shape)) {
-    const widthScale = part.width / (2 * radius);
-    const lengthScale = part.length / (2 * radius);
-    polygon.forEach((point) => { point[0] *= widthScale; point[1] *= lengthScale; });
-  }
-  const [offsetX, offsetY] = activeCornerOffset(polygon, activeCorner);
-  polygon.forEach((point) => { point[0] -= offsetX; point[1] -= offsetY; });
-  const shape = new THREE.Shape();
-  shape.moveTo(polygon[0][0], polygon[0][1]);
-  for (let i = 1; i < polygon.length; i++) {
-    shape.lineTo(polygon[i][0], polygon[i][1]);
-  }
-  shape.closePath();
-
-  const geometry = new THREE.ExtrudeGeometry(shape, {
-    depth: thickness,
-    bevelEnabled: part.noseRadius > 0,
-    bevelSegments: 3,
-    bevelSize: Math.min(part.noseRadius, thickness / 3),
-    bevelThickness: Math.min(part.noseRadius, thickness / 3),
-  });
+  const shape = new THREE.Shape(insertContour(part, corner).contour.map(([x, y]) => new THREE.Vector2(x, y)));
+  const geometry = new THREE.ExtrudeGeometry(shape, { depth: thickness, bevelEnabled: false });
+  // Outline Y becomes tool Z; the plate thickness is centred on the Y=0 plane.
   geometry.rotateX(Math.PI / 2);
-  geometry.translate(0, 0, -0.5 * thickness);
+  geometry.translate(0, thickness / 2, 0);
   geometry.computeVertexNormals();
-  return normalizeGeometryToLocalTip(geometry);
+  return geometry;
+}
+
+export interface InsertPickPoint {
+  index: number;
+  position: [number, number, number];
+  active: boolean;
+}
+
+export const TURN_Q_VECTORS: Record<number, readonly [number, number]> = {
+  1: [-1, -1],
+  2: [1, -1],
+  3: [1, 1],
+  4: [-1, 1],
+  5: [0, -1],
+  6: [1, 0],
+  7: [0, 1],
+  8: [-1, 0],
+  9: [0, 0],
+  0: [0, 0],
+};
+
+export function getInsertQShift(tool: DeepReadonly<ProgramToolDefinition>): THREE.Vector3 {
+  if (tool.Q === undefined) return new THREE.Vector3();
+  const qVector = TURN_Q_VECTORS[tool.Q];
+  if (!qVector) return new THREE.Vector3();
+
+  const part = tool.cutting?.find((candidate): candidate is InsertPart => candidate.type === 'insert');
+  if (!part || !part.noseRadius || part.noseRadius <= 0) return new THREE.Vector3();
+
+  const contour = insertContour(part, tool.turning?.activeCorner);
+  if (!contour.radiusCenter) return new THREE.Vector3();
+
+  const R = part.noseRadius;
+  // Outline (x, y) maps to 3D (x, 0, y) where x is tool X and y is tool Z
+  const localM = new THREE.Vector3(contour.radiusCenter[0], 0, contour.radiusCenter[1]);
+  const euler = new THREE.Euler(
+    THREE.MathUtils.degToRad(part.rotation?.[0] ?? 0),
+    THREE.MathUtils.degToRad(part.rotation?.[1] ?? 0),
+    THREE.MathUtils.degToRad(part.rotation?.[2] ?? 0),
+    'ZYX',
+  );
+  const rotatedM = localM.applyEuler(euler);
+
+  const targetX = qVector[0] * R;
+  const targetZ = qVector[1] * R;
+
+  return new THREE.Vector3(targetX - rotatedM.x, 0, targetZ - rotatedM.z);
+}
+
+/** Sharp outline vertices of the first insert in assembly coordinates (before tool orientation). */
+export function getInsertPickPoints(tool: DeepReadonly<ProgramToolDefinition>): InsertPickPoint[] {
+  const part = tool.cutting?.find((candidate): candidate is InsertPart => candidate.type === 'insert');
+  if (!part) return [];
+  const { sharp, zeroIndex } = insertContour(part, tool.turning?.activeCorner);
+  const qShift = getInsertQShift(tool);
+  const euler = new THREE.Euler(
+    THREE.MathUtils.degToRad(part.rotation?.[0] ?? 0),
+    THREE.MathUtils.degToRad(part.rotation?.[1] ?? 0),
+    THREE.MathUtils.degToRad(part.rotation?.[2] ?? 0),
+    'ZYX',
+  );
+  const offset = new THREE.Vector3(...(part.position ?? [0, 0, 0])).add(qShift);
+  return sharp.map(([x, y], index) => {
+    const point = new THREE.Vector3(x, 0, y).applyEuler(euler).add(offset);
+    return { index, position: point.toArray() as [number, number, number], active: index === zeroIndex };
+  });
 }
 
 function buildTurningHolderGeometry(
@@ -115,8 +132,8 @@ function buildTurningHolderGeometry(
   part.outline.slice(1).forEach(([x, z]) => shape.lineTo(x, z));
   shape.closePath();
   const geometry = new THREE.ExtrudeGeometry(shape, { depth: part.depth, bevelEnabled: false });
+  // Outline is a top view in X/Z; the holder body extends downward from Y=0.
   geometry.rotateX(Math.PI / 2);
-  geometry.translate(0, part.depth / 2, 0);
   return geometry;
 }
 
@@ -125,7 +142,9 @@ function addPart(
   part: DeepReadonly<HolderPart | CuttingPart>,
   material: THREE.Material,
   fromTip: boolean,
-  activeCorner?: 'front-right' | 'front-left' | 'back-right' | 'back-left' | 'center',
+  activeCorner?: TurningActiveCorner,
+  seatY = 0,
+  shift?: THREE.Vector3,
 ): void {
   let geometry: THREE.BufferGeometry;
   let length: number;
@@ -158,13 +177,15 @@ function addPart(
   // Three.js cylinders and lathed profiles use Y as their length axis; persisted tool
   // transforms always use the canonical assembly Z axis.
   if (needsAxisCorrection) geometry.rotateX(Math.PI / 2);
-  if (fromTip) geometry = normalizeGeometryToLocalTip(geometry);
+  // Inserts define their own zero vertex; re-normalizing would move the virtual tip.
+  if (fromTip && part.type !== 'insert') geometry = normalizeGeometryToLocalTip(geometry);
 
+  const turningHolder = part.type === 'turningHolderProfile';
   const mesh = new THREE.Mesh(geometry, material);
   mesh.position.set(
-    part.position?.[0] ?? 0,
-    part.position?.[1] ?? 0,
-    part.position?.[2] ?? (fromTip ? 0 : (('stickOut' in part ? part.stickOut : 0) ?? 0) + length / 2),
+    (part.position?.[0] ?? 0) + (shift?.x ?? 0),
+    part.position?.[1] ?? (turningHolder ? seatY : 0),
+    (part.position?.[2] ?? (turningHolder || fromTip ? 0 : (('stickOut' in part ? part.stickOut : 0) ?? 0) + length / 2)) + (shift?.z ?? 0),
   );
   if (part.rotation) {
     mesh.rotation.order = 'ZYX';
@@ -185,8 +206,12 @@ export class ToolGeometryFactory {
 
     const group = new THREE.Group();
     group.name = `tool-${String(tool.toolNumber)}`;
-    cutting.forEach((part) => addPart(group, part, CUTTING_MATERIAL, true, tool.turning?.activeCorner));
-    tool.holder?.forEach((part) => addPart(group, part, TOOL_MATERIAL, false, tool.turning?.activeCorner));
+    const insert = cutting.find((part) => part.type === 'insert');
+    // The holder body sits directly below the plate.
+    const seatY = insert?.type === 'insert' ? -insert.thickness / 2 : 0;
+    const qShift = getInsertQShift(tool);
+    cutting.forEach((part) => addPart(group, part, CUTTING_MATERIAL, true, tool.turning?.activeCorner, 0, qShift));
+    tool.holder?.forEach((part) => addPart(group, part, TOOL_MATERIAL, false, tool.turning?.activeCorner, seatY, qShift));
     if (tool.orientation) {
       group.rotation.order = 'ZYX';
       group.rotation.set(

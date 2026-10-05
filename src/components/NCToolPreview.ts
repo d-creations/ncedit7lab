@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import type { ProgramToolDefinition } from '@services/tools/SimulationMetadata';
+import type { ProgramMaterialDefinition, ProgramToolDefinition } from '@services/tools/SimulationMetadata';
 import { getInsertPickPoints, ToolGeometryFactory } from './ToolGeometryFactory';
+import { getMaterialPickPoints, MaterialGeometryFactory, type MaterialPickPoint } from './MaterialGeometryFactory';
 
 export type PreviewView = '3d' | 'xy' | 'xz' | 'yz';
 
@@ -43,6 +44,7 @@ function disposeObject(root: THREE.Object3D, ownMaterials: boolean): void {
 /** Live 3D tool preview with world axes; outline vertices of the plate can be clicked to pick the zero point. */
 export class NCToolPreview extends HTMLElement {
   private tool?: ProgramToolDefinition;
+  private material?: ProgramMaterialDefinition;
   private view: PreviewView = 'xz';
   private message = '';
   private messageIsError = false;
@@ -85,6 +87,18 @@ export class NCToolPreview extends HTMLElement {
 
   setTool(tool: ProgramToolDefinition | undefined): void {
     this.tool = tool;
+    this.material = undefined;
+    this.message = '';
+    if (this.initialized) this.rebuild(false);
+  }
+
+  getMaterial(): ProgramMaterialDefinition | undefined {
+    return this.material;
+  }
+
+  setMaterial(material: ProgramMaterialDefinition): void {
+    this.material = material;
+    this.tool = undefined;
     this.message = '';
     if (this.initialized) this.rebuild(false);
   }
@@ -188,11 +202,13 @@ export class NCToolPreview extends HTMLElement {
 
   private rebuild(forceFit: boolean): void {
     this.disposeTool();
-    const group = this.tool ? this.factory.create(this.tool) : undefined;
-    if (group && this.tool) {
+    const group = this.material ? new MaterialGeometryFactory().create(this.material) :
+      this.tool ? this.factory.create(this.tool) : undefined;
+    if (group) {
       this.toolGroup = group;
       this.scene.add(group);
-      this.addMarkers(group, this.tool);
+      this.addMarkers(group, this.material ? getMaterialPickPoints(this.material) :
+        this.tool ? getInsertPickPoints(this.tool) : []);
     }
     this.updateDecor();
     if (group && (forceFit || !this.fitted)) {
@@ -210,8 +226,7 @@ export class NCToolPreview extends HTMLElement {
     return box.getBoundingSphere(new THREE.Sphere());
   }
 
-  private addMarkers(group: THREE.Group, tool: ProgramToolDefinition): void {
-    const points = getInsertPickPoints(tool);
+  private addMarkers(group: THREE.Group, points: MaterialPickPoint[]): void {
     if (!points.length) return;
     const size = Math.min(1, Math.max(0.15, this.bounds().radius * 0.025));
     const geometry = new THREE.SphereGeometry(size, 12, 8);
@@ -317,10 +332,11 @@ export class NCToolPreview extends HTMLElement {
   private updateNote(): void {
     const note = this.shadowRoot?.querySelector<HTMLElement>('.note');
     if (!note) return;
-    const hasPoints = this.markers.length > 0 || (this.tool ? getInsertPickPoints(this.tool).length > 0 : false);
+    const hasPoints = this.markers.length > 0;
     note.classList.toggle('error', this.messageIsError && Boolean(this.message));
     note.textContent = this.message ||
-      (hasPoints ? 'Click a plate vertex to make it the zero point (green). Axes: X red, Y green, Z blue.' : '');
+      (hasPoints ? `${this.material?.type === 'cylinder' ? 'Click an end-face centre' :
+        this.material ? 'Click a stock corner' : 'Click a plate vertex'} to make it the zero point (green). Axes: X red, Y green, Z blue.` : '');
   }
 }
 

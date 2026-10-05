@@ -8,11 +8,11 @@ import type {
   TurningActiveCorner,
 } from '@services/tools/SimulationMetadata';
 import { buildInsertContour } from '@services/tools/InsertOutline';
+import { MaterialGeometryFactory } from './MaterialGeometryFactory';
 
 const TOOL_COLOR = 0xf4c542;
 const TOOL_MATERIAL = new THREE.MeshStandardMaterial({ color: TOOL_COLOR, metalness: 0.8, roughness: 0.3 });
 const CUTTING_MATERIAL = new THREE.MeshStandardMaterial({ color: TOOL_COLOR, metalness: 0.55, roughness: 0.25 });
-const MATERIAL_MESH_MATERIAL = new THREE.MeshStandardMaterial({ color: 0xd9c7a6, metalness: 0.25, roughness: 0.8 });
 
 function normalizeGeometryToLocalTip(geometry: THREE.BufferGeometry): THREE.BufferGeometry {
   const clone = geometry.clone();
@@ -224,22 +224,6 @@ export class ToolGeometryFactory {
   }
 
   createMaterialMesh(material: DeepReadonly<ProgramMaterialDefinition>): THREE.Group | undefined {
-    const group = new THREE.Group();
-    const position = material.position ?? [0, 0, 0];
-
-    if (material.type === 'box') {
-      const mesh = new THREE.Mesh(new THREE.BoxGeometry(material.width, material.height, material.depth), MATERIAL_MESH_MATERIAL);
-      mesh.position.set(position[0], position[1], position[2]);
-      group.add(mesh);
-    } else if (material.type === 'cylinder') {
-      const mesh = new THREE.Mesh(new THREE.CylinderGeometry(material.diameter / 2, material.diameter / 2, material.length, 32), MATERIAL_MESH_MATERIAL);
-      mesh.position.set(position[0], position[1], position[2]);
-      mesh.rotation.x = Math.PI / 2;
-      group.add(mesh);
-    } else {
-      return undefined;
-    }
-
-    return group;
+    return new MaterialGeometryFactory().create(material);
   }
 }

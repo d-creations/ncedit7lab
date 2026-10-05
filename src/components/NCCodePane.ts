@@ -10,6 +10,7 @@ import type { ProgramSource } from '@services/tools/ProgramToolService';
 import type {
   ProgramMetadataEditService,
   ProgramOffsetsUpdateRequest,
+  ProgramSetupUpdateRequest,
   ProgramToolUpdateRequest,
   ProgramToolUpdateResult,
 } from '@services/tools/ProgramMetadataEditService';
@@ -45,6 +46,7 @@ export class NCCodePane extends HTMLElement {
   private editorScrollSubscription?: EventSubscription;
   private toolUpdateSubscription?: EventSubscription;
   private offsetsUpdateSubscription?: EventSubscription;
+  private setupUpdateSubscription?: EventSubscription;
   private metadataEdits: ProgramMetadataEditService;
   private scrollSyncEnabled = false;
   private isApplyingSyncedScroll = false;
@@ -140,6 +142,10 @@ export class NCCodePane extends HTMLElement {
       EVENT_NAMES.PROGRAM_OFFSETS_UPDATE_REQUEST,
       (data: unknown) => this.applyProgramOffsetsUpdate(data as ProgramOffsetsUpdateRequest),
     );
+    this.setupUpdateSubscription = this.eventBus.subscribe(
+      EVENT_NAMES.PROGRAM_SETUP_UPDATE_REQUEST,
+      (data: unknown) => this.applyProgramSetupUpdate(data as ProgramSetupUpdateRequest),
+    );
 
     this.scrollSyncSubscription = this.eventBus.subscribe(
       EVENT_NAMES.ALIGNMENT_SCROLL_SYNC_CHANGED,
@@ -209,6 +215,18 @@ export class NCCodePane extends HTMLElement {
       if (message.type === 'TRIGGER_REPLACE') {
         this.editor.execCommand('replace');
       }
+
+      if (message.type === 'PROGRAM_TOOL_UPDATE_REQUEST') {
+        this.applyProgramToolUpdate(message.payload);
+      }
+
+      if (message.type === 'PROGRAM_OFFSETS_UPDATE_REQUEST') {
+        this.applyProgramOffsetsUpdate(message.payload);
+      }
+
+      if (message.type === 'PROGRAM_SETUP_UPDATE_REQUEST') {
+        this.applyProgramSetupUpdate(message.payload);
+      }
       
       if (message.type === 'FILE_UPDATED_EXTERNALLY') {
         // Update to handle external text injection, optionally scoping by channel if provided
@@ -244,6 +262,7 @@ export class NCCodePane extends HTMLElement {
     }
     this.toolUpdateSubscription?.unsubscribe();
     this.offsetsUpdateSubscription?.unsubscribe();
+    this.setupUpdateSubscription?.unsubscribe();
     if (this.resizeObserver) {
       this.resizeObserver.disconnect();
     }
@@ -650,7 +669,7 @@ export class NCCodePane extends HTMLElement {
       result = { requestId: request.requestId, channelId: this.channelId, success: false,
         message: cause instanceof Error ? cause.message : String(cause) };
     }
-    this.eventBus.publish(EVENT_NAMES.PROGRAM_TOOL_UPDATE_RESULT, result);
+    this.notifyToolUpdateResult(EVENT_NAMES.PROGRAM_TOOL_UPDATE_RESULT, result);
   }
 
   private applyProgramOffsetsUpdate(request: ProgramOffsetsUpdateRequest): void {
@@ -673,7 +692,38 @@ export class NCCodePane extends HTMLElement {
       result = { requestId: request.requestId, channelId: this.channelId, success: false,
         message: cause instanceof Error ? cause.message : String(cause) };
     }
-    this.eventBus.publish(EVENT_NAMES.PROGRAM_OFFSETS_UPDATE_RESULT, result);
+    this.notifyToolUpdateResult(EVENT_NAMES.PROGRAM_OFFSETS_UPDATE_RESULT, result);
+  }
+
+  private applyProgramSetupUpdate(request: ProgramSetupUpdateRequest): void {
+    if (request.channelId !== this.channelId) return;
+    let result: ProgramToolUpdateResult;
+    try {
+      const source = this.getProgramSource();
+      if (!source || source.identity.documentId !== request.documentId ||
+        source.identity.programId !== request.programId ||
+        source.revision !== request.expectedRevision || source.text !== request.expectedText) {
+        throw new Error('Program changed; reload Raw Material before applying');
+      }
+      const edit = this.metadataEdits.planSetupUpdate(source.text, request.setup, request.syntax);
+      const nextText = source.text.slice(0, edit.startOffset) + edit.text + source.text.slice(edit.endOffset);
+      this.setValue(nextText);
+      this.syncEditorValue(nextText);
+      result = { requestId: request.requestId, channelId: this.channelId, success: true,
+        message: 'Applied raw material setup to the program' };
+    } catch (cause) {
+      result = { requestId: request.requestId, channelId: this.channelId, success: false,
+        message: cause instanceof Error ? cause.message : String(cause) };
+    }
+    this.notifyToolUpdateResult(EVENT_NAMES.PROGRAM_SETUP_UPDATE_RESULT, result);
+  }
+
+  private notifyToolUpdateResult(eventName: string, result: ProgramToolUpdateResult): void {
+    this.eventBus.publish(eventName, result);
+    const win = window as any;
+    if (win.vscodeApi && typeof win.vscodeApi.postMessage === 'function') {
+      win.vscodeApi.postMessage({ type: eventName, payload: result });
+    }
   }
 
   private applyTemplateInsert(payload: TemplateInsertEventPayload): void {

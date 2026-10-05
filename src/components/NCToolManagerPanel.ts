@@ -2,12 +2,14 @@ import type { ChannelId, ParseArtifacts, ToolOffsetValue } from '@core/types';
 import { ServiceRegistry } from '@core/ServiceRegistry';
 import {
   EVENT_BUS_TOKEN,
+  FILE_MANAGER_SERVICE_TOKEN,
   PARSER_SERVICE_TOKEN,
   PROGRAM_TOOL_SERVICE_TOKEN,
   STATE_SERVICE_TOKEN,
   TOOL_CATALOG_SERVICE_TOKEN,
 } from '@core/ServiceTokens';
 import { EventBus, EVENT_NAMES, type EventSubscription } from '@services/EventBus';
+import type { IFileManagerService } from '@services/IFileManagerService';
 import { ParserService } from '@services/ParserService';
 import { StateService } from '@services/StateService';
 import type { ProgramSource, ProgramToolSnapshot } from '@services/tools/ProgramToolService';
@@ -17,15 +19,18 @@ import type {
   HolderPart,
   InsertShape,
   ProgramToolDefinition,
+  ProgramMaterialDefinition,
+  ProgramSetupDefinition,
   ToolIdentifier,
   Vector3,
 } from '@services/tools/SimulationMetadata';
-import { validateProgramTool } from '@services/tools/SimulationMetadata';
+import { validateProgramMaterial, validateProgramTool } from '@services/tools/SimulationMetadata';
 import type { LibraryToolDefinition } from '@services/tools/ToolLibraryTypes';
 import { toProgramToolDefinition } from '@services/tools/ToolLibraryTypes';
 import { ToolCatalogService } from '@services/tools/ToolCatalogService';
 import type {
   ProgramOffsetsUpdateRequest,
+  ProgramSetupUpdateRequest,
   ProgramToolUpdateRequest,
   ProgramToolUpdateResult,
 } from '@services/tools/ProgramMetadataEditService';
@@ -35,7 +40,7 @@ import type { NCToolPreview } from './NCToolPreview';
 const CHANNELS: ChannelId[] = ['1', '2', '3'];
 const INSERT_SHAPES: InsertShape[] = ['C', 'D', 'V', 'W', 'T', 'S', 'R', 'E', 'H', 'O', 'P', 'L', 'A', 'B', 'K'];
 
-type ManagerTab = 'library' | 'program' | 'offsets' | 'simulation';
+type ManagerTab = 'library' | 'program' | 'material' | 'offsets' | 'simulation';
 
 function exactKey(value: ToolIdentifier): string {
   return JSON.stringify([typeof value, value]);
@@ -64,7 +69,10 @@ export class NCToolManagerPanel extends HTMLElement {
   private readonly parserService: ParserService;
   private readonly programTools: ProgramToolService;
   private readonly catalog: ToolCatalogService;
+  private readonly fileManager?: IFileManagerService;
   private subscriptions: EventSubscription[] = [];
+  private hostChannelListener?: (event: Event) => void;
+  private hostMessageListener?: (event: MessageEvent) => void;
   private activeTab: ManagerTab = 'library';
   private channelId: ChannelId = '1';
   private libraryTools: LibraryToolDefinition[] = [];
@@ -77,6 +85,7 @@ export class NCToolManagerPanel extends HTMLElement {
   private detectedIdentifiers: ToolIdentifier[] = [];
   private selectedProgramKey?: string;
   private programDraft?: ProgramToolDefinition;
+  private materialDraft?: ProgramMaterialDefinition;
   private offsetDrafts: ToolOffsetValue[] = [];
   private pendingRequestId?: string;
   private previewElement?: NCToolPreview;
@@ -91,6 +100,7 @@ export class NCToolManagerPanel extends HTMLElement {
     this.parserService = registry.get(PARSER_SERVICE_TOKEN);
     this.programTools = registry.get(PROGRAM_TOOL_SERVICE_TOKEN);
     this.catalog = registry.get(TOOL_CATALOG_SERVICE_TOKEN);
+    this.fileManager = registry.has(FILE_MANAGER_SERVICE_TOKEN) ? registry.get(FILE_MANAGER_SERVICE_TOKEN) : undefined;
     this.attachShadow({ mode: 'open' });
   }
 
@@ -102,6 +112,9 @@ export class NCToolManagerPanel extends HTMLElement {
         void this.handleUpdateResult(data as ProgramToolUpdateResult);
       }),
       this.eventBus.subscribe(EVENT_NAMES.PROGRAM_OFFSETS_UPDATE_RESULT, (data: unknown) => {
+        void this.handleUpdateResult(data as ProgramToolUpdateResult);
+      }),
+      this.eventBus.subscribe(EVENT_NAMES.PROGRAM_SETUP_UPDATE_RESULT, (data: unknown) => {
         void this.handleUpdateResult(data as ProgramToolUpdateResult);
       }),
       this.eventBus.subscribe('program:active_changed', (data: { channelId: string }) => {
@@ -120,6 +133,25 @@ export class NCToolManagerPanel extends HTMLElement {
         (data: { channelId: ChannelId; missing: ToolIdentifier[] }) => void this.handleToolManagerOpenRequest(data),
       ),
     );
+
+    this.hostChannelListener = (event: Event) => {
+      const detail = (event as CustomEvent).detail;
+      if (detail?.activeChannel && ['1', '2', '3'].includes(detail.activeChannel)) {
+        this.channelId = detail.activeChannel as ChannelId;
+        this.selectedProgramKey = undefined;
+        void this.loadProgram();
+      }
+    };
+    window.addEventListener('vscode:files-opened', this.hostChannelListener);
+
+    this.hostMessageListener = (event: MessageEvent) => {
+      const data = event.data;
+      if (data?.type === 'PROGRAM_TOOL_UPDATE_RESULT') {
+        void this.handleUpdateResult(data.payload as ProgramToolUpdateResult);
+      }
+    };
+    window.addEventListener('message', this.hostMessageListener);
+
     await Promise.all([this.loadLibrary(false), this.loadProgram(false)]);
     this.render();
   }
@@ -127,6 +159,12 @@ export class NCToolManagerPanel extends HTMLElement {
   disconnectedCallback(): void {
     this.subscriptions.forEach((subscription) => subscription.unsubscribe());
     this.subscriptions = [];
+    if (this.hostChannelListener) {
+      window.removeEventListener('vscode:files-opened', this.hostChannelListener);
+    }
+    if (this.hostMessageListener) {
+      window.removeEventListener('message', this.hostMessageListener);
+    }
   }
 
   private async loadLibrary(render = true): Promise<void> {
@@ -149,6 +187,7 @@ export class NCToolManagerPanel extends HTMLElement {
     this.programSource = this.readProgramSource();
     this.programSnapshot = undefined;
     this.programDefinitions = [];
+    this.materialDraft = undefined;
     if (!this.programSource) {
       this.setStatus(`No active program for channel ${this.channelId}`, 'error', false);
       if (render) this.render();
@@ -162,6 +201,9 @@ export class NCToolManagerPanel extends HTMLElement {
       machine?.simulationCommentSyntax,
     );
     this.programDefinitions = structuredClone(this.programSnapshot.tools) as ProgramToolDefinition[];
+    this.materialDraft = this.programSnapshot.setup?.material
+      ? structuredClone(this.programSnapshot.setup.material) as ProgramMaterialDefinition
+      : { type: 'cylinder', diameter: 20, length: 100, zeroVertex: 1 };
     this.offsetDrafts = this.programTools.getTemporaryToolOffsets(this.programSource.identity);
     const persistedOffsets = this.programSnapshot.offsets;
     const policy = machine?.toolSelection;
@@ -238,7 +280,22 @@ export class NCToolManagerPanel extends HTMLElement {
     const pane = document.querySelector(
       `nc-channel-pane[data-channel="${this.channelId}"] nc-code-pane`,
     ) as (HTMLElement & { getProgramSource(): ProgramSource | undefined }) | null;
-    return pane?.getProgramSource();
+    if (pane) {
+      return pane.getProgramSource();
+    }
+    const program = this.fileManager?.getActiveProgram(this.channelId);
+    if (program) {
+      return {
+        identity: {
+          channelId: this.channelId,
+          documentId: program.id,
+          programId: program.name || `Channel ${this.channelId}`,
+        },
+        revision: 0,
+        text: program.content,
+      };
+    }
+    return undefined;
   }
 
   private newProgramTool(toolNumber: ToolIdentifier = 1): ProgramToolDefinition {
@@ -273,12 +330,14 @@ export class NCToolManagerPanel extends HTMLElement {
         <nav class="manager-tabs" aria-label="Tool manager views">
           <button class="manager-tab ${this.activeTab === 'library' ? 'active' : ''}" data-manager-tab="library">Library</button>
           <button class="manager-tab ${this.activeTab === 'program' ? 'active' : ''}" data-manager-tab="program">Program Tools</button>
+          <button class="manager-tab ${this.activeTab === 'material' ? 'active' : ''}" data-manager-tab="material">Raw Material</button>
           <button class="manager-tab ${this.activeTab === 'offsets' ? 'active' : ''}" data-manager-tab="offsets">Offsets</button>
           <button class="manager-tab ${this.activeTab === 'simulation' ? 'active' : ''}" data-manager-tab="simulation">Simulation</button>
         </nav>
         <div class="manager-body">
           ${this.activeTab === 'library' ? this.renderLibrary() :
             this.activeTab === 'program' ? this.renderProgram() :
+              this.activeTab === 'material' ? this.renderMaterial() :
               this.activeTab === 'offsets' ? this.renderOffsets() : this.renderSimulation()}
         </div>
         <div id="manager-status" class="status ${this.statusKind}" role="status" aria-live="polite">${this.escape(this.status)}</div>
@@ -420,6 +479,90 @@ export class NCToolManagerPanel extends HTMLElement {
         <div class="simulation-list">${simulation.toolMounts.map((mount) => `<div class="simulation-row"><strong>CH ${this.escape(mount.channelId)}</strong><span>${this.escape(mount.carrierId)} → ${this.escape(mount.target.mode === 'fixed' ? mount.target.workpieceCarrierId : mount.target.allowedWorkpieceCarrierIds.join(', '))}</span><span>${mount.tools.kind === 'numericRange' ? `Tools ${mount.tools.from}-${mount.tools.to}` : mount.tools.values.map(String).join(', ')}</span></div>`).join('')}</div>
       </section>
     </main>`;
+  }
+
+  private renderMaterial(): string {
+    const material = this.materialDraft;
+    if (!material) return '<main class="tool-editor-pane material-editor-pane"><div class="empty">Select an active program to define raw material.</div></main>';
+    const syntax = this.stateService.getState().activeMachine?.simulationCommentSyntax;
+    const diagnostic = this.programSnapshot?.diagnostics.map((item) => item.message).join('; ');
+    const dimensions = material.type === 'cylinder'
+      ? [['diameter', 'Diameter'], ['length', 'Length (Z)']] as const
+      : [['width', 'Width (X)'], ['height', 'Height (Y)'], ['depth', 'Depth (Z)']] as const;
+    const values: Record<string, number> = material.type === 'cylinder'
+      ? { diameter: material.diameter, length: material.length }
+      : { width: material.width, height: material.height, depth: material.depth };
+    return `<main class="tool-editor-pane material-editor-pane">
+      ${!syntax ? '<div class="notice warning">The selected machine does not advertise a safe simulation-comment syntax. Apply to Program is disabled.</div>' : ''}
+      ${diagnostic ? `<div class="notice error">${this.escape(diagnostic)}</div>` : ''}
+      <form id="material-form" class="tool-form">
+        <section><div class="section-heading"><h3>Raw Material</h3><span>Distances in mm</span></div>
+          <label>Shape<select id="material-type">${this.option('cylinder', 'Round stock', material.type)}${this.option('box', 'Plate / rectangular stock', material.type)}</select></label>
+          <div class="field-grid compact">${dimensions.map(([key, label]) => `<label>${label}<input id="material-${key}" type="number" min="0" step="any" value="${values[key]}"></label>`).join('')}</div>
+          <label>Zero point<select id="material-zero">
+            ${this.option('', 'Centre (legacy placement)', material.zeroVertex === undefined ? '' : String(material.zeroVertex))}
+            ${Array.from({ length: material.type === 'cylinder' ? 2 : 8 }, (_, index) => this.option(
+              String(index), material.type === 'cylinder' ? `End ${index}: ${index ? '+Z' : '-Z'} face centre` :
+                `Corner ${index}: ${index & 1 ? '+X' : '-X'}, ${index & 2 ? '+Y' : '-Y'}, ${index & 4 ? '+Z' : '-Z'}`,
+              String(material.zeroVertex),
+            )).join('')}
+          </select></label>
+          <div class="notice">Click an end-face centre or one of the eight corners in the preview to select the material zero.</div>
+          <div id="material-preview-slot"></div>
+        </section>
+        <section><div class="section-heading"><h3>Placement</h3><span>Initial program work coordinates</span></div>
+          <p>Position locates the selected zero point. Rotation is about that point.</p>
+          <div class="field-grid transform-grid">${['x', 'y', 'z'].map((axis, index) => `<label>Position ${axis.toUpperCase()}<input id="material-p${axis}" type="number" step="any" value="${material.position?.[index] ?? 0}"></label>`).join('')}</div>
+          <div class="field-grid transform-grid">${['x', 'y', 'z'].map((axis, index) => `<label>Rotation ${axis.toUpperCase()}<input id="material-r${axis}" type="number" step="any" value="${material.rotation?.[index] ?? 0}"></label>`).join('')}</div>
+        </section>
+        <div class="form-actions">
+          <button class="button primary" type="submit" ${!syntax || this.pendingRequestId || diagnostic ? 'disabled' : ''}>Apply Raw Material to Program</button>
+          <button class="button" id="remove-material" type="button" ${!syntax || this.pendingRequestId || diagnostic || !this.programSnapshot?.setup?.material ? 'disabled' : ''}>Remove Program Material</button>
+        </div>
+        <div class="notice">Stored in the program's managed SETUP comments; executable NC commands are unchanged.</div>
+      </form>
+    </main>`;
+  }
+
+  private buildMaterialFromForm(): ProgramMaterialDefinition {
+    const input = (key: string) => this.shadowRoot?.querySelector<HTMLInputElement>(`#material-${key}`) ?? null;
+    const zero = this.shadowRoot?.querySelector<HTMLSelectElement>('#material-zero')?.value;
+    const common = {
+      ...this.readTransform('material'),
+      ...(zero === '' || zero === undefined ? {} : { zeroVertex: Number(zero) }),
+    };
+    const material: ProgramMaterialDefinition = this.shadowRoot?.querySelector<HTMLSelectElement>('#material-type')?.value === 'box'
+      ? { type: 'box', width: requiredNumber(input('width')), height: requiredNumber(input('height')),
+        depth: requiredNumber(input('depth')), ...common }
+      : { type: 'cylinder', diameter: requiredNumber(input('diameter')), length: requiredNumber(input('length')), ...common };
+    validateProgramMaterial(material);
+    return material;
+  }
+
+  private applyProgramMaterial(remove = false): void {
+    try {
+      if (this.pendingRequestId) throw new Error('A program update is already pending');
+      const machine = this.stateService.getState().activeMachine;
+      if (!this.programSource || !machine?.simulationCommentSyntax) {
+        throw new Error('An active program and a safe simulation-comment syntax are required');
+      }
+      const setup: ProgramSetupDefinition = {
+        machineName: this.programSnapshot?.setup?.machineName ?? machine.machineName,
+        ...(remove ? {} : { material: this.buildMaterialFromForm() }),
+      };
+      const request: ProgramSetupUpdateRequest = {
+        requestId: createId('setup'), channelId: this.channelId,
+        documentId: this.programSource.identity.documentId, programId: this.programSource.identity.programId,
+        expectedRevision: this.programSource.revision, expectedText: this.programSource.text,
+        syntax: machine.simulationCommentSyntax, setup,
+      };
+      this.pendingRequestId = request.requestId;
+      this.setStatus('Applying raw material metadata...', 'info');
+      this.eventBus.publish(EVENT_NAMES.PROGRAM_SETUP_UPDATE_REQUEST, request);
+      this.relayUpdateRequest('PROGRAM_SETUP_UPDATE_REQUEST', request);
+    } catch (cause) {
+      this.setStatus(cause instanceof Error ? cause.message : String(cause), 'error');
+    }
   }
 
   private renderOffsetRow(offset: ToolOffsetValue, index: number, toolScoped: boolean): string {
@@ -603,6 +746,26 @@ export class NCToolManagerPanel extends HTMLElement {
       this.render();
     });
     this.shadowRoot?.querySelector<HTMLButtonElement>('#copy-library-tool')?.addEventListener('click', () => this.copyLibraryTool());
+    const materialForm = this.shadowRoot?.querySelector<HTMLFormElement>('#material-form');
+    materialForm?.addEventListener('submit', (event) => {
+      event.preventDefault();
+      this.applyProgramMaterial();
+    });
+    materialForm?.addEventListener('input', () => this.refreshPreview());
+    materialForm?.addEventListener('change', () => this.refreshPreview());
+    this.shadowRoot?.querySelector<HTMLButtonElement>('#remove-material')?.addEventListener('click', () => this.applyProgramMaterial(true));
+    this.shadowRoot?.querySelector<HTMLSelectElement>('#material-type')?.addEventListener('change', (event) => {
+      try {
+        const type = (event.currentTarget as HTMLSelectElement).value;
+        const transform = this.readTransform('material');
+        this.materialDraft = type === 'box'
+          ? { type: 'box', width: 100, height: 20, depth: 100, zeroVertex: 0, ...transform }
+          : { type: 'cylinder', diameter: 20, length: 100, zeroVertex: 1, ...transform };
+        this.render();
+      } catch (cause) {
+        this.setStatus(cause instanceof Error ? cause.message : String(cause), 'error');
+      }
+    });
     this.shadowRoot?.querySelector<HTMLFormElement>('#tool-form')?.addEventListener('submit', (event) => {
       event.preventDefault();
       if (this.activeTab === 'library') void this.saveLibraryTool();
@@ -647,7 +810,7 @@ export class NCToolManagerPanel extends HTMLElement {
 
   /** The preview element survives re-renders so its WebGL context is not recreated. */
   private mountPreview(): void {
-    const slot = this.shadowRoot?.querySelector<HTMLElement>('#tool-preview-slot');
+    const slot = this.shadowRoot?.querySelector<HTMLElement>('#tool-preview-slot, #material-preview-slot');
     if (!slot) {
       this.previewElement = undefined;
       return;
@@ -656,17 +819,28 @@ export class NCToolManagerPanel extends HTMLElement {
       this.previewElement = document.createElement('nc-tool-preview') as NCToolPreview;
       this.previewElement.addEventListener('zero-vertex-pick', (event) => {
         const index = (event as CustomEvent<{ index: number }>).detail.index;
-        const input = this.shadowRoot?.querySelector<HTMLInputElement>('#insert-zero-vertex');
+        const input = this.shadowRoot?.querySelector<HTMLInputElement | HTMLSelectElement>('#insert-zero-vertex, #material-zero');
         if (!input) return;
         input.value = String(index);
         this.refreshPreview();
       });
     }
     slot.replaceWith(this.previewElement);
+    const wasMaterial = Boolean(this.previewElement.getMaterial());
     this.refreshPreview();
+    if (!wasMaterial && this.previewElement.getMaterial()) this.previewElement.setView('3d');
   }
 
   private refreshPreview(): void {
+    if (this.previewElement && this.shadowRoot?.querySelector('#material-form')) {
+      try {
+        this.materialDraft = this.buildMaterialFromForm();
+        this.previewElement.setMaterial(this.materialDraft);
+      } catch (cause) {
+        this.previewElement.setMessage(cause instanceof Error ? cause.message : String(cause), true);
+      }
+      return;
+    }
     if (!this.previewElement || !this.shadowRoot?.querySelector('#tool-form')) return;
     try {
       this.previewElement.setTool(this.buildToolFromForm(1));
@@ -834,6 +1008,7 @@ export class NCToolManagerPanel extends HTMLElement {
       };
       this.setStatus('Applying tool metadata...', 'info');
       this.eventBus.publish(EVENT_NAMES.PROGRAM_TOOL_UPDATE_REQUEST, request);
+      this.relayUpdateRequest('PROGRAM_TOOL_UPDATE_REQUEST', request);
     } catch (cause) {
       this.setStatus(cause instanceof Error ? cause.message : String(cause), 'error');
     }
@@ -991,8 +1166,16 @@ export class NCToolManagerPanel extends HTMLElement {
       };
       this.setStatus('Applying offset metadata...', 'info');
       this.eventBus.publish(EVENT_NAMES.PROGRAM_OFFSETS_UPDATE_REQUEST, request);
+      this.relayUpdateRequest('PROGRAM_OFFSETS_UPDATE_REQUEST', request);
     } catch (cause) {
       this.setStatus(cause instanceof Error ? cause.message : String(cause), 'error');
+    }
+  }
+
+  private relayUpdateRequest(type: string, payload: unknown): void {
+    const win = window as any;
+    if (win.vscodeApi && typeof win.vscodeApi.postMessage === 'function') {
+      win.vscodeApi.postMessage({ type, payload });
     }
   }
 
@@ -1041,6 +1224,7 @@ export class NCToolManagerPanel extends HTMLElement {
       .tool-list-pane,.tool-editor-pane { min-height:0; overflow:hidden; display:flex; flex-direction:column; }
       .tool-list-pane { border-right:1px solid var(--vscode-editorGroup-border,#d0d7de); background:var(--vscode-sideBar-background,#f6f8fa); }
       .tool-editor-pane { overflow:auto; }
+      .material-editor-pane { grid-column:1 / -1; grid-row:1 / -1; }
       .list-toolbar,.library-actions,.program-source { display:grid; gap:7px; padding:9px; border-bottom:1px solid var(--vscode-editorGroup-border,#d0d7de); }
       .library-actions { grid-template-columns:1fr 1fr; margin-top:auto; border-top:1px solid var(--vscode-editorGroup-border,#d0d7de); border-bottom:0; }
       .program-source { margin-top:auto; color:var(--vscode-descriptionForeground,#57606a); font-size:10px; overflow-wrap:anywhere; }

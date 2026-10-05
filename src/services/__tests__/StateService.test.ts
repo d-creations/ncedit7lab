@@ -2,10 +2,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { StateService } from '../StateService';
 import { EventBus, EVENT_NAMES } from '../EventBus';
 
-describe('StateService centre-mode normalization', () => {
+describe('StateService toolpath mode', () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it('defaults to centre mode and ignores legacy mode changes without creating history or events', () => {
+  it('preserves each selectable mode and emits changes', () => {
     const bus = new EventBus();
     const service = new StateService(bus, false);
     const changed = vi.fn();
@@ -13,15 +13,16 @@ describe('StateService centre-mode normalization', () => {
 
     expect(service.getState().toolPathMode).toBe('center');
     service.setToolPathMode('effective');
+    expect(service.getState().toolPathMode).toBe('effective');
+    service.setToolPathMode('simulation');
+    expect(service.getState().toolPathMode).toBe('simulation');
     service.setToolPathMode('center');
-    service.undo();
-    service.redo();
 
     expect(service.getState().toolPathMode).toBe('center');
-    expect(changed).not.toHaveBeenCalled();
+    expect(changed).toHaveBeenCalledTimes(3);
   });
 
-  it.each(['effective', 'center', undefined, 'invalid'])(
+  it.each(['effective', 'center', 'simulation', undefined, 'invalid'])(
     'normalizes persisted mode %s while preserving channel content and undo/redo',
     (toolPathMode) => {
       const initial = new StateService(new EventBus(), false).getState();
@@ -37,18 +38,20 @@ describe('StateService centre-mode normalization', () => {
       });
 
       const service = new StateService(new EventBus());
-      expect(service.getState().toolPathMode).toBe('center');
+      const expectedMode = toolPathMode === 'effective' || toolPathMode === 'simulation'
+        ? toolPathMode : 'center';
+      expect(service.getState().toolPathMode).toBe(expectedMode);
       expect(service.getChannel('1')?.program).toBe('T0\nG1 X1');
       expect(service.getActiveProgramId('1')).toBe('program-a');
 
       service.updateChannel('1', { program: 'T0\nG1 X2' });
       service.undo();
       expect(service.getChannel('1')?.program).toBe('T0\nG1 X1');
-      expect(service.getState().toolPathMode).toBe('center');
+      expect(service.getState().toolPathMode).toBe(expectedMode);
       service.redo();
       expect(service.getChannel('1')?.program).toBe('T0\nG1 X2');
-      expect(service.getState().toolPathMode).toBe('center');
-      expect(JSON.parse(stored).toolPathMode).toBe('center');
+      expect(service.getState().toolPathMode).toBe(expectedMode);
+      expect(JSON.parse(stored).toolPathMode).toBe(expectedMode);
     },
   );
 

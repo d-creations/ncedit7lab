@@ -11,6 +11,34 @@ function apply(source: string, edit: ReturnType<ProgramMetadataEditService['plan
 }
 
 describe('ProgramMetadataEditService', () => {
+  it.each([
+    semicolon,
+    { kind: 'line', prefix: '//' } as const,
+    { kind: 'block', open: '(', close: ')' } as const,
+  ])('round-trips and replaces material setup with syntax %o without changing tools or NC', (syntax) => {
+    const toolBlock = codec.encodeTool({ toolNumber: 1, description: 'Drill' }, syntax, '\r\n');
+    const source = `T1\r\nG1 X1\r\n${toolBlock}\r\n`;
+    const setup = { machineName: 'TEST', material: { type: 'box', width: 100, height: 20, depth: 60, zeroVertex: 7 } } as const;
+    const first = apply(source, service.planSetupUpdate(source, setup, syntax));
+    expect(first.startsWith(source)).toBe(true);
+    expect(codec.parse(first, syntax).setup).toEqual(setup);
+    const updatedSetup = { machineName: 'TEST', material: { type: 'cylinder', diameter: 40, length: 100, zeroVertex: 0 } } as const;
+    const updated = apply(first, service.planSetupUpdate(first, updatedSetup, syntax));
+    expect(updated.match(/BEGIN SETUP/g)).toHaveLength(1);
+    expect(updated.startsWith(source)).toBe(true);
+    expect(codec.parse(updated, syntax).setup).toEqual(updatedSetup);
+    const removed = apply(updated, service.planSetupUpdate(updated, { machineName: 'TEST' }, syntax));
+    expect(codec.parse(removed, syntax).setup).toEqual({ machineName: 'TEST' });
+    expect(removed.startsWith(source)).toBe(true);
+  });
+
+  it('rejects invalid or duplicate setup blocks before editing', () => {
+    const setup = { machineName: 'TEST', material: { type: 'cylinder', diameter: 40, length: 100 } } as const;
+    const block = codec.encodeSetup(setup, semicolon);
+    expect(() => service.planSetupUpdate(`${block}\n${block}`, setup, semicolon)).toThrow();
+    expect(() => service.planSetupUpdate('T1', { ...setup, material: { ...setup.material, zeroVertex: 2 } }, semicolon)).toThrow();
+    expect(() => service.planSetupUpdate('; @NCE-SIM:99 BEGIN SETUP\n; @NCE-SIM:99 END SETUP', setup, semicolon)).toThrow();
+  });
   it('appends one managed block without rewriting NC code and preserves CRLF', () => {
     const source = '%\r\nT1\r\nG1 X1\r\nM30\r\n';
     const edit = service.planToolUpdate(source, { toolNumber: 1, description: 'Drill', Q: 0, R: 0 }, semicolon);

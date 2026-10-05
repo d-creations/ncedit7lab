@@ -203,9 +203,11 @@ async function bootstrap() {
 
       const tagName = hostMode === 'vscode-templates'
         ? 'nc-templates-panel'
-        : hostMode === 'vscode-panel'
-          ? 'nc-workbench-panel-app'
-          : 'nc-editor-app';
+        : hostMode === 'vscode-tools'
+          ? 'nc-tool-manager-panel'
+          : hostMode === 'vscode-panel'
+            ? 'nc-workbench-panel-app'
+            : 'nc-editor-app';
 
       appContainer.innerHTML = '';
       appContainer.appendChild(document.createElement(tagName));

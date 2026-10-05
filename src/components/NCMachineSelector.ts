@@ -146,6 +146,7 @@ export class NCMachineSelector extends HTMLElement {
           <option value="">Select Machine...</option>
         </select>
         <select id="tool-path-mode" title="Select the path returned by the backend" aria-label="Toolpath mode">
+          <option value="effective">Effective path</option>
           <option value="center">Tool-center path</option>
           <option value="simulation">Simulation</option>
         </select>

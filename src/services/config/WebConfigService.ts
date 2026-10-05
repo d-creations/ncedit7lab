@@ -13,6 +13,7 @@ export class WebConfigService implements IConfigService {
     showTransferPanel: false,
     showTemplatesPanel: true,
     templatesPlacement: 'web-tab',
+    toolsPlacement: 'workbench-right',
     seedDefaultTemplates: true,
     templateStorageMode: 'local',
     templateSeedUrl: '/templates.json',

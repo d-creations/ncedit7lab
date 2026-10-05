@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [1.2.0] - 2026-10-05
 
 ### Added
 - **Cutting Edge Q Orientation (0–9)**: Added theoretical tool-tip alignment for turning inserts based on controller cutting edge direction $Q$ (1–9, 0) and nose radius $R$. The tool assembly shifts automatically so the tangential touch-off point (virtual tip) aligns with $(0, 0, 0)$.
@@ -15,6 +15,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 - **Plot Tool Simulation Orientation**: Fixed double-application of tool mounting orientation in `NCToolpathPlot` where `pose.orientation` was premultiplied onto an already-oriented tool mesh, ensuring 3D plot orientation matches the preview 1:1.
+- **Effective Toolpath Selection**: Restored `Effective path` as a selectable and persisted plot mode instead of silently normalizing it to `Tool-center path`.
 
 ## [1.1.0] - 2026-09-21
 

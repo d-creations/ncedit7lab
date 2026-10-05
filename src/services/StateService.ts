@@ -121,7 +121,8 @@ export class StateService {
     const raw = JSON.parse(jsonStr);
     return {
       ...raw,
-      toolPathMode: raw.toolPathMode === 'simulation' ? 'simulation' : 'center',
+      toolPathMode: raw.toolPathMode === 'effective' || raw.toolPathMode === 'simulation'
+        ? raw.toolPathMode : 'center',
       channels: new Map(raw.channels),
       activeProgramIds: new Map(raw.activeProgramIds || [])
     };
@@ -229,7 +230,7 @@ export class StateService {
   }
 
   setToolPathMode(toolPathMode: ToolPathMode): void {
-    const normalizedMode = toolPathMode === 'simulation' ? 'simulation' : 'center';
+    const normalizedMode = toolPathMode;
     if (this.state.toolPathMode === normalizedMode) return;
 
     this.saveStateToHistory();

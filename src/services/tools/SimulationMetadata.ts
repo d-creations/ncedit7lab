@@ -64,8 +64,8 @@ export interface ProgramOffsetsDefinition {
   offsetScope: 'global' | 'tool';
   offsets: ProgramToolOffsetDefinition[];
 }
-/** Material position is its centre in the initial program work-coordinate system. */
-export type ProgramMaterialDefinition = PartTransform &
+/** Position locates the selected zero point, or the centre for legacy definitions without zeroVertex. */
+export type ProgramMaterialDefinition = PartTransform & { zeroVertex?: number } &
   (
     | { type: 'box'; width: number; depth: number; height: number }
     | { type: 'cylinder'; diameter: number; length: number }
@@ -367,18 +367,28 @@ export function validateProgramSetup(value: unknown): ProgramSetupDefinition {
   text(setup.machineName, 'machineName', 256);
   if (!setup.machineName.trim()) fail('machineName is required');
   if (setup.material !== undefined) {
-    const material = record(setup.material);
-    transform(material);
-    const dimensions =
-      material.type === 'box'
-        ? ['width', 'depth', 'height']
-        : material.type === 'cylinder'
-          ? ['diameter', 'length']
-          : fail('Unsupported material type');
-    keys(material, ['type', 'position', 'rotation', ...dimensions]);
-    dimensions.forEach((key) => size(material[key], key));
+    validateProgramMaterial(setup.material);
   }
   return setup as unknown as ProgramSetupDefinition;
+}
+
+export function validateProgramMaterial(value: unknown): ProgramMaterialDefinition {
+  const material = record(value);
+  transform(material);
+  const dimensions =
+    material.type === 'box'
+      ? ['width', 'depth', 'height']
+      : material.type === 'cylinder'
+        ? ['diameter', 'length']
+        : fail('Unsupported material type');
+  keys(material, ['type', 'position', 'rotation', 'zeroVertex', ...dimensions]);
+  dimensions.forEach((key) => size(material[key], key));
+  if (material.zeroVertex !== undefined &&
+    (!Number.isInteger(material.zeroVertex) || (material.zeroVertex as number) < 0 ||
+      (material.zeroVertex as number) >= (material.type === 'box' ? 8 : 2))) {
+    fail('Invalid material zero vertex');
+  }
+  return material as unknown as ProgramMaterialDefinition;
 }
 
 /** Freeze owned JSON values, including nested geometry arrays (readonly types alone are insufficient). */

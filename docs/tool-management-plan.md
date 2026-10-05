@@ -73,7 +73,10 @@ switching, highlight disposal and mesh placement.
 Status (2026-09-14): metadata/codec, browser library, Program Tools/offset edits,
 immutable editor Plot runs, same-view occurrence selection, B/C mill poses,
 configured STAR target poses, selected milling-tool preview and standalone
-turning/profile/material geometry preview are implemented. Setup/material UI,
+turning/profile/material geometry preview are implemented. As of 2026-10-05,
+the Tool Manager Raw Material tab also creates round stock or plates, selects
+either end-face centre or any of eight corners in the live preview, and applies
+or removes material in revision-checked program SETUP comments. Machine setup UI,
 turning execution poses, exact nose-centre/virtual-tip machine semantics,
 playback, machine calibration and material removal remain pending.
 Section 11 contains both implemented contract details and broader future work; the
@@ -276,32 +279,58 @@ Add one optional typed `material` object beside `machineName`. It is the **initi
 
 | Type | Required size fields | Meaning |
 | --- | --- | --- |
-| `box` | `width`, `depth`, `height` | Rectangular material, sized along local X, Y and Z. |
+| `box` | `width`, `depth`, `height` | Rectangular material: width along X, height along Y, depth along Z (existing renderer convention). |
 | `cylinder` | `diameter`, `length` | Solid round bar, with its axis along local Z before rotation; UI label: Round Bar. |
 
 Both support `position:[x,y,z]` and optional `rotation:[rx,ry,rz]` using the same degree/rotation-order convention as tool parts. Zero position and identity rotation are schema defaults and may be omitted. Do not store a redundant radius alongside bar diameter. Tubular material with an inner diameter is a possible later extension, not part of the initial solid-bar type.
 
-Define placement unambiguously: `position` locates the **centre of the material** in the program's initial work-coordinate system, not its minimum corner or a tool-local frame. Before rotation, a box occupies ±width/2, ±depth/2, ±height/2; a bar runs from -length/2 to +length/2 along Z. Rotation acts about this centre, then position translates it. No per-record `units` or `frame` field is needed because the versioned schema defines both conventions.
+`zeroVertex` optionally selects the material reference point. For round stock,
+0 is the -Z end-face centre and 1 is the +Z end-face centre. For plates, indices
+0..7 encode corner signs: bit 0 selects +X, bit 1 +Y, bit 2 +Z; unset bits
+select the negative side. `position` locates that selected point in the initial
+program work-coordinate system (default [0,0,0]). Rotation uses extrinsic X/Y/Z
+degrees, about that point, followed by translation. The live preview provides
+clickable markers and a dropdown alternative, including when WebGL is unavailable.
+
+Legacy definitions without `zeroVertex` retain centre placement and centre
+rotation; the UI labels this explicitly as "Centre (legacy placement)".
+Before placement a box occupies ±width/2 on X, ±height/2 on Y, ±depth/2 on Z;
+a bar runs from -length/2 to +length/2 along Z. No per-record `units` or `frame`
+field is needed.
 
 Examples for the setup block (alternative material definitions, not two simultaneous workpieces):
 
 ```text
-; material={"type":"box","width":100,"depth":60,"height":20,"position":[50,30,-10]}
+; material={"type":"box","width":100,"depth":60,"height":20,"zeroVertex":4}
 ```
 
-This box spans X=0..100, Y=0..60 and Z=-20..0: the program origin is at a corner of its top face.
+This box spans X=0..100, Y=0..20 and Z=-60..0: the program origin is corner 4.
 
 ```text
-; material={"type":"cylinder","diameter":40,"length":100,"position":[0,0,-50]}
+; material={"type":"cylinder","diameter":40,"length":100,"zeroVertex":1}
 ```
 
 This bar is centred on X=Y=0 and extends from Z=-100 to Z=0: useful when the turning origin is at the front face. These are metadata examples, not machining instructions. Line wrapping must use the same safe continuation codec as tool records.
 
 For future simulation, resolve the initial work-coordinate system to a fixed simulation/world transform at setup time. Subsequent G54/G55, G92 or other coordinate changes affect the toolpath interpretation, not the physical material position. Do not treat program coordinates as machine coordinates implicitly. If work-offset/kinematic transforms are unavailable, label the material preview as program-coordinate-only rather than claiming machine-space collision accuracy. All dimensions/positions remain mm, including lathe X placement: diameter-programming conventions must not double the physical material size or position.
 
-The setup UI gains a **Material** section: None / Box / Round Bar, type-specific dimensions, XYZ centre position, optional rotation and a preview showing the origin/axes. A top-face/front-face placement helper can calculate centre position instead of requiring the user to calculate half-dimensions. Validate positive finite sizes, finite transforms and sensible bounds; missing material means no material-removal setup, not an automatically guessed workpiece. Material name/alloy and physical machining properties are deferred.
+The Tool Manager **Raw Material** tab provides Round stock / Plate, dimensions,
+XYZ reference position, rotation, a live preview showing the origin/axes, and
+Apply / Remove Program Material actions. Draft defaults are not persisted until
+Apply is pressed. Positive finite dimensions, finite transforms, bounds and
+shape-specific zero indices are validated. Missing material means no material
+setup, not an automatically guessed workpiece. Material name/alloy and physical
+machining properties are deferred.
 
-Committing the setup emits a proposed `PROGRAM_MATERIAL_UPDATE_REQUEST`, following the same revision-checked EventBus → metadata edit → reparse flow as tools and machines. Update only `material` in the managed SETUP block, preserving machine and tool data, in one undoable operation. Removing material removes that field; opening, plotting or restoring undo must not write it back. Machine comment-style conversion includes this field automatically. Existing backend requests stay unchanged until material support is explicitly implemented; storing/rendering a material box is not material-removal simulation.
+Applying emits `PROGRAM_SETUP_UPDATE_REQUEST`, following the same revision-checked
+EventBus → metadata edit → editor synchronization flow as tools and offsets.
+Only the SETUP block is replaced, preserving its machine name and all tool/offset
+blocks and executable commands. A new block is appended using the existing
+managed-comment edit convention, not automatically moved ahead of mandatory NC
+headers. Removing material removes that field; opening or plotting never writes
+it back. Existing backend requests stay unchanged until material support is
+explicitly implemented; this program-coordinate preview is not material-removal
+simulation or a machine-space collision model.
 
 Initial scope is one material definition per program. In combined multi-channel simulation, channel programs may contain copies of the same physical material for portability; do not render/remove material from duplicate copies independently without an explicit shared-material setup decision. Conflicting channel material definitions require review, never silent merging or duplication.
 

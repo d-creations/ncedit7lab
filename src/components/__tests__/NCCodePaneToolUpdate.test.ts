@@ -5,6 +5,7 @@ import { EventBus, EVENT_NAMES } from '@services/EventBus';
 import {
   ProgramMetadataEditService,
   type ProgramOffsetsUpdateRequest,
+  type ProgramSetupUpdateRequest,
   type ProgramToolUpdateRequest,
 } from '@services/tools/ProgramMetadataEditService';
 import { SimulationCommentCodec } from '@services/tools/SimulationCommentCodec';
@@ -35,6 +36,35 @@ function request(overrides: Partial<ProgramToolUpdateRequest> = {}): ProgramTool
 }
 
 describe('NCCodePane program tool updates', () => {
+  it.each([
+    {}, { expectedRevision: 'editor:1' }, { expectedText: 'changed' },
+    { documentId: 'other' }, { programId: 'other' }, { channelId: '2' },
+  ])('revision-checks raw material and synchronizes successful edits: %o', (overrides) => {
+    const { pane, eventBus, setValue, syncEditorValue } = harness();
+    const result = vi.fn();
+    eventBus.subscribe(EVENT_NAMES.PROGRAM_SETUP_UPDATE_RESULT, result);
+    const setupRequest: ProgramSetupUpdateRequest = {
+      requestId: 'setup-request', channelId: '1', documentId: 'doc', programId: 'program',
+      expectedRevision: 'editor:0', expectedText: 'T1\nG1 X10', syntax,
+      setup: { machineName: 'TEST', material: { type: 'box', width: 80, height: 12, depth: 100, zeroVertex: 7 } },
+      ...overrides,
+    };
+    (pane as unknown as { applyProgramSetupUpdate(value: ProgramSetupUpdateRequest): void })
+      .applyProgramSetupUpdate(setupRequest);
+    if (Object.keys(overrides).length) {
+      expect(setValue).not.toHaveBeenCalled();
+      expect(syncEditorValue).not.toHaveBeenCalled();
+      if (setupRequest.channelId === '2') expect(result).not.toHaveBeenCalled();
+      else expect(result).toHaveBeenCalledWith(expect.objectContaining({ success: false }));
+    } else {
+      const nextText = setValue.mock.calls[0][0] as string;
+      expect(nextText).toContain('; @NCE-SIM:1 BEGIN SETUP');
+      expect(new SimulationCommentCodec().parse(nextText, syntax).setup).toEqual(setupRequest.setup);
+      expect(setValue).toHaveBeenCalledTimes(1);
+      expect(syncEditorValue).toHaveBeenCalledExactlyOnceWith(nextText);
+      expect(result).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ success: true }));
+    }
+  });
   it('applies one planned text update through the normal editor synchronization route', () => {
     const { pane, eventBus, setValue, syncEditorValue } = harness();
     const result = vi.fn();

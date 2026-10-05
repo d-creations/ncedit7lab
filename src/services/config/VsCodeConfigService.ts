@@ -14,6 +14,7 @@ export class VsCodeConfigService implements IConfigService {
     showTransferPanel: true,
     showTemplatesPanel: true,
     templatesPlacement: 'workbench-right',
+    toolsPlacement: 'workbench-left',
     seedDefaultTemplates: true,
     templateStorageMode: 'local',
     templateSeedUrl: '/templates.json',

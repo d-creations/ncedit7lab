@@ -1,5 +1,6 @@
 import type {
   ProgramOffsetsDefinition,
+  ProgramSetupDefinition,
   ProgramToolDefinition,
   ToolIdentifier,
 } from './SimulationMetadata';
@@ -42,12 +43,34 @@ export interface ProgramOffsetsUpdateRequest {
   offsets: ProgramOffsetsDefinition;
 }
 
+export interface ProgramSetupUpdateRequest extends Omit<ProgramToolUpdateRequest, 'tool'> {
+  setup: ProgramSetupDefinition;
+}
+
 function sameIdentifier(left: ToolIdentifier, right: ToolIdentifier): boolean {
   return typeof left === typeof right && left === right;
 }
 
 export class ProgramMetadataEditService {
   constructor(private readonly codec: SimulationCommentCodec) {}
+
+  planSetupUpdate(text: string, setup: ProgramSetupDefinition, syntax: SimulationCommentSyntax): ProgramTextEdit {
+    const parsed = this.codec.parse(text, syntax);
+    if (parsed.diagnostics.length) {
+      throw new MetadataValidationError(parsed.diagnostics.map((diagnostic) => diagnostic.message).join('; '));
+    }
+    const matches = parsed.blocks.filter((block) => block.kind === 'SETUP');
+    if (matches.length > 1) throw new MetadataValidationError('Conflicting managed setup blocks');
+    const eol = text.includes('\r\n') ? '\r\n' : '\n';
+    const encoded = this.codec.encodeSetup(setup, syntax, eol);
+    const existing = matches[0];
+    if (existing) {
+      const trailingEol = /\r\n$/.test(existing.raw) ? '\r\n' : /[\r\n]$/.test(existing.raw) ? '\n' : '';
+      return { startOffset: existing.startOffset, endOffset: existing.endOffset, text: encoded + trailingEol };
+    }
+    const separator = text.length === 0 || /(?:\r\n|\n|\r)$/.test(text) ? '' : eol;
+    return { startOffset: text.length, endOffset: text.length, text: `${separator}${encoded}${eol}` };
+  }
 
   planToolUpdate(text: string, tool: ProgramToolDefinition, syntax: SimulationCommentSyntax): ProgramTextEdit {
     const parsed = this.codec.parse(text, syntax);

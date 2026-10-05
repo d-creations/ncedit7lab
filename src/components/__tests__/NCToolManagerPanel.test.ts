@@ -14,10 +14,13 @@ import { ParserService } from '@services/ParserService';
 import { StateService } from '@services/StateService';
 import { ProgramToolService, type ProgramSource } from '@services/tools/ProgramToolService';
 import { SimulationCommentCodec } from '@services/tools/SimulationCommentCodec';
+import { ProgramMetadataEditService } from '@services/tools/ProgramMetadataEditService';
+import type { NCToolPreview } from '../NCToolPreview';
 import { ToolCatalogService } from '@services/tools/ToolCatalogService';
 import { WebToolLibraryRepository } from '@services/tools/WebToolLibraryRepository';
 import type {
   ProgramOffsetsUpdateRequest,
+  ProgramSetupUpdateRequest,
   ProgramToolUpdateRequest,
 } from '@services/tools/ProgramMetadataEditService';
 
@@ -83,6 +86,76 @@ describe('NCToolManagerPanel', () => {
     document.body.replaceChildren();
     await registry.disposeAll();
     localStorage.clear();
+  });
+
+  it('creates, picks, applies and reloads program-owned round and plate material', async () => {
+    const codec = new SimulationCommentCodec();
+    const edits = new ProgramMetadataEditService(codec);
+    const requests: ProgramSetupUpdateRequest[] = [];
+    eventBus.subscribe(EVENT_NAMES.PROGRAM_SETUP_UPDATE_REQUEST, (request: ProgramSetupUpdateRequest) => {
+      requests.push(request);
+      expect(request.expectedText).toBe(source.text);
+      expect(request.expectedRevision).toBe(source.revision);
+      const edit = edits.planSetupUpdate(source.text, request.setup, request.syntax);
+      source = { ...source, revision: `editor:${requests.length}`,
+        text: source.text.slice(0, edit.startOffset) + edit.text + source.text.slice(edit.endOffset) };
+      eventBus.publish(EVENT_NAMES.PROGRAM_SETUP_UPDATE_RESULT, {
+        requestId: request.requestId, channelId: '1', success: true, message: 'Material applied',
+      });
+    });
+    const field = <T extends HTMLElement>(selector: string) => panel.shadowRoot!.querySelector<T>(selector)!;
+    const set = (selector: string, value: string) => {
+      field<HTMLInputElement | HTMLSelectElement>(selector).value = value;
+      field(selector).dispatchEvent(new Event('change', { bubbles: true }));
+    };
+    field<HTMLButtonElement>('[data-manager-tab="material"]').click();
+    expect(source.text).toBe('T1\nG1 X10');
+    set('#material-diameter', '32');
+    field<NCToolPreview>('nc-tool-preview').pickVertex(0);
+    expect(field<HTMLSelectElement>('#material-zero').value).toBe('0');
+    expect(field<NCToolPreview>('nc-tool-preview').getMaterial()).toMatchObject({ diameter: 32, zeroVertex: 0 });
+    field<HTMLFormElement>('#material-form').requestSubmit();
+    await vi.waitFor(() => expect(panel.shadowRoot?.textContent).toContain('Material applied'));
+    expect(codec.parse(source.text, syntax).setup).toEqual({
+      machineName: 'FANUC_TEST', material: { type: 'cylinder', diameter: 32, length: 100, zeroVertex: 0 },
+    });
+    expect(field<HTMLInputElement>('#material-diameter').value).toBe('32');
+
+    set('#material-type', 'box');
+    set('#material-height', '12');
+    set('#material-width', '80');
+    field<NCToolPreview>('nc-tool-preview').pickVertex(7);
+    expect(field<HTMLSelectElement>('#material-zero').options).toHaveLength(9);
+    set('#material-pz', '5');
+    field<HTMLFormElement>('#material-form').requestSubmit();
+    await vi.waitFor(() => expect(requests).toHaveLength(2));
+    await vi.waitFor(() => expect(field<HTMLButtonElement>('button[type="submit"]').disabled).toBe(false));
+    expect(codec.parse(source.text, syntax).setup?.material).toEqual({
+      type: 'box', width: 80, height: 12, depth: 100, zeroVertex: 7, position: [0, 0, 5],
+    });
+    expect(source.text.match(/BEGIN SETUP/g)).toHaveLength(1);
+    expect(source.text.startsWith('T1\nG1 X10\n')).toBe(true);
+
+    field<HTMLButtonElement>('[data-manager-tab="program"]').click();
+    field<HTMLButtonElement>('[data-manager-tab="material"]').click();
+    expect(field<HTMLSelectElement>('#material-zero').value).toBe('7');
+    expect(field<HTMLInputElement>('#material-height').value).toBe('12');
+    field<HTMLButtonElement>('#remove-material').click();
+    await vi.waitFor(() => expect(requests).toHaveLength(3));
+    expect(codec.parse(source.text, syntax).setup).toEqual({ machineName: 'FANUC_TEST' });
+  });
+
+  it('does not publish material requests with invalid dimensions', () => {
+    (panel.shadowRoot!.querySelector('[data-manager-tab="material"]') as HTMLButtonElement).click();
+    const request = vi.fn();
+    eventBus.subscribe(EVENT_NAMES.PROGRAM_SETUP_UPDATE_REQUEST, request);
+    const diameter = panel.shadowRoot!.querySelector<HTMLInputElement>('#material-diameter')!;
+    diameter.value = '0';
+    diameter.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(panel.shadowRoot!.querySelector('nc-tool-preview')?.shadowRoot?.textContent).toContain('Invalid diameter');
+    panel.shadowRoot!.querySelector<HTMLFormElement>('#material-form')!.requestSubmit();
+    expect(request).not.toHaveBeenCalled();
+    expect(panel.shadowRoot!.querySelector('#manager-status')?.textContent).toContain('Invalid diameter');
   });
 
   it('shows Library and Program Tools and persists a concrete tool form', async () => {

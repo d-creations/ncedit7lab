@@ -1,8 +1,9 @@
-export type HostMode = 'web' | 'vscode-editor' | 'vscode-panel' | 'vscode-templates';
+export type HostMode = 'web' | 'vscode-editor' | 'vscode-panel' | 'vscode-templates' | 'vscode-tools';
 
 export type TransferPlacement = 'side-panel' | 'bottom-panel' | 'external-panel' | 'disabled';
 export type TransferProtocol = 'ftp' | 'focas' | 'smb' | 'usb' | 'none';
 export type TemplatesPlacement = 'auto' | 'web-tab' | 'workbench-right' | 'workbench-left' | 'disabled';
+export type ToolsPlacement = 'auto' | 'workbench-right' | 'workbench-left' | 'disabled';
 export type TemplateStorageMode = 'local' | 'workspace' | 'host';
 
 export interface AppConfiguration {
@@ -19,6 +20,7 @@ export interface AppConfiguration {
   showTransferPanel: boolean;
   showTemplatesPanel: boolean;
   templatesPlacement: TemplatesPlacement;
+  toolsPlacement?: ToolsPlacement;
   seedDefaultTemplates: boolean;
   templateStorageMode?: TemplateStorageMode;
   templateSeedUrl?: string;

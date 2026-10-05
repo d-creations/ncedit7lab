@@ -74,6 +74,36 @@ describe('ExecutedProgramService', () => {
     });
     const request = { channelId: '1' as const, program: 'G1 X1', machineName: 'SIEMENS_MILL' };
 
+    it('preserves turning, milling and turning in execution order without inferring mode from traversal', async () => {
+      vi.mocked(mockBackend.requestPlot).mockResolvedValue({
+        canal: { '1': { segments: [
+          move({ machiningMode: 'turning', executionStep: 0 }),
+          move({ machiningMode: 'turning', traversal: 'RAPID', executionStep: 1 }),
+          move({ machiningMode: 'milling', executionStep: 2, points: [
+            { x: 0, y: 0, z: 0 }, { x: 0.5, y: 0, z: 0 }, { x: 1, y: 0, z: 0 },
+          ] }),
+          move({ machiningMode: 'turning', executionStep: 3 }),
+          move(),
+          move({ machiningMode: null }),
+        ] } },
+      });
+      const result = await service.executeProgram(request);
+      expect(result.plotMetadata!.segments.map((segment) => segment.machiningMode))
+        .toEqual(['turning', 'turning', 'milling', 'milling', 'turning', 'unknown', 'unknown']);
+      expect(result.plotMetadata!.segments[1].type).toBe('rapid');
+    });
+
+    it('rejects invalid mode values and publishes an execution error rather than guessing', async () => {
+      const errors = vi.fn();
+      mockEventBus.subscribe(EVENT_NAMES.EXECUTION_ERROR, errors);
+      const invalid = { ...move(), machiningMode: 'cutting' };
+      vi.mocked(mockBackend.requestPlot).mockResolvedValue({
+        canal: { '1': { segments: [invalid] } },
+      });
+      await expect(service.executeProgram(request)).rejects.toThrow('Invalid backend machining mode');
+      expect(errors).toHaveBeenCalledOnce();
+    });
+
     it('preserves exact tool identifiers and unavailable values without carrying state forward', async () => {
       const metadata: Partial<BackendPlotSegment>[] = [
         { toolNumber: 0, executionStep: 0, motionContext: { channelId: '1', startAxes: { X: 0, B: 0 }, endAxes: { X: 1, B: 90 }, toolOffset: { radiusMode: 'OFF' } }, poses: [{ position: [0, 0, 0], orientation: [0, 0, 0, 1], reference: 'millingTip', frameId: 'workpiece:tableBC' }] },

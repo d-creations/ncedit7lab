@@ -189,4 +189,34 @@ describe('completed plot runs', () => {
     service.discardPlotRun(latest.runId);
     expect(service.getPlotRun(latest.runId)).toBeUndefined();
   });
+
+  it('captures modes and shared-stock diagnostics in the immutable simulation run only', async () => {
+    const first = input();
+    const material = { type: 'cylinder', diameter: 20, length: 40, zeroVertex: 1 } as const;
+    first.snapshot = tools.captureProgramSnapshot(first.snapshot.identity, 1,
+      codec.encodeSetup({ machineName: 'test', material }, syntax) + '\n' + first.snapshot.text, syntax);
+    const mixed: PlotResponse = { canal: { '1': { segments: [
+      { geometry: 'LINEAR', traversal: 'FEED', machiningMode: 'turning', executionStep: 0,
+        toolNumber: 0, points: [{ x: 10, y: 0, z: 0 }, { x: 9, y: 0, z: 0 }] },
+      { geometry: 'LINEAR', traversal: 'FEED', machiningMode: 'milling', executionStep: 1,
+        toolNumber: 0, points: [{ x: 9, y: 0, z: 0 }, { x: 9, y: 0, z: -1 }] },
+      { geometry: 'LINEAR', traversal: 'FEED', machiningMode: 'turning', executionStep: 2,
+        toolNumber: 0, points: [{ x: 9, y: 0, z: -1 }, { x: 8, y: 0, z: -1 }] },
+    ] } } };
+    vi.mocked(backend.requestPlot).mockResolvedValue(mixed);
+    const run = await service.executePlotRun([first], true, 'simulation');
+    expect(run.plotMetadata.segments.map((segment) => segment.machiningMode))
+      .toEqual(['turning', 'milling', 'turning']);
+    expect(run.materialRemoval).toMatchObject({ status: 'blocked', stock: material });
+    expect(run.materialRemoval?.diagnostics.map((diagnostic) => diagnostic.code))
+      .toContain('turning-reference-unverified');
+    expect(Object.isFrozen(run.materialRemoval?.stock)).toBe(true);
+    expect(Object.isFrozen(run.materialRemoval?.diagnostics)).toBe(true);
+    mixed.canal = {};
+    expect(run.plotMetadata.segments).toHaveLength(3);
+    const centerRun = await service.executePlotRun([first], true, 'center');
+    expect(centerRun.materialRemoval).toBeUndefined();
+    expect(vi.mocked(backend.requestPlot).mock.calls[0][0].machinedata[0])
+      .not.toHaveProperty('materialRemoval');
+  });
 });

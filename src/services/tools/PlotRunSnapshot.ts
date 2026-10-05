@@ -1,6 +1,7 @@
 import type { CustomVariable, MachineProfile, PlotMetadata, ToolPathMode, ToolValue, ToolOffsetValue } from '@core/types';
 import type { ProgramToolSnapshot } from './ProgramToolService';
 import type { DeepReadonly } from './SimulationMetadata';
+import type { MaterialRemovalPreparation } from './MaterialRemovalPreparation';
 
 export interface PlotRunInput {
   snapshot: ProgramToolSnapshot;
@@ -28,4 +29,5 @@ export type PlotRunSnapshot = DeepReadonly<{
   toolPathMode: ToolPathMode;
   inputs: PlotRunInput[];
   plotMetadata: PlotMetadata;
+  materialRemoval?: MaterialRemovalPreparation;
 }>;

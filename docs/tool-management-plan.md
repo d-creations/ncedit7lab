@@ -334,6 +334,46 @@ simulation or a machine-space collision model.
 
 Initial scope is one material definition per program. In combined multi-channel simulation, channel programs may contain copies of the same physical material for portability; do not render/remove material from duplicate copies independently without an explicit shared-material setup decision. Conflicting channel material definitions require review, never silent merging or duplication.
 
+### Mixed turning/milling removal foundation (2026-10-05)
+
+The frontend now preserves the backend's top-level per-segment `machiningMode`
+(`turning`, `milling`, `unknown`) through sampled subsegments, immutable plot runs
+and selection notifications. Missing/null legacy values become `unknown`; invalid
+values reject execution visibly. Mode is not inferred from cutter shape, traversal
+or source text, and it does not prove that a spindle is running. The configured
+backend FANUC M5 rule remains unchanged by agreement with the user.
+
+Simulation runs retain a `materialRemoval` preflight alongside their inputs and
+paths. Equal channel stock definitions produce one raw-stock preview; omitted
+zero transforms compare equal to explicit defaults. Different dimensions,
+transforms or zero references produce a visible conflict rather than duplicate
+workpieces. This is the initial single-shared-stock view, not a part-transfer model.
+Channel-local steps cannot establish a shared removal order.
+
+Removal is still blocked. The plot surfaces unresolved stock-frame binding and
+cutting-spindle state, missing feed modes/geometry/aligned poses, different target
+frames and unverified turning nose/Q references. A resolved pose frame name alone
+does not establish the initial program-to-stock transform. These diagnostics are
+run-owned and do not write metadata, trigger execution or claim a machined result.
+
+The intended first removal scope is geometric, per executed motion, with no timed
+playback. Maintain one 3D stock across turning -> milling -> turning; never restore
+an axisymmetric 2D profile after milling, because that can refill removed features.
+For supported conventional turning, subtract the rotational sweep of the cutting
+insert about the resolved stock spindle axis, not merely the stationary displayed
+insert. Milling subtracts the swept cutting geometry along resolved sampled poses;
+holders never remove stock. Threading, spindle-phase-dependent operations and
+unresolved rotary/transfer operations require separate capabilities.
+
+Keep removal computation separate from MaterialGeometryFactory's preview meshes.
+A bounded adaptive sparse stock and chunked exposed-surface meshes are the candidate
+implementation, not a benchmarked choice or an implemented kernel. Test its memory,
+motion sampling and surface-update costs before choosing the final representation.
+0.05 mm may be a local refinement target, not an unbounded uniform-grid default or
+an accuracy guarantee. Retain run-owned simulation inputs/version and bounded
+derived buffers separately from immutable source snapshots. Playback, checkpoints
+and backward stock navigation are deferred, not prerequisites for mode transport.
+
 Tests: box/cylinder serialization, fixed-mm validation, centred bounds, rotations, front/top-face helpers, missing/removal behavior, preservation during machine-style conversion, manual edit and undo/redo synchronization, and conflicting multi-channel material. Later execution tests must cover work-offset transforms and turning diameter-mode conversion before material/tool intersections are considered accurate.
 
 ### Geometry naming and Three.js adapter conventions

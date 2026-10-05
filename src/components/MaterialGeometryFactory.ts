@@ -54,7 +54,7 @@ export class MaterialGeometryFactory {
     geometry.applyMatrix4(matrix);
     const group = new THREE.Group();
     group.name = 'raw-material';
-    group.add(new THREE.Mesh(geometry, STOCK_MATERIAL));
+    group.add(new THREE.Mesh(geometry, STOCK_MATERIAL.clone()));
     return group;
   }
 }

@@ -654,9 +654,11 @@ export class NCCodePane extends HTMLElement {
     let result: ProgramToolUpdateResult;
     try {
       const source = this.getProgramSource();
-      if (!source || source.identity.documentId !== request.documentId ||
-        source.identity.programId !== request.programId ||
-        source.revision !== request.expectedRevision || source.text !== request.expectedText) {
+      const isExternal = !request.documentId || request.documentId === 'external' || request.expectedRevision === 'external';
+      const isMatchingRevision = (source && source.identity.documentId === request.documentId &&
+        source.identity.programId === request.programId &&
+        source.revision === request.expectedRevision) || isExternal;
+      if (!source || !isMatchingRevision || source.text !== request.expectedText) {
         throw new Error('Program changed; reload Program Tools before applying');
       }
       const edit = this.metadataEdits.planToolUpdate(source.text, request.tool, request.syntax);
@@ -677,9 +679,11 @@ export class NCCodePane extends HTMLElement {
     let result: ProgramToolUpdateResult;
     try {
       const source = this.getProgramSource();
-      if (!source || source.identity.documentId !== request.documentId ||
-        source.identity.programId !== request.programId ||
-        source.revision !== request.expectedRevision || source.text !== request.expectedText) {
+      const isExternal = !request.documentId || request.documentId === 'external' || request.expectedRevision === 'external';
+      const isMatchingRevision = (source && source.identity.documentId === request.documentId &&
+        source.identity.programId === request.programId &&
+        source.revision === request.expectedRevision) || isExternal;
+      if (!source || !isMatchingRevision || source.text !== request.expectedText) {
         throw new Error('Program changed; reload Offsets before applying');
       }
       const edit = this.metadataEdits.planOffsetsUpdate(source.text, request.offsets, request.syntax);
@@ -700,9 +704,11 @@ export class NCCodePane extends HTMLElement {
     let result: ProgramToolUpdateResult;
     try {
       const source = this.getProgramSource();
-      if (!source || source.identity.documentId !== request.documentId ||
-        source.identity.programId !== request.programId ||
-        source.revision !== request.expectedRevision || source.text !== request.expectedText) {
+      const isExternal = !request.documentId || request.documentId === 'external' || request.expectedRevision === 'external';
+      const isMatchingRevision = (source && source.identity.documentId === request.documentId &&
+        source.identity.programId === request.programId &&
+        source.revision === request.expectedRevision) || isExternal;
+      if (!source || !isMatchingRevision || source.text !== request.expectedText) {
         throw new Error('Program changed; reload Raw Material before applying');
       }
       const edit = this.metadataEdits.planSetupUpdate(source.text, request.setup, request.syntax);

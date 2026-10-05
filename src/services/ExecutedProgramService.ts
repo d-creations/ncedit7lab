@@ -15,6 +15,7 @@ import type {
   MachineProfile,
   SimulationChannelInput,
   ToolReference,
+  MachiningMode,
 } from '@core/types';
 import { BackendGateway } from './BackendGateway';
 import { EventBus, EVENT_NAMES } from './EventBus';
@@ -22,6 +23,13 @@ import { freezeMetadata } from './tools/SimulationMetadata';
 import type { PlotRunInput, PlotRunSnapshot } from './tools/PlotRunSnapshot';
 import { executionProgram } from './tools/PlotRunSnapshot';
 import type { ProgramToolDefinition } from './tools/SimulationMetadata';
+import { prepareMaterialRemoval } from './tools/MaterialRemovalPreparation';
+
+function parseMachiningMode(value: unknown): MachiningMode {
+  if (value === undefined || value === null) return 'unknown';
+  if (value === 'turning' || value === 'milling' || value === 'unknown') return value;
+  throw new Error(`Invalid backend machining mode: ${String(value)}`);
+}
 
 export interface ExecutionRequest {
   channelId: ChannelId;
@@ -92,14 +100,18 @@ export class ExecutedProgramService {
       }
       throw error;
     }
+    const plotMetadata = structuredClone({
+      points: results.flatMap((result) => result.plotMetadata?.points ?? []),
+      segments: results.flatMap((result) => result.plotMetadata?.segments ?? []),
+    });
     const run = freezeMetadata({
       runId,
       toolPathMode,
       inputs: captured,
-      plotMetadata: structuredClone({
-        points: results.flatMap((result) => result.plotMetadata?.points ?? []),
-        segments: results.flatMap((result) => result.plotMetadata?.segments ?? []),
-      }),
+      plotMetadata,
+      materialRemoval: toolPathMode === 'simulation'
+        ? prepareMaterialRemoval(captured, plotMetadata)
+        : undefined,
     });
     // Superseded/cleared requests must not evict or replace the displayed run.
     if (generation === this.plotGeneration) {
@@ -388,6 +400,7 @@ export class ExecutedProgramService {
 
         if (canal.segments && Array.isArray(canal.segments)) {
           canal.segments.forEach((segment, sourceSegmentIndex) => {
+            const machiningMode = parseMachiningMode(segment.machiningMode);
             if (segment.points && segment.points.length >= 2) {
               let segmentType: 'rapid' | 'feed' | 'arc' | undefined;
               const traversal = segment.traversal?.toUpperCase();
@@ -426,6 +439,7 @@ export class ExecutedProgramService {
                   startPoint: mappedPoints[index],
                   endPoint: mappedPoints[index + 1],
                   type: segmentType,
+                  machiningMode,
                   toolNumber: segment.toolNumber,
                   executionStep: segment.executionStep,
                   sourceSegmentIndex,

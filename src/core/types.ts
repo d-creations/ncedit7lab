@@ -17,6 +17,7 @@ export type ToolPathMode = 'effective' | 'center' | 'simulation';
 
 export const WORKPIECE_TOOL_REFERENCE_POSE_CONTRACT = 'workpiece-tool-reference-v1';
 export type ToolReference = 'millingTip' | 'turningVirtualTip';
+export type MachiningMode = 'turning' | 'milling' | 'unknown';
 
 export interface MachineSimulationRotationJoint {
   axisId: string;
@@ -262,6 +263,8 @@ export interface PlotSegment {
   startPoint: PlotPoint;
   endPoint: PlotPoint;
   type: 'rapid' | 'feed' | 'arc';
+  /** Executed operation mode, independent of traversal and cutter shape. */
+  machiningMode?: MachiningMode;
   /** Active tool captured by execution; "unknown", null and missing mean unavailable. */
   toolNumber?: number | string | null;
   /** Executed-command occurrence within the channel, shared by generated cycle moves. */
@@ -317,6 +320,7 @@ export interface BackendPlotSegment {
   geometry?: string;
   traversal?: string;
   sourceCode?: string;
+  machiningMode?: MachiningMode | null;
   lineNumber?: number;
   toolNumber?: number | string | null;
   executionStep?: number | null;

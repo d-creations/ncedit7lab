@@ -1,8 +1,9 @@
-import type { ChannelId, ParseArtifacts, ToolOffsetValue } from '@core/types';
+import type { ChannelId, MachineType, ParseArtifacts, ToolOffsetValue } from '@core/types';
 import { ServiceRegistry } from '@core/ServiceRegistry';
 import {
   EVENT_BUS_TOKEN,
   FILE_MANAGER_SERVICE_TOKEN,
+  MACHINE_SERVICE_TOKEN,
   PARSER_SERVICE_TOKEN,
   PROGRAM_TOOL_SERVICE_TOKEN,
   STATE_SERVICE_TOKEN,
@@ -10,8 +11,10 @@ import {
 } from '@core/ServiceTokens';
 import { EventBus, EVENT_NAMES, type EventSubscription } from '@services/EventBus';
 import type { IFileManagerService } from '@services/IFileManagerService';
+import type { MachineService } from '@services/MachineService';
 import { ParserService } from '@services/ParserService';
 import { StateService } from '@services/StateService';
+import type { SimulationCommentSyntax } from '@services/tools/SimulationCommentCodec';
 import type { ProgramSource, ProgramToolSnapshot } from '@services/tools/ProgramToolService';
 import { ProgramToolService } from '@services/tools/ProgramToolService';
 import type {
@@ -70,9 +73,12 @@ export class NCToolManagerPanel extends HTMLElement {
   private readonly programTools: ProgramToolService;
   private readonly catalog: ToolCatalogService;
   private readonly fileManager?: IFileManagerService;
+  private readonly machineService?: MachineService;
+  private pendingMachineName?: string;
   private subscriptions: EventSubscription[] = [];
   private hostChannelListener?: (event: Event) => void;
   private hostMessageListener?: (event: MessageEvent) => void;
+  private bridgeListener?: (event: Event) => void;
   private activeTab: ManagerTab = 'library';
   private channelId: ChannelId = '1';
   private libraryTools: LibraryToolDefinition[] = [];
@@ -101,6 +107,7 @@ export class NCToolManagerPanel extends HTMLElement {
     this.programTools = registry.get(PROGRAM_TOOL_SERVICE_TOKEN);
     this.catalog = registry.get(TOOL_CATALOG_SERVICE_TOKEN);
     this.fileManager = registry.has(FILE_MANAGER_SERVICE_TOKEN) ? registry.get(FILE_MANAGER_SERVICE_TOKEN) : undefined;
+    this.machineService = registry.has(MACHINE_SERVICE_TOKEN) ? registry.get(MACHINE_SERVICE_TOKEN) : undefined;
     this.attachShadow({ mode: 'open' });
   }
 
@@ -152,6 +159,40 @@ export class NCToolManagerPanel extends HTMLElement {
     };
     window.addEventListener('message', this.hostMessageListener);
 
+    this.bridgeListener = ((event: Event) => {
+      const detail = (event as CustomEvent).detail as any;
+      if (!detail || detail.type !== 'WORKBENCH_BRIDGE') return;
+      if (detail.eventType === 'MACHINE_CHANGED') {
+        const { machineName } = detail.payload;
+        if (machineName) {
+          const machines = this.stateService.getState().machines;
+          if (machines.find(m => m.machineName === machineName)) {
+            this.stateService.setGlobalMachine(machineName as MachineType);
+          } else {
+            this.pendingMachineName = machineName;
+          }
+          void this.loadProgram();
+        }
+      }
+    }) as EventListener;
+    window.addEventListener('vscode:workbench-bridge', this.bridgeListener);
+
+    if (this.machineService) {
+      this.machineService.init().then(() => {
+        const machines = this.machineService!.getMachines();
+        if (machines.length > 0) {
+          this.stateService.setMachines(machines);
+          if (this.pendingMachineName) {
+            this.stateService.setGlobalMachine(this.pendingMachineName as MachineType);
+            this.pendingMachineName = undefined;
+          } else if (!this.stateService.getState().activeMachine) {
+            this.stateService.setGlobalMachine(machines[0].machineName);
+          }
+        }
+        void this.loadProgram();
+      }).catch(() => {});
+    }
+
     await Promise.all([this.loadLibrary(false), this.loadProgram(false)]);
     this.render();
   }
@@ -164,6 +205,9 @@ export class NCToolManagerPanel extends HTMLElement {
     }
     if (this.hostMessageListener) {
       window.removeEventListener('message', this.hostMessageListener);
+    }
+    if (this.bridgeListener) {
+      window.removeEventListener('vscode:workbench-bridge', this.bridgeListener);
     }
   }
 
@@ -288,13 +332,40 @@ export class NCToolManagerPanel extends HTMLElement {
       return {
         identity: {
           channelId: this.channelId,
-          documentId: program.id,
-          programId: program.name || `Channel ${this.channelId}`,
+          documentId: 'external',
+          programId: program.id || program.name || `Channel ${this.channelId}`,
         },
-        revision: 0,
+        revision: 'external',
         text: program.content,
       };
     }
+    return undefined;
+  }
+
+  private getSimulationCommentSyntax(): SimulationCommentSyntax | undefined {
+    const machine = this.stateService.getState().activeMachine;
+    if (machine) {
+      if (machine.simulationCommentSyntax) {
+        return machine.simulationCommentSyntax;
+      }
+      const controlType = machine.controlType?.toUpperCase();
+      if (controlType === 'SIEMENS') {
+        return { kind: 'line', prefix: ';' };
+      }
+      if (controlType === 'FANUC') {
+        return { kind: 'block', open: '(', close: ')' };
+      }
+      return undefined;
+    }
+
+    const text = this.programSource?.text;
+    if (text && text.includes(';') && !text.includes('(')) {
+      return { kind: 'line', prefix: ';' };
+    }
+    if (text) {
+      return { kind: 'block', open: '(', close: ')' };
+    }
+
     return undefined;
   }
 
@@ -376,7 +447,7 @@ export class NCToolManagerPanel extends HTMLElement {
   }
 
   private renderProgram(): string {
-    const syntax = this.stateService.getState().activeMachine?.simulationCommentSyntax;
+    const syntax = this.getSimulationCommentSyntax();
     const diagnostic = this.programSnapshot?.diagnostics.map((item) => item.message).join('; ');
     return `
       <aside class="tool-list-pane">
@@ -484,7 +555,7 @@ export class NCToolManagerPanel extends HTMLElement {
   private renderMaterial(): string {
     const material = this.materialDraft;
     if (!material) return '<main class="tool-editor-pane material-editor-pane"><div class="empty">Select an active program to define raw material.</div></main>';
-    const syntax = this.stateService.getState().activeMachine?.simulationCommentSyntax;
+    const syntax = this.getSimulationCommentSyntax();
     const diagnostic = this.programSnapshot?.diagnostics.map((item) => item.message).join('; ');
     const dimensions = material.type === 'cylinder'
       ? [['diameter', 'Diameter'], ['length', 'Length (Z)']] as const
@@ -542,19 +613,20 @@ export class NCToolManagerPanel extends HTMLElement {
   private applyProgramMaterial(remove = false): void {
     try {
       if (this.pendingRequestId) throw new Error('A program update is already pending');
-      const machine = this.stateService.getState().activeMachine;
-      if (!this.programSource || !machine?.simulationCommentSyntax) {
+      const syntax = this.getSimulationCommentSyntax();
+      if (!this.programSource || !syntax) {
         throw new Error('An active program and a safe simulation-comment syntax are required');
       }
+      const machine = this.stateService.getState().activeMachine;
       const setup: ProgramSetupDefinition = {
-        machineName: this.programSnapshot?.setup?.machineName ?? machine.machineName,
+        machineName: this.programSnapshot?.setup?.machineName ?? machine?.machineName ?? 'CNC',
         ...(remove ? {} : { material: this.buildMaterialFromForm() }),
       };
       const request: ProgramSetupUpdateRequest = {
         requestId: createId('setup'), channelId: this.channelId,
         documentId: this.programSource.identity.documentId, programId: this.programSource.identity.programId,
         expectedRevision: this.programSource.revision, expectedText: this.programSource.text,
-        syntax: machine.simulationCommentSyntax, setup,
+        syntax, setup,
       };
       this.pendingRequestId = request.requestId;
       this.setStatus('Applying raw material metadata...', 'info');
@@ -697,7 +769,7 @@ export class NCToolManagerPanel extends HTMLElement {
   }
 
   private get canApplyProgram(): boolean {
-    return !!this.programSource && !!this.stateService.getState().activeMachine?.simulationCommentSyntax &&
+    return !!this.programSource && !!this.getSimulationCommentSyntax() &&
       this.programSnapshot?.valid !== false;
   }
 
@@ -706,6 +778,11 @@ export class NCToolManagerPanel extends HTMLElement {
       button.addEventListener('click', () => {
         this.activeTab = button.dataset.managerTab as ManagerTab;
         this.render();
+        if (this.activeTab === 'library') {
+          void this.loadLibrary(true);
+        } else {
+          void this.loadProgram(true);
+        }
       });
     });
     this.shadowRoot?.querySelector<HTMLSelectElement>('#manager-channel')?.addEventListener('change', (event) => {
@@ -991,7 +1068,7 @@ export class NCToolManagerPanel extends HTMLElement {
   private applyProgramTool(): void {
     try {
       if (!this.programSource) throw new Error('No active editor owns this program');
-      const syntax = this.stateService.getState().activeMachine?.simulationCommentSyntax;
+      const syntax = this.getSimulationCommentSyntax();
       if (!syntax) throw new Error('Selected machine has no safe simulation-comment capability');
       const tool = this.buildToolFromForm(this.readProgramIdentifier());
       const requestId = createId('tool-update');
@@ -1145,6 +1222,10 @@ export class NCToolManagerPanel extends HTMLElement {
       if (!machine.simulationCommentSyntax) {
         throw new Error('Selected machine has no safe simulation-comment capability');
       }
+      const syntax = this.getSimulationCommentSyntax();
+      if (!syntax) {
+        throw new Error('Selected machine has no safe simulation-comment capability');
+      }
       const offsets = this.readOffsets();
       this.programTools.setTemporaryToolOffsets(this.programSource.identity, policy, offsets);
       this.offsetDrafts = this.programTools.getTemporaryToolOffsets(this.programSource.identity);
@@ -1161,7 +1242,7 @@ export class NCToolManagerPanel extends HTMLElement {
         programId: this.programSource.identity.programId,
         expectedRevision: this.programSource.revision,
         expectedText: this.programSource.text,
-        syntax: machine.simulationCommentSyntax,
+        syntax,
         offsets: { offsetScope: policy.offsetScope, offsets: structuredClone(this.offsetDrafts) },
       };
       this.setStatus('Applying offset metadata...', 'info');

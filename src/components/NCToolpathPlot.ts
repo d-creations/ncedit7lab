@@ -17,7 +17,12 @@ import type { PlotMetadata, CustomVariable, ChannelId, ParseArtifacts } from '@c
 import type { ProgramToolService, ProgramSource } from '@services/tools/ProgramToolService';
 import type { ProgramToolSnapshot } from '@services/tools/ProgramToolService';
 import { programIdentityKey } from '@services/tools/ProgramToolService';
-import type { ToolIdentifier, ProgramToolDefinition } from '@services/tools/SimulationMetadata';
+import type {
+  DeepReadonly,
+  ProgramMaterialDefinition,
+  ToolIdentifier,
+  ProgramToolDefinition,
+} from '@services/tools/SimulationMetadata';
 import { createPlotSelectionResolver, type PlotSourceLocation } from '@services/tools/PlotSelectionResolver';
 import type { IFileManagerService } from '@services/IFileManagerService';
 import type { PlotRunInput } from '@services/tools/PlotRunSnapshot';
@@ -47,6 +52,8 @@ export class NCToolpathPlot extends HTMLElement {
   private themeObserver?: MutationObserver;
   private programTools: ProgramToolService;
   private fileManager: IFileManagerService;
+  private materialVisible = true;
+  private materialObject: THREE.Group | null = null;
   private subscriptions: EventSubscription[] = [];
   private displayedRunId?: string;
   private resolveSelection?: ReturnType<typeof createPlotSelectionResolver>;
@@ -106,7 +113,9 @@ export class NCToolpathPlot extends HTMLElement {
       this.clearSelection();
       this.resolveSelection = createPlotSelectionResolver(run);
       this.stale = false;
-      this.updatePlot(structuredClone(run.plotMetadata) as PlotMetadata);
+      const materials = run.materialRemoval?.stock ? [run.materialRemoval.stock] : [];
+      this.updatePlot(structuredClone(run.plotMetadata) as PlotMetadata, materials);
+      this.updateMaterialRemovalStatus();
       this.refreshStaleness();
     }));
 
@@ -182,6 +191,16 @@ export class NCToolpathPlot extends HTMLElement {
     this.eventBus.publish(EVENT_NAMES.PLOT_SELECTION_CHANGED, { runId: this.displayedRunId, status: 'cleared' });
   }
 
+  private updateMaterialRemovalStatus(): void {
+    const element = this.shadowRoot?.getElementById('material-removal-status');
+    if (!element) return;
+    const preparation = this.displayedRunId
+      ? this.executedProgramService.getPlotRun(this.displayedRunId)?.materialRemoval
+      : undefined;
+    element.hidden = !preparation || preparation.status === 'not-configured';
+    element.textContent = preparation?.diagnostics.map((diagnostic) => diagnostic.message).join(' ') ?? '';
+  }
+
   private selectOccurrence(step?: number): void {
     this.refreshStaleness();
     if (this.stale || !this.selectionLocation || !this.displayedRunId) {
@@ -217,13 +236,14 @@ export class NCToolpathPlot extends HTMLElement {
       this.displayedRunId, source.identity.programId, location.channelId, selection.segment.toolNumber,
     );
     this.updateToolMesh(selection.segment, tool);
-    if (status) status.textContent = `Execution step ${this.selectedExecutionStep}; ${tool ? tool.description : 'tool definition unavailable'}`;
+    if (status) status.textContent = `Execution step ${this.selectedExecutionStep}; mode: ${selection.segment.machiningMode ?? 'unknown'}; ${tool ? tool.description : 'tool definition unavailable'}`;
     this.eventBus.publish(EVENT_NAMES.PLOT_SELECTION_CHANGED, {
       runId: this.displayedRunId, status: 'selected', source: source?.identity, location,
       executionStep: this.selectedExecutionStep, fraction: selection.fraction,
       sourceSegmentIndex: selection.segment.sourceSegmentIndex,
       subsegmentIndex: selection.segment.subsegmentIndex,
       toolNumber: selection.segment.toolNumber, toolDefinitionAvailable: Boolean(tool),
+      machiningMode: selection.segment.machiningMode ?? 'unknown',
     });
   }
 
@@ -430,6 +450,7 @@ export class NCToolpathPlot extends HTMLElement {
             <button class="plot-button" id="reset-camera">Reset View</button>
             <button class="plot-button" id="toggle-axes">Axes</button>
             <button class="plot-button active" id="toggle-orbit">🔄 Orbit</button>
+            <button class="plot-button active" id="toggle-material" aria-pressed="true" hidden>Hide Material</button>
           </div>
           <div class="view-controls">
             <button class="plot-button" id="view-xy">X-Y</button>
@@ -449,6 +470,7 @@ export class NCToolpathPlot extends HTMLElement {
         </div>
         <div class="plot-info">
           <div id="plot-status">No plot data</div>
+          <div id="material-removal-status" role="status" style="max-height:60px;overflow:auto" hidden></div>
           <label for="plot-occurrence">Occurrence</label>
           <select id="plot-occurrence" disabled style="max-width:100%;width:180px;height:28px"></select>
         </div>
@@ -473,6 +495,9 @@ export class NCToolpathPlot extends HTMLElement {
 
     const axesButton = this.shadowRoot?.getElementById('toggle-axes');
     axesButton?.addEventListener('click', () => this.toggleAxes());
+
+    const materialButton = this.shadowRoot?.getElementById('toggle-material');
+    materialButton?.addEventListener('click', () => this.toggleMaterial());
 
     const orbitButton = this.shadowRoot?.getElementById('toggle-orbit');
     orbitButton?.addEventListener('click', () => this.toggleOrbit());
@@ -821,18 +846,22 @@ export class NCToolpathPlot extends HTMLElement {
     this.renderer.setSize(width, height);
   }
 
-  private updatePlot(plotMetadata: PlotMetadata) {
+  private updatePlot(
+    plotMetadata: PlotMetadata,
+    materials: readonly DeepReadonly<ProgramMaterialDefinition>[] = [],
+  ) {
     if (!this.scene) return;
 
-
-    // Clear existing plot lines (keep axes)
+    // Clear existing plot-owned objects (keep axes).
     const toRemove: THREE.Object3D[] = [];
     this.scene.children.forEach((child) => {
-      if (child.userData.isToolpath) {
+      if (child.userData.isToolpath || child.userData.isMaterial) {
         toRemove.push(child);
       }
     });
     toRemove.forEach((obj) => this.removeOwnedPlotObject(obj));
+    this.materialObject = null;
+    this.materialVisible = true;
 
     // Remove highlight object if exists
     if (this.highlightObject) {
@@ -844,6 +873,21 @@ export class NCToolpathPlot extends HTMLElement {
     const plotGroup = this.plotService.createSegmentedToolpath(plotMetadata);
     plotGroup.userData.isToolpath = true;
     this.scene.add(plotGroup);
+
+    if (this.simulationEnabled && materials.length) {
+      const materialGroup = new THREE.Group();
+      materialGroup.name = 'simulation-materials';
+      materialGroup.userData.isMaterial = true;
+      materials.forEach((material) => {
+        const mesh = this.toolGeometryFactory.createMaterialMesh(material);
+        if (mesh) materialGroup.add(mesh);
+      });
+      if (materialGroup.children.length) {
+        this.materialObject = materialGroup;
+        this.scene.add(materialGroup);
+      }
+    }
+    this.updateMaterialControl();
 
     // Update status
     const statusElement = this.shadowRoot?.getElementById('plot-status');
@@ -935,7 +979,7 @@ export class NCToolpathPlot extends HTMLElement {
     const box = new THREE.Box3();
     let hasContent = false;
     this.scene.children.forEach((child) => {
-      if (child.userData.isToolpath) {
+      if (child.userData.isToolpath || (child.userData.isMaterial && child.visible)) {
         box.expandByObject(child);
         hasContent = true;
       }
@@ -1018,10 +1062,28 @@ export class NCToolpathPlot extends HTMLElement {
     if (!this.scene) return;
     // Toggle visibility of axes
     this.scene.children.forEach((child) => {
-      if (child instanceof THREE.Group && !child.userData.isToolpath) {
+      if (child instanceof THREE.Group && !child.userData.isToolpath && !child.userData.isMaterial) {
         child.visible = !child.visible;
       }
     });
+  }
+
+  private toggleMaterial() {
+    if (!this.materialObject) return;
+    this.materialVisible = !this.materialVisible;
+    this.materialObject.visible = this.materialVisible;
+    this.updateMaterialControl();
+  }
+
+  private updateMaterialControl() {
+    const button = this.shadowRoot?.querySelector<HTMLButtonElement>('#toggle-material');
+    if (!button) return;
+    const available = this.simulationEnabled && this.materialObject !== null;
+    button.hidden = !available;
+    button.disabled = !available;
+    button.textContent = this.materialVisible ? 'Hide Material' : 'Show Material';
+    button.classList.toggle('active', this.materialVisible);
+    button.setAttribute('aria-pressed', String(this.materialVisible));
   }
 
   private toggleOrbit() {
@@ -1043,6 +1105,10 @@ export class NCToolpathPlot extends HTMLElement {
     this.displayedRunId = undefined;
     this.resolveSelection = undefined;
     this.stale = false;
+    this.simulationEnabled = false;
+    this.updateMaterialRemovalStatus();
+    this.materialVisible = true;
+    this.updateMaterialControl();
     if (!this.scene) return;
 
     // Remove highlight object if exists
@@ -1054,11 +1120,12 @@ export class NCToolpathPlot extends HTMLElement {
     // Clear all toolpath objects from the scene
     const toRemove: THREE.Object3D[] = [];
     this.scene.children.forEach((child) => {
-      if (child.userData.isToolpath) {
+      if (child.userData.isToolpath || child.userData.isMaterial) {
         toRemove.push(child);
       }
     });
     toRemove.forEach((obj) => this.removeOwnedPlotObject(obj));
+    this.materialObject = null;
 
     // Update status
     const statusElement = this.shadowRoot?.getElementById('plot-status');
@@ -1110,7 +1177,7 @@ export class NCToolpathPlot extends HTMLElement {
     let hasToolpath = false;
 
     this.scene.children.forEach((child) => {
-      if (child.userData.isToolpath) {
+      if (child.userData.isToolpath || (child.userData.isMaterial && child.visible)) {
         box.expandByObject(child);
         hasToolpath = true;
       }

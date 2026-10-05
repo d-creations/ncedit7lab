@@ -12,7 +12,7 @@ import { SimulationCommentCodec } from '@services/tools/SimulationCommentCodec';
 import type { BackendGateway } from '@services/BackendGateway';
 import type { StateService } from '@services/StateService';
 import type { IFileManagerService } from '@services/IFileManagerService';
-import type { PlotService } from '@services/PlotService';
+import { PlotService } from '@services/PlotService';
 import type { PlotMetadata, PlotResponse } from '@core/types';
 
 // Exercise actual event/action wiring without constructing a browser WebGL renderer.
@@ -24,6 +24,9 @@ interface PlotHarness extends HTMLElement {
   toolObject: THREE.Group | null;
   plotNCCode(channel?: string): Promise<void>;
   clearPlot(): void;
+  plotService: PlotService;
+  toggleMaterial(): void;
+  toggleAxes(): void;
 }
 
 describe('editor Plot actions', () => {
@@ -186,6 +189,41 @@ describe('editor Plot actions', () => {
     expect(plot.toolObject!.quaternion.toArray()).toEqual([0, 0, 1, 0]);
   });
 
+  it('shows and hides captured material in simulation plots', async () => {
+    source.text = new SimulationCommentCodec().encodeSetup({
+      machineName: 'test',
+      material: { type: 'box', width: 100, height: 20, depth: 60 },
+    }, syntax);
+    selectedMode = 'simulation';
+    plot.scene = new THREE.Scene();
+    plot.plotService = new PlotService(bus);
+    render.mockRestore();
+
+    await plot.plotNCCode('1');
+
+    const material = plot.scene.children.find((child) => child.userData.isMaterial)!;
+    const toggle = plot.shadowRoot!.querySelector<HTMLButtonElement>('#toggle-material')!;
+    expect(material.visible).toBe(true);
+    expect(toggle.hidden).toBe(false);
+    expect(toggle.textContent).toBe('Hide Material');
+    const diagnostics = plot.shadowRoot!.querySelector<HTMLElement>('#material-removal-status')!;
+    expect(diagnostics.hidden).toBe(false);
+    expect(diagnostics.textContent).toContain('program-coordinate preview');
+    expect(diagnostics.textContent).toContain('does not verify the active cutting spindle');
+    plot.toggleAxes();
+    expect(material.visible).toBe(true);
+
+    toggle.click();
+    expect(material.visible).toBe(false);
+    expect(toggle.textContent).toBe('Show Material');
+
+    toggle.click();
+    expect(material.visible).toBe(true);
+    expect(toggle.textContent).toBe('Hide Material');
+    plot.clearPlot();
+    expect(diagnostics.hidden).toBe(true);
+  });
+
   it('shows a turning tool at a turning virtual-tip endpoint pose', async () => {
     source.text = new SimulationCommentCodec().encodeTool({ toolNumber: 2, description: 'D turning insert',
       cutting: [{ type: 'insert', shape: 'D', ic: 9.525, thickness: 3.97, noseRadius: 0.4, clearanceAngle: 7 }],
@@ -206,6 +244,35 @@ describe('editor Plot actions', () => {
 
     expect(plot.toolObject).not.toBeNull();
     expect(plot.toolObject!.position.toArray()).toEqual([4, 5, 6]);
+  });
+
+  it.each([true, false])('renders one shared stock or reports a conflict across channels, equal=%s', async (equal) => {
+    const firstText = new SimulationCommentCodec().encodeSetup({
+      machineName: 'test', material: { type: 'cylinder', diameter: 20, length: 40, zeroVertex: 1 },
+    }, syntax);
+    source.text = firstText;
+    const editor = document.querySelector<HTMLElement & { getProgramSource(): ProgramSource }>(
+      'nc-channel-pane[data-channel="2"] nc-code-pane',
+    )!;
+    editor.getProgramSource = () => ({
+      identity: { documentId: 'doc', programId: 'two', channelId: '2' }, revision: 0,
+      text: equal ? firstText : new SimulationCommentCodec().encodeSetup({
+        machineName: 'test', material: { type: 'cylinder', diameter: 21, length: 40, zeroVertex: 1 },
+      }, syntax),
+    });
+    selectedMode = 'simulation';
+    plot.scene = new THREE.Scene();
+    plot.plotService = new PlotService(bus);
+    render.mockRestore();
+
+    await plot.plotNCCode();
+
+    const materials = plot.scene.children.filter((child) => child.userData.isMaterial);
+    expect(materials).toHaveLength(equal ? 1 : 0);
+    if (equal) expect(materials[0].children).toHaveLength(1);
+    expect(plot.shadowRoot!.getElementById('material-removal-status')!.textContent)
+      .toContain(equal ? 'shared cutting order' : 'definitions conflict');
+    expect(requestPlot).toHaveBeenCalledTimes(1);
   });
 
   it('applies the emitted pose orientation directly without double-applying tool mounting orientation', async () => {
@@ -252,6 +319,7 @@ describe('editor Plot actions', () => {
   it('selects repeated occurrences without execution and retains the choice until source changes', async () => {
     requestPlot.mockResolvedValue({ canal: { '1': { segments: [0, 3].map((executionStep) => ({
       traversal: 'FEED', geometry: 'LINEAR', lineNumber: 1, executionStep, toolNumber: executionStep,
+      machiningMode: executionStep === 0 ? 'turning' : 'milling',
       points: [{ x: 0, y: 0, z: 0 }, { x: executionStep + 1, y: 0, z: 0 }],
     })) } } });
     plot.scene = new THREE.Scene();
@@ -268,7 +336,9 @@ describe('editor Plot actions', () => {
     expect(changed).toHaveBeenLastCalledWith(expect.objectContaining({
       runId: 'plot-1', status: 'selected', executionStep: 3, toolNumber: 3,
       sourceSegmentIndex: 1, subsegmentIndex: 0, toolDefinitionAvailable: false,
+      machiningMode: 'milling',
     }));
+    expect(plot.shadowRoot!.getElementById('plot-status')!.textContent).toContain('mode: milling');
     bus.publish(EVENT_NAMES.EDITOR_CURSOR_MOVED, { channelId: '1', lineNumber: 1, source });
     expect(control.value).toBe('3');
     expect(requestPlot).toHaveBeenCalledTimes(1);

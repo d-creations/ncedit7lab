@@ -9,6 +9,9 @@ import type {
 } from '@services/tools/SimulationMetadata';
 import { buildInsertContour } from '@services/tools/InsertOutline';
 import { MaterialGeometryFactory } from './MaterialGeometryFactory';
+import { getInsertQShift } from '@services/simulation/TurningReference';
+import { createMillingCutterGeometry } from './MillingCutterGeometry';
+export { getInsertQShift, TURN_Q_VECTORS } from '@services/simulation/TurningReference';
 
 const TOOL_COLOR = 0xf4c542;
 const TOOL_MATERIAL = new THREE.MeshStandardMaterial({ color: TOOL_COLOR, metalness: 0.8, roughness: 0.3 });
@@ -64,47 +67,6 @@ export interface InsertPickPoint {
   active: boolean;
 }
 
-export const TURN_Q_VECTORS: Record<number, readonly [number, number]> = {
-  1: [-1, -1],
-  2: [1, -1],
-  3: [1, 1],
-  4: [-1, 1],
-  5: [0, -1],
-  6: [1, 0],
-  7: [0, 1],
-  8: [-1, 0],
-  9: [0, 0],
-  0: [0, 0],
-};
-
-export function getInsertQShift(tool: DeepReadonly<ProgramToolDefinition>): THREE.Vector3 {
-  if (tool.Q === undefined) return new THREE.Vector3();
-  const qVector = TURN_Q_VECTORS[tool.Q];
-  if (!qVector) return new THREE.Vector3();
-
-  const part = tool.cutting?.find((candidate): candidate is InsertPart => candidate.type === 'insert');
-  if (!part || !part.noseRadius || part.noseRadius <= 0) return new THREE.Vector3();
-
-  const contour = insertContour(part, tool.turning?.activeCorner);
-  if (!contour.radiusCenter) return new THREE.Vector3();
-
-  const R = part.noseRadius;
-  // Outline (x, y) maps to 3D (x, 0, y) where x is tool X and y is tool Z
-  const localM = new THREE.Vector3(contour.radiusCenter[0], 0, contour.radiusCenter[1]);
-  const euler = new THREE.Euler(
-    THREE.MathUtils.degToRad(part.rotation?.[0] ?? 0),
-    THREE.MathUtils.degToRad(part.rotation?.[1] ?? 0),
-    THREE.MathUtils.degToRad(part.rotation?.[2] ?? 0),
-    'ZYX',
-  );
-  const rotatedM = localM.applyEuler(euler);
-
-  const targetX = qVector[0] * R;
-  const targetZ = qVector[1] * R;
-
-  return new THREE.Vector3(targetX - rotatedM.x, 0, targetZ - rotatedM.z);
-}
-
 /** Sharp outline vertices of the first insert in assembly coordinates (before tool orientation). */
 export function getInsertPickPoints(tool: DeepReadonly<ProgramToolDefinition>): InsertPickPoint[] {
   const part = tool.cutting?.find((candidate): candidate is InsertPart => candidate.type === 'insert');
@@ -155,7 +117,11 @@ function addPart(
   } else if (part.type === 'box') {
     geometry = new THREE.BoxGeometry(part.width, part.height, part.length);
     length = part.length;
-  } else if (part.type === 'cylinder' || part.type === 'endMill' || part.type === 'ballMill' || part.type === 'drill') {
+  } else if (part.type === 'endMill' || part.type === 'ballMill' || part.type === 'drill') {
+    geometry = createMillingCutterGeometry(part);
+    length = part.length;
+    needsAxisCorrection = true;
+  } else if (part.type === 'cylinder') {
     geometry = new THREE.CylinderGeometry(part.diameter / 2, part.diameter / 2, part.length, 24);
     length = part.length;
     needsAxisCorrection = true;

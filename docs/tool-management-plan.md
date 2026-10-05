@@ -78,7 +78,10 @@ the Tool Manager Raw Material tab also creates round stock or plates, selects
 either end-face centre or any of eight corners in the live preview, and applies
 or removes material in revision-checked program SETUP comments. Machine setup UI,
 turning execution poses, exact nose-centre/virtual-tip machine semantics,
-playback, machine calibration and material removal remain pending.
+playback and machine calibration remain pending. A bounded geometric material-removal
+preview is now implemented as described in the mixed turning/milling section below;
+verified machining, collision and synchronized multi-channel removal remain outside
+its scope.
 Section 11 contains both implemented contract details and broader future work; the
 current-status section above defines the active implementation boundary.
 
@@ -350,29 +353,79 @@ transforms or zero references produce a visible conflict rather than duplicate
 workpieces. This is the initial single-shared-stock view, not a part-transfer model.
 Channel-local steps cannot establish a shared removal order.
 
-Removal is still blocked. The plot surfaces unresolved stock-frame binding and
-cutting-spindle state, missing feed modes/geometry/aligned poses, different target
-frames and unverified turning nose/Q references. A resolved pose frame name alone
-does not establish the initial program-to-stock transform. These diagnostics are
-run-owned and do not write metadata, trigger execution or claim a machined result.
+#### Implemented geometric removal preview
 
-The intended first removal scope is geometric, per executed motion, with no timed
-playback. Maintain one 3D stock across turning -> milling -> turning; never restore
-an axisymmetric 2D profile after milling, because that can refill removed features.
-For supported conventional turning, subtract the rotational sweep of the cutting
-insert about the resolved stock spindle axis, not merely the stationary displayed
-insert. Milling subtracts the swept cutting geometry along resolved sampled poses;
-holders never remove stock. Threading, spindle-phase-dependent operations and
-unresolved rotary/transfer operations require separate capabilities.
+In a single-channel Simulation plot, open **Removal setup**, select the backend
+workpiece frame, and explicitly enter the initial program-to-workpiece translation
+(mm) and extrinsic X/Y/Z rotation (degrees). Also specify the turning spindle origin
+in that frame and its +X/+Y/+Z axis. Identity is a user-confirmed setup, not an inferred
+transform. Press **Bind stock and run removal**. Subsequent Simulation Plot actions
+reuse this setup only for the same program identity, machine and profile revision.
+The transform composes with the stock's own placement/zero point once. No setup
+comments or backend machine rules are changed by this action.
 
-Keep removal computation separate from MaterialGeometryFactory's preview meshes.
-A bounded adaptive sparse stock and chunked exposed-surface meshes are the candidate
-implementation, not a benchmarked choice or an implemented kernel. Test its memory,
-motion sampling and surface-update costs before choosing the final representation.
-0.05 mm may be a local refinement target, not an unbounded uniform-grid default or
-an accuracy guarantee. Retain run-owned simulation inputs/version and bounded
-derived buffers separately from immutable source snapshots. Playback, checkpoints
-and backward stock navigation are deferred, not prerequisites for mode transport.
+The frame selector defaults to `workpiece:tableBC` when present in the executed
+poses; an existing confirmed binding takes precedence. This selection alone does
+not confirm the stock transform or start removal.
+
+Supported feed motions in a known mode are explicitly assumed cutting. Missing
+spindle state is a visible warning, not an automatic blocker; rapids never remove
+stock. This is a geometric preview, not spindle verification or safe-machine advice.
+Ordinary linear G0/G00 rapid records with fewer than two samples are ignored for
+removal because they cannot cut. Incomplete feed, unknown or unsupported records
+still stop the result; no missing cutting sweep is inferred.
+FANUC mill singleton tool-selection markers with no motion semantics are also
+excluded, but only when their executed source line contains just a numeric T
+selection and optional M6, and the reported tool matches. Source text is used only
+to verify this non-cutting marker, never to infer machining mode or missing poses.
+Unresolved stock binding and multi-channel order still block removal. At the first
+unknown mode, missing explicit cutting geometry/pose, target-frame switch or
+unsupported operation, prepare only the valid preceding motions and report a
+**stopped** result with execution step/source line. Unknown paths filtered from
+display conversion are retained as removal-stop markers, not silently skipped.
+Synthetic default preview tools cannot substitute for physical cutting definitions.
+
+The pipeline is WorkpieceFactory -> chunked StockModel -> CuttingToolModel/
+MaterialRemovalEngine -> StockMeshBuilder -> run-owned MaterialSimulationSession.
+Stock starts as a box or solid cylinder. Cutting models support flat/corner-radius
+end mills, ball mills and drill points with their declared part transforms. The
+tool display shares the same milling radius profiles. Holders never subtract stock.
+Each sampled path pair is further subdivided using translation plus cutter-radius
+angular displacement, bounded to one third of a voxel per sample. Backend rotary
+poses must already resolve angular travel; captured undersampled half/full turns
+are rejected rather than reconstructed from equal endpoint quaternions.
+
+Conventional turning uses the insert's rounded radial/axial cutting section,
+rotationally swept about the explicitly bound spindle axis. Its section must lie
+in a spindle meridian and retain a fixed orientation during the motion. Executed
+Q overrides the program default using the shared preview Q convention (0..9);
+virtual-tip/nose alignment has geometric fixtures. This does not establish physical
+machine calibration. Compensated turning G41/G42, unverified round-insert Q mounting,
+insert milling, threading and compound special operations stop the preview.
+Only ordinary G0/G1/G2/G3 motion source codes are admitted when supplied.
+
+One 3D stock is retained across turning -> milling -> turning. Milling pockets
+cannot be refilled by restoring an axisymmetric profile. This first implementation
+displays final stock or the valid stopped prefix, not cursor-dependent historical
+stock. Timed playback, checkpoints, adaptive refinement, part transfer, synchronized
+channels and collision checking remain deferred.
+
+Algorithm version 1 uses uniform-resolution occupied voxel chunks, not an octree.
+Default resolution is 0.5 mm; the explicit 0.05..5 mm setting never silently coarsens.
+Limits are 4,000,000 candidate stock cells, 16 MiB occupied-chunk arrays, 200,000
+exposed faces (about 27.5 MiB position/normal buffers), 100,000 pose samples and
+50,000,000 candidate-cell tests. Exceeding a limit reports failure and leaves initial
+stock visible, never a success-shaped partial cut. Cell-centre occupancy and sampled
+sweeps are resolution-dependent approximations, not a 0.05 mm accuracy guarantee.
+
+Computation runs in a dedicated Web Worker. Progress is throttled; Cancel Removal,
+stale inputs, replacement and disconnect terminate pending workers and reject late
+responses. Meshing caches exposed surfaces per chunk and marks neighbour chunks
+dirty on boundary changes; only the final surface is installed for this no-playback
+scope. Meshes share a material and owned resources are released once. The session
+retains detached simulation inputs/version, statistics and derived buffers under
+its plot run ID, outside the immutable source snapshot. Cursor motion performs no
+new removal, parsing or execution. Worker/meshing failure is surfaced explicitly.
 
 Tests: box/cylinder serialization, fixed-mm validation, centred bounds, rotations, front/top-face helpers, missing/removal behavior, preservation during machine-style conversion, manual edit and undo/redo synchronization, and conflicting multi-channel material. Later execution tests must cover work-offset transforms and turning diameter-mode conversion before material/tool intersections are considered accurate.
 

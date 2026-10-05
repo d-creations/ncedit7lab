@@ -298,6 +298,32 @@ def test_build_segments_preserves_immutable_motion_context():
     assert converted["segments"][0]["motionContext"] == context
 
 
+@pytest.mark.parametrize("mode", ["turning", "milling", "unknown", None])
+def test_build_segments_preserves_machining_mode(mode):
+    converted = api.build_segments_from_engine_output({"plot": [{
+        "x": [0, 1], "y": [0, 0], "z": [0, 0], "machiningMode": mode,
+    }]})
+    assert converted["segments"][0]["machiningMode"] == (mode or "unknown")
+
+
+def test_build_segments_reads_legacy_captured_mode_without_inferring_from_geometry():
+    context = {"machiningMode": "turning"}
+    converted = api.build_segments_from_engine_output({"plot": [
+        {"x": [0, 1], "motionContext": context},
+        {"x": [0, 1], "geometry": "LINEAR", "traversal": "FEED"},
+        {"x": [0, 1], "machiningMode": "milling", "motionContext": context},
+    ]})
+    assert [segment["machiningMode"] for segment in converted["segments"]] == [
+        "turning", "unknown", "milling",
+    ]
+    assert context == {"machiningMode": "turning"}
+
+
+def test_build_segments_rejects_invalid_engine_mode():
+    with pytest.raises(ValueError, match="Invalid engine machining mode"):
+        api.build_segments_from_engine_output({"plot": [{"x": [0, 1], "machiningMode": "cutting"}]})
+
+
 def test_mill_demo_engine_captures_actual_motion_axis_endpoints():
     payload = {"toolPathMode": "center", "machinedata": [{
         "machineName": "FANUC_MILL_DEMO", "canalNr": "1",

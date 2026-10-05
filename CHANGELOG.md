@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.1] - 2026-10-05
+
+### Added
+- **Geometric Material Removal Preview**: Added bounded, chunked 3D voxel stock removal for a single-channel Simulation plot, including box/cylinder stock, swept flat/ball/corner-radius end mills and drills, and supported conventional turning inserts. Turning and milling subtract from the same stock so earlier pockets and holes remain removed.
+- **Removal Setup**: Added explicit program-to-workpiece translation/rotation, workpiece-frame selection, turning spindle origin/axis, and configurable voxel size from 0.05 to 5 mm with a 0.5 mm default.
+- **Background Computation**: Added a run-owned Web Worker with progress, cancellation, memory/work limits, and exposed stock-surface generation. Obsolete runs are cancelled without tying computation to editor cursor movement.
+- **Removal Capability Diagnostics**: Unsupported operations, unknown feed modes, missing cutter geometry/poses, and frame changes stop removal at the affected execution step and source line. Rapids never remove stock; supported feeds are assumed cutting with a visible spindle-verification warning.
+
+### Changed
+- **Default Stock Frame Selection**: Removal setup preselects `workpiece:tableBC` when available, preserving an existing confirmed binding and still requiring explicit bind-and-run confirmation.
+- **Removal Display Scope**: The preview displays final stock, or the valid stock prefix before an unsupported motion. Cursor-dependent stock history and timed playback are not included.
+- **Cutter Geometry Consistency**: Milling previews share computational cutter profiles, and turning uses executed Q/reference data when available.
+
+### Fixed
+- **Backend Machining Mode Transport**: Preserve per-motion turning/milling mode through the API adapter instead of dropping it and leaving frontend motions unknown.
+- **Non-Cutting Removal Stops**: Ordinary incomplete linear rapid records and verified FANUC mill singleton tool-selection markers no longer incorrectly stop removal. Incomplete cutting motions and unverified records remain explicit blockers.
+- **Stock Placement and Resources**: Share initial stock placement/zero-reference transforms between rendering and computation, and dispose replaced stock meshes and shared rendering resources.
+
 ## [1.2.0] - 2026-10-05
 
 ### Added

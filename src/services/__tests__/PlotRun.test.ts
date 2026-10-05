@@ -209,7 +209,7 @@ describe('completed plot runs', () => {
       .toEqual(['turning', 'milling', 'turning']);
     expect(run.materialRemoval).toMatchObject({ status: 'blocked', stock: material });
     expect(run.materialRemoval?.diagnostics.map((diagnostic) => diagnostic.code))
-      .toContain('turning-reference-unverified');
+      .toContain('stock-frame-unresolved');
     expect(Object.isFrozen(run.materialRemoval?.stock)).toBe(true);
     expect(Object.isFrozen(run.materialRemoval?.diagnostics)).toBe(true);
     mixed.canal = {};

@@ -45,6 +45,13 @@ uvicorn backend.main_import:app --host 0.0.0.0 --port 8000 --reload
 
 ### Plot API update (2026-09-14)
 
+- Per-motion `machiningMode` is forwarded as `turning`, `milling` or `unknown`.
+  Older engines may supply the captured mode in `motionContext`; absent/null mode
+  stays unknown and invalid values reject conversion. No adapter infers mode from
+  the tool, geometry or spindle-stop commands. The matching engine must capture
+  mode during execution; restart/redeploy a non-reloading backend after updates.
+  The geometric removal preview uses explicit frontend stock-frame setup and
+  assumes supported feed motions are cutting, without spindle verification.
 - CGI and FastAPI execute all selected channels in one engine call and report `executionOrigin: "engine"`. Failed/unavailable execution or recorded NC errors return `success: false`; no automatic mock replacement. Legitimate empty output remains successful.
 - FastAPI now passes `toolPathMode` into each channel state, so `center` reaches the actual projector.
 - Explicit `rValue: 0` is valid in `toolValues` and selected positive-numbered `toolOffsets` records. It means zero radius displacement, not missing data, G41/G42 cancellation, or a fallback to another radius. Negative/missing radius still fails compensation activation. Register zero is a cancellation selector, not a stored register.

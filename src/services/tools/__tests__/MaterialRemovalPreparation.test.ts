@@ -5,11 +5,19 @@ import type { ProgramMaterialDefinition } from '../SimulationMetadata';
 import { SimulationCommentCodec } from '../SimulationCommentCodec';
 import { ProgramToolService } from '../ProgramToolService';
 import { prepareMaterialRemoval } from '../MaterialRemovalPreparation';
+import type { ProgramToolDefinition } from '../SimulationMetadata';
 
 const syntax = { kind: 'line', prefix: ';' } as const;
 const codec = new SimulationCommentCodec();
 const tools = new ProgramToolService(codec);
 const stock: ProgramMaterialDefinition = { type: 'cylinder', diameter: 20, length: 40, zeroVertex: 1 };
+const setup = {
+  binding: {
+    frameId: 'workpiece:mainSpindle', position: [0, 0, 0], rotation: [0, 0, 0],
+    spindleOrigin: [0, 0, 0], spindleAxis: [0, 0, 1],
+  },
+  resolutionMm: 0.5,
+} satisfies NonNullable<PlotRunInput['materialSimulation']>;
 
 function input(channelId: ChannelId = '1', material?: ProgramMaterialDefinition): PlotRunInput {
   const text = [
@@ -56,7 +64,7 @@ describe('material removal prerequisites', () => {
     expect(result.channelIds).toEqual(['1', '2']);
     expect(result.frameId).toBe('workpiece:mainSpindle');
     expect(result.diagnostics.map((diagnostic) => diagnostic.code))
-      .toEqual(['stock-frame-unresolved', 'spindle-state-unavailable', 'channel-order-unavailable']);
+      .toEqual(['spindle-state-unavailable', 'channel-order-unavailable', 'stock-frame-unresolved']);
   });
 
   it.each([
@@ -75,34 +83,42 @@ describe('material removal prerequisites', () => {
     const result = prepareMaterialRemoval([input('1', stock)], metadata(move()));
     expect(result.status).toBe('blocked');
     expect(result.diagnostics.map((diagnostic) => diagnostic.code))
-      .toEqual(['stock-frame-unresolved', 'spindle-state-unavailable']);
+      .toEqual(['spindle-state-unavailable', 'stock-frame-unresolved']);
   });
 
-  it('flags missing mode, exact tool identity and aligned poses without borrowing prior motion state', () => {
+  it.each([
+    ['motion-mode-unavailable', { machiningMode: 'unknown' as const }],
+    ['tool-geometry-unavailable', { toolNumber: 1 }],
+    ['tool-pose-unavailable', { poses: undefined }],
+  ])('stops at %s without borrowing prior motion state', (code, override) => {
     const result = prepareMaterialRemoval([input('1', stock)], metadata(
-      move(), move({ machiningMode: 'unknown', toolNumber: 1, poses: undefined }),
-    ));
-    expect(result.diagnostics.map((diagnostic) => diagnostic.code)).toEqual([
-      'stock-frame-unresolved', 'spindle-state-unavailable',
-      'motion-mode-unavailable', 'tool-geometry-unavailable', 'tool-pose-unavailable',
-    ]);
+      move(), move(override),
+    ), setup);
+    expect(result.status).toBe('ready');
+    expect(result.simulation?.motions).toHaveLength(1);
+    expect(result.simulation?.stop).toBeDefined();
+    expect(result.diagnostics.map((diagnostic) => diagnostic.code)).toContain(code);
   });
 
   it('ignores rapid traversal for cutting prerequisites, even when the mode is turning', () => {
     const result = prepareMaterialRemoval([input('1', stock)], metadata(
       move({ type: 'rapid', machiningMode: 'turning', toolNumber: undefined, poses: undefined }),
-    ));
+    ), setup);
+    expect(result.status).toBe('ready');
+    expect(result.simulation?.motions).toHaveLength(0);
     expect(result.diagnostics.map((diagnostic) => diagnostic.code))
-      .toEqual(['stock-frame-unresolved', 'spindle-state-unavailable']);
+      .toEqual(['spindle-state-unavailable']);
   });
 
-  it('keeps turning references and workpiece transfer explicitly unresolved', () => {
+  it('rejects inconsistent turning references before cutting and stops on a different workpiece target', () => {
     const turning = move({ machiningMode: 'turning' });
     const other = move({ poses: move().poses!.map((pose) => ({ ...pose, frameId: 'workpiece:subSpindle' })) });
-    const result = prepareMaterialRemoval([input('1', stock)], metadata(turning, other));
-    expect(result.frameId).toBeUndefined();
+    const result = prepareMaterialRemoval([input('1', stock)], metadata(turning), setup);
+    expect(result.simulation?.motions).toHaveLength(0);
     expect(result.diagnostics.map((diagnostic) => diagnostic.code)).toContain('turning-reference-unverified');
-    expect(result.diagnostics.map((diagnostic) => diagnostic.code)).toContain('multiple-workpiece-frames');
+    const transfer = prepareMaterialRemoval([input('1', stock)], metadata(move(), other), setup);
+    expect(transfer.simulation?.motions).toHaveLength(1);
+    expect(transfer.diagnostics.map((diagnostic) => diagnostic.code)).toContain('multiple-workpiece-frames');
   });
 
   it.each([
@@ -111,8 +127,83 @@ describe('material removal prerequisites', () => {
     { frameId: '' },
   ])('does not accept an invalid pose as a resolved stock frame: %j', (override) => {
     const segment = move({ poses: move().poses!.map((pose) => ({ ...pose, ...override })) });
-    const result = prepareMaterialRemoval([input('1', stock)], metadata(segment));
-    expect(result.frameId).toBeUndefined();
+    const result = prepareMaterialRemoval([input('1', stock)], metadata(segment), setup);
+    expect(result.simulation?.motions).toHaveLength(0);
+    expect(result.simulation?.stop).toBeDefined();
     expect(result.diagnostics.map((diagnostic) => diagnostic.code)).toContain('tool-pose-unavailable');
+  });
+
+  it('prepares ordinary milling when the stock transform is explicit, with spindle absence only a warning', () => {
+    const result = prepareMaterialRemoval([input('1', stock)], metadata(move()), setup);
+    expect(result.status).toBe('ready');
+    expect(result.simulation?.motions).toHaveLength(1);
+    expect(result.simulation?.binding).toEqual(setup.binding);
+    expect(result.diagnostics).toEqual([expect.objectContaining({
+      code: 'spindle-state-unavailable', severity: 'warning',
+    })]);
+  });
+
+  it('does not skip unsupported motions discarded by path display conversion', () => {
+    const result = prepareMaterialRemoval([input('1', stock)], {
+      ...metadata(move({ sourceSegmentIndex: 0 }), move({ sourceSegmentIndex: 2 })),
+      removalStops: [{ channelId: '1', sourceSegmentIndex: 1, executionStep: 7,
+        message: 'Unknown compound motion', lineNumber: 20 }],
+    }, setup);
+    expect(result.simulation?.motions).toHaveLength(1);
+    expect(result.simulation?.stop).toMatchObject({ executionStep: 7, lineNumber: 20 });
+  });
+
+  it.each(['G76', 'G92', 'G36', 'G161'])('stops at unsupported special operation %s', (sourceCode) => {
+    const result = prepareMaterialRemoval([input('1', stock)], metadata(move(), move({ sourceCode })), setup);
+    expect(result.simulation?.motions).toHaveLength(1);
+    expect(result.simulation?.stop?.message).toContain(sourceCode);
+  });
+
+  it('does not use synthetic default preview tools as physical cutting definitions', () => {
+    const original = input('1', stock);
+    original.snapshot = { ...original.snapshot, geometry: [] };
+    const result = prepareMaterialRemoval([original], metadata(move()), setup);
+    expect(result.simulation?.motions).toHaveLength(0);
+    expect(result.diagnostics.map((diagnostic) => diagnostic.code)).toContain('tool-geometry-unavailable');
+  });
+
+  it('rejects invalid explicit stock transforms rather than using identity', () => {
+    expect(() => prepareMaterialRemoval([input('1', stock)], metadata(move()), {
+      ...setup, binding: { ...setup.binding, spindleAxis: [0, 0, 0] },
+    })).toThrow('unit direction');
+  });
+
+  it('prepares a conventional rounded insert using executed Q instead of the stored default', () => {
+    const original = input('1', stock);
+    const tool: ProgramToolDefinition = {
+      toolNumber: '1', description: 'turning', Q: 1,
+      cutting: [{ type: 'insert', shape: 'C', ic: 6, thickness: 2,
+        noseRadius: 0.2, clearanceAngle: 7, rotation: [0, 45, 0] }],
+    };
+    original.snapshot = tools.captureProgramSnapshot(original.snapshot.identity, 1,
+      codec.encodeSetup({ machineName: 'test', material: stock }, syntax) + '\n' + codec.encodeTool(tool, syntax), syntax);
+    const turning = move({
+      machiningMode: 'turning', sourceCode: 'G1',
+      motionContext: { channelId: '1', startAxes: {}, endAxes: {}, toolOffset: { radiusMode: 'OFF', tipOrientation: 3 } },
+      poses: move().poses!.map((pose) => ({ ...pose, reference: 'turningVirtualTip' })),
+    });
+    const result = prepareMaterialRemoval([original], metadata(turning), setup);
+    expect(result.status).toBe('ready');
+    expect(result.simulation?.stop).toBeUndefined();
+    expect(result.simulation?.motions[0].executedQ).toBe(3);
+    expect(result.simulation?.motions[0].tool.Q).toBe(1);
+    const compensated = prepareMaterialRemoval([original], metadata({
+      ...turning, motionContext: { ...turning.motionContext!, toolOffset: { radiusMode: 'G41', tipOrientation: 3 } },
+    }), setup);
+    expect(compensated.simulation?.motions).toHaveLength(0);
+    expect(compensated.simulation?.stop?.message).toContain('Compensated turning');
+  });
+
+  it('rejects undersampled full-turn rotations rather than interpreting equal quaternions as no motion', () => {
+    const result = prepareMaterialRemoval([input('1', stock)], metadata(move({
+      motionContext: { channelId: '1', startAxes: { C: 0 }, endAxes: { C: 360 }, toolOffset: { radiusMode: 'OFF' } },
+    })), setup);
+    expect(result.simulation?.motions).toHaveLength(0);
+    expect(result.simulation?.stop?.message).toContain('not sufficiently sampled');
   });
 });

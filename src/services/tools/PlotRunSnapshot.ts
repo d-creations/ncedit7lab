@@ -2,6 +2,7 @@ import type { CustomVariable, MachineProfile, PlotMetadata, ToolPathMode, ToolVa
 import type { ProgramToolSnapshot } from './ProgramToolService';
 import type { DeepReadonly } from './SimulationMetadata';
 import type { MaterialRemovalPreparation } from './MaterialRemovalPreparation';
+import type { StockBinding } from '../simulation/SimulationTypes';
 
 export interface PlotRunInput {
   snapshot: ProgramToolSnapshot;
@@ -10,6 +11,7 @@ export interface PlotRunInput {
   toolValues: ToolValue[];
   toolOffsets?: ToolOffsetValue[];
   customVariables: CustomVariable[];
+  materialSimulation?: { binding: StockBinding; resolutionMm: number };
 }
 
 /** Blank only validated managed blocks in the execution copy, preserving every source line. */

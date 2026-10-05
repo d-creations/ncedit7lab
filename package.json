@@ -1,6 +1,6 @@
 {
   "name": "ncedit7lab",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Multi-channel CNC NC code editor with plot interface focus on Star CNC machines",
   "type": "module",
   "engines": {
@@ -19,17 +19,17 @@
     "prepare": "npm run build"
   },
   "files": [
-      "dist",
-      "package.json",
-      "backend",
-      "requirements.txt"
+    "dist",
+    "package.json",
+    "backend",
+    "requirements.txt"
   ],
   "dependencies": {
     "ace-builds": "^1.43.4",
     "cnc7drawnccode": "git+https://github.com/d-creations/CNC7drawNCcode.git",
     "three": "^0.161.0"
   },
-  "devDependencies": {    
+  "devDependencies": {
     "@types/three": "^0.161.0",
     "@typescript-eslint/eslint-plugin": "^6.20.0",
     "@typescript-eslint/parser": "^6.20.0",

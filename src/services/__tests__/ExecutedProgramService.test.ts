@@ -93,6 +93,69 @@ describe('ExecutedProgramService', () => {
       expect(result.plotMetadata!.segments[1].type).toBe('rapid');
     });
 
+    it.each([{ points: [] }, { points: [{ x: 0, y: 0, z: 0 }] }])(
+      'ignores incomplete ordinary rapids but retains incomplete cutting and unknown motion stops ($points)',
+      async ({ points }) => {
+        vi.mocked(mockBackend.requestPlot).mockResolvedValue({
+          canal: { '1': { segments: [
+            move({ traversal: 'RAPID', sourceCode: 'G00', points, executionStep: 0 }),
+            move({ traversal: 'rapid', points, executionStep: 1 }),
+            move({ points, executionStep: 2 }),
+            move({ traversal: undefined, points, executionStep: 3 }),
+            move({ traversal: 'RAPID', geometry: 'UNSUPPORTED', points, executionStep: 4 }),
+            move({ traversal: 'RAPID', sourceCode: 'G28', points, executionStep: 5 }),
+            move({ machiningMode: 'milling', executionStep: 6 }),
+          ] } },
+        });
+        const result = await service.executeProgram(request);
+        expect(result.plotMetadata!.removalStops?.map((stop) => stop.sourceSegmentIndex))
+          .toEqual([2, 3, 4, 5]);
+        expect(result.plotMetadata!.removalStops?.every(
+          (stop) => stop.message === 'Motion has fewer than two samples',
+        )).toBe(true);
+        expect(result.plotMetadata!.segments).toHaveLength(1);
+        expect(result.plotMetadata!.segments[0].sourceSegmentIndex).toBe(6);
+      },
+    );
+
+    it.each(['T1', 'N30 T1 M6', 'N30T1M06'])(
+      'ignores a verified singleton tool-selection marker for %s',
+      async (selection) => {
+        vi.mocked(mockBackend.requestPlot).mockResolvedValue({
+          canal: { '1': { segments: [
+            move({ geometry: undefined, traversal: undefined, sourceCode: undefined,
+              toolNumber: 1, lineNumber: 1, executionStep: 6,
+              points: [{ x: 0, y: 0, z: 0 }] }),
+            move({ machiningMode: 'milling', lineNumber: 2, executionStep: 7 }),
+          ] } },
+        });
+        const result = await service.executeProgram({
+          ...request, machineName: 'FANUC_MILL_DEMO', program: `${selection}\nG1 X1`,
+        });
+        expect(result.plotMetadata!.removalStops ?? []).toEqual([]);
+        expect(result.plotMetadata!.segments).toHaveLength(1);
+        expect(result.plotMetadata!.segments[0].sourceSegmentIndex).toBe(1);
+      },
+    );
+
+    it.each([
+      { program: 'T1 G1 X1', toolNumber: 1, traversal: undefined, machineName: 'FANUC_MILL_DEMO' },
+      { program: 'T1', toolNumber: 2, traversal: undefined, machineName: 'FANUC_MILL_DEMO' },
+      { program: 'T1', toolNumber: 1, traversal: 'FEED', machineName: 'FANUC_MILL_DEMO' },
+      { program: 'T1', toolNumber: 1, traversal: undefined, machineName: 'FANUC_TURN' },
+      { program: 'M6', toolNumber: 1, traversal: undefined, machineName: 'FANUC_MILL_DEMO' },
+    ])('retains an unverified singleton as a removal stop (%j)', async (fixture) => {
+      vi.mocked(mockBackend.requestPlot).mockResolvedValue({
+        canal: { '1': { segments: [
+          move({ geometry: undefined, traversal: fixture.traversal, sourceCode: undefined,
+            toolNumber: fixture.toolNumber, lineNumber: 1, executionStep: 6,
+            points: [{ x: 0, y: 0, z: 0 }] }),
+        ] } },
+      });
+      const result = await service.executeProgram({ ...request, ...fixture });
+      expect(result.plotMetadata!.removalStops).toHaveLength(1);
+    });
+
     it('rejects invalid mode values and publishes an execution error rather than guessing', async () => {
       const errors = vi.fn();
       mockEventBus.subscribe(EVENT_NAMES.EXECUTION_ERROR, errors);

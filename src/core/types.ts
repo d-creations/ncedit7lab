@@ -226,6 +226,14 @@ export type VariableValue = number | string | boolean;
 export interface PlotMetadata {
   points: PlotPoint[];
   segments: PlotSegment[];
+  /** Motions omitted by display conversion must still stop material subtraction. */
+  removalStops?: Array<{
+    channelId: ChannelId;
+    sourceSegmentIndex: number;
+    executionStep?: number | null;
+    lineNumber?: number;
+    message: string;
+  }>;
 }
 
 export interface PlotPoint {
@@ -265,6 +273,7 @@ export interface PlotSegment {
   type: 'rapid' | 'feed' | 'arc';
   /** Executed operation mode, independent of traversal and cutter shape. */
   machiningMode?: MachiningMode;
+  sourceCode?: string;
   /** Active tool captured by execution; "unknown", null and missing mean unavailable. */
   toolNumber?: number | string | null;
   /** Executed-command occurrence within the channel, shared by generated cycle moves. */

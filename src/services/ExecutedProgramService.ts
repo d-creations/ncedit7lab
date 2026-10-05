@@ -12,6 +12,7 @@ import type {
   ToolPathMode,
   CustomVariable,
   BackendPlotChannel,
+  BackendPlotSegment,
   MachineProfile,
   SimulationChannelInput,
   ToolReference,
@@ -29,6 +30,18 @@ function parseMachiningMode(value: unknown): MachiningMode {
   if (value === undefined || value === null) return 'unknown';
   if (value === 'turning' || value === 'milling' || value === 'unknown') return value;
   throw new Error(`Invalid backend machining mode: ${String(value)}`);
+}
+
+function isToolSelectionMarker(segment: BackendPlotSegment, sourceLine: string | undefined): boolean {
+  if (
+    segment.points?.length !== 1 ||
+    segment.geometry != null || segment.traversal != null || segment.sourceCode != null ||
+    !sourceLine
+  ) return false;
+  // Verify the executed source: missing motion metadata alone must never authorize skipping.
+  const selection = /^\s*(?:N\d+\s*)?T(\d+)\s*(?:M0?6\s*)?$/i.exec(sourceLine);
+  return selection !== null &&
+    (segment.toolNumber === Number(selection[1]) || segment.toolNumber === selection[1]);
 }
 
 export interface ExecutionRequest {
@@ -91,7 +104,7 @@ export class ExecutedProgramService {
     try {
       const response = await this.backend.requestPlot(this.buildPlotRequest(requests, toolPathMode));
       if (response.success === false) throw new Error(this.rejectionMessage(response));
-      results = requests.map((request) => this.parseExecutionResponse(response, request.channelId));
+      results = requests.map((request) => this.parseExecutionResponse(response, request.channelId, request));
     } catch (error) {
       if (generation === this.plotGeneration) {
         requests.forEach((request) => this.eventBus.publish(EVENT_NAMES.EXECUTION_ERROR, {
@@ -103,6 +116,7 @@ export class ExecutedProgramService {
     const plotMetadata = structuredClone({
       points: results.flatMap((result) => result.plotMetadata?.points ?? []),
       segments: results.flatMap((result) => result.plotMetadata?.segments ?? []),
+      removalStops: results.flatMap((result) => result.plotMetadata?.removalStops ?? []),
     });
     const run = freezeMetadata({
       runId,
@@ -166,7 +180,7 @@ export class ExecutedProgramService {
       console.debug('Plot response for channel', request.channelId, response);
 
       // Parse response
-      const result = this.parseExecutionResponse(response, request.channelId);
+      const result = this.parseExecutionResponse(response, request.channelId, request);
 
       // Cache result
       const cacheKey = this.getCacheKey(request);
@@ -206,7 +220,7 @@ export class ExecutedProgramService {
 
       // Parse response for each channel
       const results = requests.map((req) => {
-        return this.parseExecutionResponse(response, req.channelId);
+        return this.parseExecutionResponse(response, req.channelId, req);
       });
 
       // Publish events
@@ -302,7 +316,11 @@ export class ExecutedProgramService {
   private parseExecutionResponse(
     response: PlotResponse,
     targetChannelId?: string,
+    request?: ExecutionRequest,
   ): ExecutedProgramResult {
+    const sourceLines = request?.machineName.startsWith('FANUC_MILL')
+      ? this.preprocessProgram(request.program).split('\n')
+      : undefined;
     const result: ExecutedProgramResult = {
       executedLines: [],
       variableSnapshot: new Map(),
@@ -401,6 +419,9 @@ export class ExecutedProgramService {
         if (canal.segments && Array.isArray(canal.segments)) {
           canal.segments.forEach((segment, sourceSegmentIndex) => {
             const machiningMode = parseMachiningMode(segment.machiningMode);
+            if (
+              isToolSelectionMarker(segment, sourceLines?.[(segment.lineNumber ?? 0) - 1])
+            ) return;
             if (segment.points && segment.points.length >= 2) {
               let segmentType: 'rapid' | 'feed' | 'arc' | undefined;
               const traversal = segment.traversal?.toUpperCase();
@@ -416,6 +437,11 @@ export class ExecutedProgramService {
 
               if (!segmentType) {
                 console.warn('Skipping segment without supported motion semantics:', segment);
+                (result.plotMetadata!.removalStops ??= []).push({
+                  channelId: canalNr as ChannelId, sourceSegmentIndex,
+                  executionStep: segment.executionStep, lineNumber: segment.lineNumber,
+                  message: 'Motion has unsupported or unknown traversal/geometry',
+                });
                 return;
               }
 
@@ -440,6 +466,7 @@ export class ExecutedProgramService {
                   endPoint: mappedPoints[index + 1],
                   type: segmentType,
                   machiningMode,
+                  sourceCode: segment.sourceCode,
                   toolNumber: segment.toolNumber,
                   executionStep: segment.executionStep,
                   sourceSegmentIndex,
@@ -449,6 +476,16 @@ export class ExecutedProgramService {
                   poses: segment.poses,
                 });
               }
+            } else if (
+              segment.traversal?.toUpperCase() !== 'RAPID' ||
+              segment.geometry?.toUpperCase() !== 'LINEAR' ||
+              (segment.sourceCode && !/^G0?0$/i.test(segment.sourceCode))
+            ) {
+              (result.plotMetadata!.removalStops ??= []).push({
+                channelId: canalNr as ChannelId, sourceSegmentIndex,
+                executionStep: segment.executionStep, lineNumber: segment.lineNumber,
+                message: 'Motion has fewer than two samples',
+              });
             }
           });
         }

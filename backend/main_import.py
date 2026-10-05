@@ -511,6 +511,14 @@ def build_segments_from_engine_output(canal_output: Dict[str, Any]) -> Dict[str,
         geometry = entry.get("geometry")
         traversal = entry.get("traversal")
         source_code = entry.get("sourceCode")
+        motion_context = entry.get("motionContext")
+        machining_mode = entry.get("machiningMode")
+        if "machiningMode" not in entry and isinstance(motion_context, dict):
+            machining_mode = motion_context.get("machiningMode")
+        if machining_mode is None:
+            machining_mode = "unknown"
+        if machining_mode not in ("turning", "milling", "unknown"):
+            raise ValueError(f"Invalid engine machining mode: {machining_mode!r}")
 
         line_number = entry.get("lineNumber")
         if line_number is None and idx < len(executed_node_lines):
@@ -520,10 +528,11 @@ def build_segments_from_engine_output(canal_output: Dict[str, Any]) -> Dict[str,
             "geometry": geometry,
             "traversal": traversal,
             "sourceCode": source_code,
+            "machiningMode": machining_mode,
             "lineNumber": line_number,
             "executionStep": entry.get("executionStep"),
             "toolNumber": entry.get("toolNumber", "unknown"),
-            "motionContext": entry.get("motionContext"),
+            "motionContext": motion_context,
             "poses": entry.get("poses"),
             "points": points,
         }
@@ -1023,6 +1032,5 @@ async def get_features():
         "transfer_protocols": ["focas", "usb"] if ENABLE_TRANSFER and TRANSFER_IMPORT_OK else [],
         "cgi_path": ""  # Only relevant for main.py subprocess
     }
-
 
 

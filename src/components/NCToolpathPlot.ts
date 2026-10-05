@@ -29,6 +29,10 @@ import type { PlotRunInput } from '@services/tools/PlotRunSnapshot';
 import type { PlotSegment } from '@core/types';
 import type { NCBottomPanel } from './NCBottomPanel';
 import { ToolGeometryFactory } from './ToolGeometryFactory';
+import { prepareMaterialRemoval, type MaterialRemovalPreparation } from '@services/tools/MaterialRemovalPreparation';
+import { MaterialSimulationSession } from '@services/simulation/MaterialSimulationSession';
+import type { StockBinding, SimulationResult } from '@services/simulation/SimulationTypes';
+import { rotationQuaternion } from '@services/simulation/SimulationTransforms';
 
 export class NCToolpathPlot extends HTMLElement {
   private scene?: THREE.Scene;
@@ -62,6 +66,10 @@ export class NCToolpathPlot extends HTMLElement {
   private requestGeneration = 0;
   private stale = false;
   private readonly detectedToolsByChannel = new Map<string, ToolIdentifier[]>();
+  private materialSimulation?: MaterialSimulationSession;
+  private removalSetup?: { binding: StockBinding; resolutionMm: number };
+  private removalSetupScope?: string;
+  private removalGeneration = 0;
 
   constructor() {
     super();
@@ -108,6 +116,7 @@ export class NCToolpathPlot extends HTMLElement {
     this.subscriptions.push(this.eventBus.subscribe(EVENT_NAMES.PLOT_RUN_COMPLETED, (data: { runId: string }) => {
       const run = this.executedProgramService.getPlotRun(data.runId);
       if (!run || data.runId === this.displayedRunId) return;
+      this.cancelMaterialRemoval();
       this.displayedRunId = run.runId;
       this.simulationEnabled = run.toolPathMode === 'simulation';
       this.clearSelection();
@@ -116,7 +125,11 @@ export class NCToolpathPlot extends HTMLElement {
       const materials = run.materialRemoval?.stock ? [run.materialRemoval.stock] : [];
       this.updatePlot(structuredClone(run.plotMetadata) as PlotMetadata, materials);
       this.updateMaterialRemovalStatus();
+      this.updateRemovalSetup();
       this.refreshStaleness();
+      if (!this.stale && run.materialRemoval?.status === 'ready') {
+        void this.startMaterialRemoval(run.materialRemoval);
+      }
     }));
 
     // Allow external UI elements to request a plot
@@ -199,6 +212,153 @@ export class NCToolpathPlot extends HTMLElement {
       : undefined;
     element.hidden = !preparation || preparation.status === 'not-configured';
     element.textContent = preparation?.diagnostics.map((diagnostic) => diagnostic.message).join(' ') ?? '';
+  }
+
+  private updateRemovalSetup(): void {
+    const details = this.shadowRoot?.querySelector<HTMLElement>('#removal-setup');
+    const select = this.shadowRoot?.querySelector<HTMLSelectElement>('#removal-frame');
+    const run = this.displayedRunId ? this.executedProgramService.getPlotRun(this.displayedRunId) : undefined;
+    if (!details || !select) return;
+    details.hidden = !this.simulationEnabled || !run?.materialRemoval?.stock;
+    select.replaceChildren(new Option('Select stock workpiece frame', ''));
+    const frames = new Set(run?.plotMetadata.segments.flatMap((segment) =>
+      segment.poses?.map((pose) => pose.frameId) ?? []) ?? []);
+    for (const frame of frames) select.add(new Option(frame, frame));
+    select.value = this.removalSetup?.binding.frameId ??
+      (frames.has('workpiece:tableBC') ? 'workpiece:tableBC' : '');
+  }
+
+  private readRemovalSetup(): { binding: StockBinding; resolutionMm: number } {
+    const value = (id: string): number => {
+      const input = this.shadowRoot?.querySelector<HTMLInputElement>(`#removal-${id}`);
+      if (!input?.value.trim() || !Number.isFinite(Number(input.value))) {
+        throw new Error(`Removal ${id} must be a finite number`);
+      }
+      return Number(input.value);
+    };
+    const vector = (prefix: string): [number, number, number] =>
+      [value(`${prefix}-x`), value(`${prefix}-y`), value(`${prefix}-z`)];
+    const axis = this.shadowRoot?.querySelector<HTMLSelectElement>('#removal-spindle-axis')?.value;
+    if (axis !== 'x' && axis !== 'y' && axis !== 'z') throw new Error('Select a spindle axis');
+    return {
+      binding: {
+        frameId: this.shadowRoot?.querySelector<HTMLSelectElement>('#removal-frame')?.value ?? '',
+        position: vector('position'), rotation: vector('rotation'), spindleOrigin: vector('spindle'),
+        spindleAxis: [axis === 'x' ? 1 : 0, axis === 'y' ? 1 : 0, axis === 'z' ? 1 : 0],
+      },
+      resolutionMm: value('resolution'),
+    };
+  }
+
+  private async runRemovalFromSetup(): Promise<void> {
+    const status = this.shadowRoot?.getElementById('material-removal-status');
+    try {
+      this.refreshStaleness();
+      const run = this.displayedRunId ? this.executedProgramService.getPlotRun(this.displayedRunId) : undefined;
+      if (!run || this.stale) throw new Error('Plot the current program before material removal');
+      const setup = this.readRemovalSetup();
+      const preparation = prepareMaterialRemoval(run.inputs, run.plotMetadata, setup);
+      if (preparation.status !== 'ready') {
+        throw new Error(preparation.diagnostics.map((diagnostic) => diagnostic.message).join(' '));
+      }
+      this.removalSetup = setup;
+      this.removalSetupScope = this.stockBindingScope(run.inputs[0]);
+      await this.startMaterialRemoval(preparation);
+    } catch (error) {
+      console.error('Material removal setup failed:', error);
+      if (status) {
+        status.hidden = false;
+        status.textContent = `Material removal unavailable: ${error instanceof Error ? error.message : 'Invalid setup'}`;
+      }
+    }
+  }
+
+  private createMaterialSimulationSession(runId: string): MaterialSimulationSession {
+    return new MaterialSimulationSession(runId);
+  }
+
+  private async startMaterialRemoval(preparation: DeepReadonly<MaterialRemovalPreparation>): Promise<void> {
+    if (!preparation.simulation || !this.displayedRunId || !this.scene) return;
+    this.cancelMaterialRemoval();
+    const generation = this.removalGeneration;
+    const session = this.createMaterialSimulationSession(this.displayedRunId);
+    this.materialSimulation = session;
+    const status = this.shadowRoot?.getElementById('material-removal-status');
+    const cancel = this.shadowRoot?.querySelector<HTMLButtonElement>('#cancel-removal');
+    if (cancel) cancel.hidden = false;
+    const raw = this.toolGeometryFactory.createMaterialMesh(preparation.simulation.stock);
+    if (raw) {
+      raw.matrixAutoUpdate = false;
+      raw.matrix.compose(
+        new THREE.Vector3(...preparation.simulation.binding.position),
+        rotationQuaternion(preparation.simulation.binding.rotation), new THREE.Vector3(1, 1, 1),
+      );
+      this.replaceMaterialObject(raw);
+    }
+    try {
+      const result = await session.start(preparation.simulation, (processed, total) => {
+        if (generation !== this.removalGeneration || !status) return;
+        status.hidden = false;
+        status.textContent = `Geometric removal: ${processed}/${total} motions. Feed cutting is assumed; spindle operation is not verified.`;
+      });
+      if (generation !== this.removalGeneration || this.stale || session.runId !== this.displayedRunId) return;
+      this.installStockSurface(result);
+      if (status) {
+        status.hidden = false;
+        const stopped = result.stop
+          ? `Stopped before step ${result.stop.executionStep ?? '?'}${result.stop.lineNumber === undefined ? '' : `, line ${result.stop.lineNumber}`}: ${result.stop.message}.`
+          : 'Completed.';
+        status.textContent = `Geometric removal: ${stopped} ${result.processedMotions} motions; ${result.resolutionMm} mm voxels; ${result.removedCells} cells removed; ${(result.allocatedStockBytes / 1048576).toFixed(1)} MiB stock, ${(result.surfaceBytes / 1048576).toFixed(1)} MiB surface; ${result.elapsedMs.toFixed(0)} ms. Feed cutting is assumed; spindle operation is not verified.`;
+      }
+    } catch (error) {
+      if (generation !== this.removalGeneration) return;
+      console.error('Material removal failed:', error);
+      if (status) {
+        status.hidden = false;
+        status.textContent = `Material removal failed: ${error instanceof Error ? error.message : 'Worker failure'}. Initial stock is shown, not a completed result.`;
+      }
+    } finally {
+      if (generation === this.removalGeneration && cancel) cancel.hidden = true;
+    }
+  }
+
+  private replaceMaterialObject(group: THREE.Group): void {
+    if (!this.scene) return;
+    if (this.materialObject) this.removeOwnedPlotObject(this.materialObject);
+    group.userData.isMaterial = true;
+    group.visible = this.materialVisible;
+    this.materialObject = group;
+    this.scene.add(group);
+    this.updateMaterialControl();
+  }
+
+  private installStockSurface(result: SimulationResult): void {
+    const group = new THREE.Group();
+    group.name = 'machined-stock';
+    group.matrixAutoUpdate = false;
+    group.matrix.fromArray(result.stockToWorkpiece);
+    const material = result.chunks.length ? new THREE.MeshStandardMaterial({
+      color: 0xd9c7a6, metalness: 0.25, roughness: 0.8,
+    }) : undefined;
+    for (const chunk of result.chunks) {
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.BufferAttribute(chunk.positions, 3));
+      geometry.setAttribute('normal', new THREE.BufferAttribute(chunk.normals, 3));
+      group.add(new THREE.Mesh(geometry, material));
+    }
+    this.replaceMaterialObject(group);
+  }
+
+  private cancelMaterialRemoval(): void {
+    this.removalGeneration++;
+    this.materialSimulation?.cancel();
+    this.materialSimulation = undefined;
+    const cancel = this.shadowRoot?.querySelector<HTMLButtonElement>('#cancel-removal');
+    if (cancel) cancel.hidden = true;
+  }
+
+  private stockBindingScope(input: DeepReadonly<PlotRunInput>): string {
+    return JSON.stringify([programIdentityKey(input.snapshot.identity), input.machineName, input.machineProfile?.profileRevision]);
   }
 
   private selectOccurrence(step?: number): void {
@@ -451,12 +611,27 @@ export class NCToolpathPlot extends HTMLElement {
             <button class="plot-button" id="toggle-axes">Axes</button>
             <button class="plot-button active" id="toggle-orbit">🔄 Orbit</button>
             <button class="plot-button active" id="toggle-material" aria-pressed="true" hidden>Hide Material</button>
+            <button class="plot-button" id="cancel-removal" hidden>Cancel Removal</button>
           </div>
           <div class="view-controls">
             <button class="plot-button" id="view-xy">X-Y</button>
             <button class="plot-button" id="view-xz">X-Z</button>
             <button class="plot-button" id="view-yz">Y-Z</button>
           </div>
+          <details id="removal-setup" hidden style="max-height:260px;overflow:auto;background:var(--vscode-editor-background,#282c34);padding:8px">
+            <summary>Removal setup (geometric preview)</summary>
+            <label>Workpiece frame <select id="removal-frame"><option value="">Select stock workpiece frame</option></select></label>
+            <p>Map the initial program stock into this frame. Feed cutting is assumed; no spindle verification.</p>
+            ${['position', 'rotation', 'spindle'].map((prefix) => `
+              <div>${prefix === 'position' ? 'Program-to-workpiece translation (mm)' : prefix === 'rotation' ? 'Program-to-workpiece rotation (degrees, X/Y/Z)' : 'Spindle origin in workpiece frame (mm)'}</div>
+              <div style="display:flex;gap:4px">${['x', 'y', 'z'].map((axis) => `
+                <label>${axis.toUpperCase()} <input id="removal-${prefix}-${axis}" type="number" value="0" step="any" style="width:65px"></label>
+              `).join('')}</div>
+            `).join('')}
+            <label>Turning spindle axis <select id="removal-spindle-axis"><option value="z">+Z</option><option value="x">+X</option><option value="y">+Y</option></select></label>
+            <label>Voxel size (mm) <input id="removal-resolution" type="number" min="0.05" max="5" step="0.05" value="0.5" style="width:65px"></label>
+            <button class="plot-button" id="run-removal">Bind stock and run removal</button>
+          </details>
           <div class="axis-controls">
             <button class="plot-button" id="rotate-x" title="Rotate around X axis">Rot X</button>
             <button class="plot-button" id="rotate-y" title="Rotate around Y axis">Rot Y</button>
@@ -498,6 +673,12 @@ export class NCToolpathPlot extends HTMLElement {
 
     const materialButton = this.shadowRoot?.getElementById('toggle-material');
     materialButton?.addEventListener('click', () => this.toggleMaterial());
+    this.shadowRoot?.getElementById('run-removal')?.addEventListener('click', () => void this.runRemovalFromSetup());
+    this.shadowRoot?.getElementById('cancel-removal')?.addEventListener('click', () => {
+      this.cancelMaterialRemoval();
+      const status = this.shadowRoot?.getElementById('material-removal-status');
+      if (status) status.textContent = 'Material removal cancelled. Initial stock is shown, not a completed result.';
+    });
 
     const orbitButton = this.shadowRoot?.getElementById('toggle-orbit');
     orbitButton?.addEventListener('click', () => this.toggleOrbit());
@@ -605,6 +786,10 @@ export class NCToolpathPlot extends HTMLElement {
         ),
         customVariables: this.readCustomVariables(channel.id),
       }));
+      if (state.toolPathMode === 'simulation' && inputs.length === 1 &&
+        this.stockBindingScope(inputs[0]) === this.removalSetupScope) {
+        inputs[0].materialSimulation = this.removalSetup;
+      }
       // Optional holder/cutting lengths and edge geometry are captured here, never fetched per cursor move.
       // The run event owns rendering; the promise handles busy/failure state only.
       await this.executedProgramService.executePlotRun(
@@ -697,6 +882,7 @@ export class NCToolpathPlot extends HTMLElement {
         JSON.stringify(this.readCustomVariables(snapshot.identity.channelId)) !== JSON.stringify(input.customVariables);
     });
     if (this.stale) {
+      this.cancelMaterialRemoval();
       this.clearSelection();
       if (this.highlightObject) {
         this.removeOwnedPlotObject(this.highlightObject);
@@ -956,7 +1142,8 @@ export class NCToolpathPlot extends HTMLElement {
 
     const poseIndex = Math.min((segment.subsegmentIndex ?? 0) + 1, segment.poses.length - 1);
     const pose = segment.poses[poseIndex];
-    const mesh = this.toolGeometryFactory.create(tool);
+    const executedQ = segment.motionContext?.toolOffset?.tipOrientation;
+    const mesh = this.toolGeometryFactory.create(executedQ === undefined ? tool : { ...tool, Q: executedQ });
     if (!mesh) return;
 
     mesh.position.fromArray(pose.position);
@@ -1097,6 +1284,7 @@ export class NCToolpathPlot extends HTMLElement {
   }
 
   private clearPlot() {
+    this.cancelMaterialRemoval();
     this.clearSelection();
     this.requestGeneration++;
     this.isPlotting = false;
@@ -1107,6 +1295,7 @@ export class NCToolpathPlot extends HTMLElement {
     this.stale = false;
     this.simulationEnabled = false;
     this.updateMaterialRemovalStatus();
+    this.updateRemovalSetup();
     this.materialVisible = true;
     this.updateMaterialControl();
     if (!this.scene) return;
@@ -1140,13 +1329,17 @@ export class NCToolpathPlot extends HTMLElement {
   /** Segmented paths and highlights own their resources; never dispose shared axes/cache here. */
   private removeOwnedPlotObject(object: THREE.Object3D): void {
     this.scene?.remove(object);
+    const geometries = new Set<THREE.BufferGeometry>();
+    const materials = new Set<THREE.Material>();
     object.traverse((child) => {
       if (child instanceof THREE.Line || child instanceof THREE.Mesh) {
-        child.geometry.dispose();
-        const materials = Array.isArray(child.material) ? child.material : [child.material];
-        materials.forEach((material) => material.dispose());
+        geometries.add(child.geometry);
+        const owned = Array.isArray(child.material) ? child.material : [child.material];
+        owned.forEach((material) => materials.add(material));
       }
     });
+    geometries.forEach((geometry) => geometry.dispose());
+    materials.forEach((material) => material.dispose());
   }
 
   private zoomIn() {

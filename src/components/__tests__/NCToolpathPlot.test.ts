@@ -14,6 +14,8 @@ import type { StateService } from '@services/StateService';
 import type { IFileManagerService } from '@services/IFileManagerService';
 import { PlotService } from '@services/PlotService';
 import type { PlotMetadata, PlotResponse } from '@core/types';
+import { MaterialSimulationSession, type SimulationWorker } from '@services/simulation/MaterialSimulationSession';
+import { simulateMaterialRemoval } from '@services/simulation/MaterialRemovalEngine';
 
 // Exercise actual event/action wiring without constructing a browser WebGL renderer.
 interface PlotHarness extends HTMLElement {
@@ -27,6 +29,7 @@ interface PlotHarness extends HTMLElement {
   plotService: PlotService;
   toggleMaterial(): void;
   toggleAxes(): void;
+  createMaterialSimulationSession(runId: string): MaterialSimulationSession;
 }
 
 describe('editor Plot actions', () => {
@@ -209,7 +212,7 @@ describe('editor Plot actions', () => {
     const diagnostics = plot.shadowRoot!.querySelector<HTMLElement>('#material-removal-status')!;
     expect(diagnostics.hidden).toBe(false);
     expect(diagnostics.textContent).toContain('program-coordinate preview');
-    expect(diagnostics.textContent).toContain('does not verify the active cutting spindle');
+    expect(diagnostics.textContent).toContain('spindle operation is not verified');
     plot.toggleAxes();
     expect(material.visible).toBe(true);
 
@@ -244,6 +247,74 @@ describe('editor Plot actions', () => {
 
     expect(plot.toolObject).not.toBeNull();
     expect(plot.toolObject!.position.toArray()).toEqual([4, 5, 6]);
+  });
+
+  it.each(['workpiece:test', 'workpiece:tableBC'])(
+    'defaults only tableBC and runs explicit binding without rerunning on cursor movement (%s)', async (frameId) => {
+    const codec = new SimulationCommentCodec();
+    source.text = codec.encodeSetup({
+      machineName: 'test', material: { type: 'box', width: 6, height: 4, depth: 4 },
+    }, syntax) + '\n' + codec.encodeTool({
+      toolNumber: 1, description: 'mill', cutting: [{ type: 'endMill', diameter: 2, length: 4 }],
+    }, syntax);
+    requestPlot.mockResolvedValue({ canal: { '1': { segments: [{
+      geometry: 'LINEAR', traversal: 'FEED', sourceCode: 'G1', machiningMode: 'milling',
+      toolNumber: 1, lineNumber: 1, executionStep: 0,
+      points: [{ x: -1, y: 0, z: -1 }, { x: 1, y: 0, z: -1 }],
+      poses: [
+        { position: [-1, 0, -1], orientation: [0, 0, 0, 1], reference: 'millingTip', frameId },
+        { position: [1, 0, -1], orientation: [0, 0, 0, 1], reference: 'millingTip', frameId },
+      ],
+    }] } } });
+    const worker: SimulationWorker = {
+      onmessage: null, onerror: null, onmessageerror: null, terminate: vi.fn(),
+      postMessage: vi.fn((input) => {
+        queueMicrotask(() => worker.onmessage?.(new MessageEvent('message', {
+          data: { type: 'result', result: simulateMaterialRemoval(input) },
+        })));
+      }),
+    };
+    vi.spyOn(plot, 'createMaterialSimulationSession').mockImplementation((runId) =>
+      new MaterialSimulationSession(runId, () => worker));
+    selectedMode = 'simulation';
+    plot.scene = new THREE.Scene();
+    plot.plotService = new PlotService(bus);
+    render.mockRestore();
+    await plot.plotNCCode('1');
+    expect(worker.postMessage).not.toHaveBeenCalled();
+    const frameSelect = plot.shadowRoot!.querySelector<HTMLSelectElement>('#removal-frame')!;
+    expect(frameSelect.value).toBe(frameId === 'workpiece:tableBC' ? frameId : '');
+    const raw = plot.scene.children.find((child) => child.userData.isMaterial)!;
+    const dispose = vi.spyOn((raw.children[0].children[0] as THREE.Mesh).geometry, 'dispose');
+    frameSelect.value = frameId;
+    plot.shadowRoot!.querySelector<HTMLButtonElement>('#run-removal')!.click();
+    await vi.waitFor(() => expect(plot.scene!.children.some((child) => child.name === 'machined-stock')).toBe(true));
+    expect(dispose).toHaveBeenCalledOnce();
+    expect(plot.shadowRoot!.getElementById('material-removal-status')!.textContent).toContain('Completed.');
+    expect(worker.terminate).toHaveBeenCalledOnce();
+    bus.publish(EVENT_NAMES.EDITOR_CURSOR_MOVED, { channelId: '1', lineNumber: 1, source });
+    expect(requestPlot).toHaveBeenCalledTimes(1);
+    expect(worker.postMessage).toHaveBeenCalledTimes(1);
+    const mesh = plot.scene.children.find((child) => child.name === 'machined-stock')!.children[0] as THREE.Mesh;
+    const meshDispose = vi.spyOn(mesh.geometry, 'dispose');
+    plot.clearPlot();
+    expect(meshDispose).toHaveBeenCalledOnce();
+  });
+
+  it('keeps stock raw and surfaces an invalid frame binding instead of starting a worker', async () => {
+    source.text = new SimulationCommentCodec().encodeSetup({
+      machineName: 'test', material: { type: 'box', width: 4, height: 4, depth: 4 },
+    }, syntax);
+    selectedMode = 'simulation';
+    plot.scene = new THREE.Scene();
+    plot.plotService = new PlotService(bus);
+    render.mockRestore();
+    const create = vi.spyOn(plot, 'createMaterialSimulationSession');
+    await plot.plotNCCode('1');
+    plot.shadowRoot!.querySelector<HTMLButtonElement>('#run-removal')!.click();
+    await vi.waitFor(() => expect(plot.shadowRoot!.getElementById('material-removal-status')!.textContent)
+      .toContain('Select the workpiece frame'));
+    expect(create).not.toHaveBeenCalled();
   });
 
   it.each([true, false])('renders one shared stock or reports a conflict across channels, equal=%s', async (equal) => {

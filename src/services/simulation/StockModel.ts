@@ -32,6 +32,7 @@ export interface BoundaryCell {
   z: number;
   data: Float64Array;
   normals: Float32Array;
+  span?: readonly [number, number, number];
 }
 
 const NODE_BYTES = 128;
@@ -57,8 +58,12 @@ export class StockModel {
   private peakBytes = 0;
   private surfaceDataBytes = 0;
   private subtractionWorkspaceBytes = 0;
+  private readonly coverage: NonNullable<ImplicitVolume['axialCoverage']>[] = [];
+  private readonly completedVolumes: string[] = [];
   regionTests = 0;
   bulkRemovedRegions = 0;
+  coveredRegions = 0;
+  pristineSurfaceCells = 0;
 
   constructor(
     readonly size: readonly [number, number, number],
@@ -98,7 +103,12 @@ export class StockModel {
   }
   /** Conservative accounting includes node/Map overhead, not just typed arrays. */
   get allocatedBytes(): number {
-    return this.nodeCount * NODE_BYTES + this.dataBytes;
+    return (
+      this.nodeCount * NODE_BYTES +
+      this.dataBytes +
+      this.coverage.length * 1024 +
+      this.completedVolumes.length * 2176
+    );
   }
   get boundaryCells(): number {
     return this.boundary.size;
@@ -190,11 +200,18 @@ export class StockModel {
     this.dirtyChunks.add(this.chunkId(node.x, node.y, node.z));
   }
 
-  private boundaryData(x: number, y: number, z: number): BoundaryCell {
+  private boundaryData(
+    x: number,
+    y: number,
+    z: number,
+    span: readonly [number, number, number] = [1, 1, 1],
+  ): BoundaryCell {
     const data = new Float64Array(CENTRE + 1);
     const normals = new Float32Array(CELL_EDGES.length * 3);
     data.fill(NaN, 8, CENTRE);
-    const corners = CELL_CORNERS.map(([dx, dy, dz]) => this.point(x + dx, y + dy, z + dz));
+    const corners = CELL_CORNERS.map(([dx, dy, dz]) =>
+      this.point(x + dx * span[0], y + dy * span[1], z + dz * span[2]),
+    );
     corners.forEach((point, index) => {
       data[index] = this.material.distance(point);
     });
@@ -210,8 +227,10 @@ export class StockModel {
       point.copy(corners[a]).lerp(corners[b], data[8 + index]);
       surfaceNormal(this.material, point, this.resolutionMm * 1e-4).toArray(normals, index * 3);
     }
-    data[CENTRE] = this.material.distance(this.point(x + 0.5, y + 0.5, z + 0.5));
-    return { x, y, z, data, normals };
+    data[CENTRE] = this.material.distance(
+      this.point(x + span[0] / 2, y + span[1] / 2, z + span[2] / 2),
+    );
+    return { x, y, z, data, normals, span };
   }
 
   centre(x: number, y: number, z: number, target: THREE.Vector3): THREE.Vector3 {
@@ -284,6 +303,10 @@ export class StockModel {
   }
 
   subtract(volume: ImplicitVolume, test: () => void): void {
+    if (volume.identity && this.completedVolumes.includes(volume.identity)) {
+      this.coveredRegions++;
+      return;
+    }
     const checked: ImplicitVolume = {
       ...volume,
       distance: (point) => {
@@ -318,6 +341,30 @@ export class StockModel {
       region.min.copy(this.point(node.x, node.y, node.z));
       region.max.copy(this.point(node.x + node.span, node.y + node.span, node.z + node.span));
       if (!region.intersectsBox(volume.bounds)) return;
+      const certificate = volume.axialCoverage;
+      if (certificate) {
+        const half = (node.span * this.resolutionMm) / 2;
+        const axis = certificate.axis;
+        const axial = axis.dot(this.centreOf(node));
+        const extent = half * (Math.abs(axis.x) + Math.abs(axis.y) + Math.abs(axis.z));
+        const roundoff = 64 * Number.EPSILON * Math.max(1, Math.abs(axial), extent);
+        const low = axial - extent - roundoff,
+          high = axial + extent + roundoff;
+        const dominated = this.coverage.some((previous) => {
+          if (previous.key !== certificate.key) return false;
+          if (previous.lower <= certificate.lower && previous.upper >= certificate.upper)
+            return true;
+          if (previous.lower <= certificate.lower)
+            return high <= (certificate.lower + previous.upper) / 2;
+          if (previous.upper >= certificate.upper)
+            return low >= (previous.lower + certificate.upper) / 2;
+          return false;
+        });
+        if (dominated) {
+          this.coveredRegions++;
+          return;
+        }
+      }
       this.regionTests++;
       const distance = checked.distance(this.centreOf(node));
       const radius = (Math.sqrt(3) * node.span * this.resolutionMm) / 2;
@@ -339,6 +386,16 @@ export class StockModel {
     };
     try {
       update(this.root);
+      if (volume.axialCoverage) {
+        if (this.coverage.length === 128) this.coverage.shift();
+        this.coverage.push(volume.axialCoverage);
+        this.budget();
+      }
+      if (volume.identity && volume.identity.length <= 1024) {
+        if (this.completedVolumes.length === 32) this.completedVolumes.shift();
+        this.completedVolumes.push(volume.identity);
+        this.budget();
+      }
     } finally {
       this.subtractionWorkspaceBytes = 0;
     }
@@ -407,6 +464,7 @@ export class StockModel {
 
   getBoundaryChunks(onlyChunks?: ReadonlySet<number>): Map<number, BoundaryCell[]> {
     const chunks = new Map<number, BoundaryCell[]>();
+    this.pristineSurfaceCells = 0;
     let temporaryBytes = 0;
     const add = (cell: BoundaryCell): void => {
       const id = this.chunkId(cell.x, cell.y, cell.z);
@@ -432,10 +490,36 @@ export class StockModel {
       temporaryBytes += cell.data.byteLength + cell.normals.byteLength + 160;
       this.budget(temporaryBytes);
       add(cell);
+      this.pristineSurfaceCells++;
     };
     for (const node of this.pristine) {
       if (onlyChunks && !onlyChunks.has(this.chunkId(node.x, node.y, node.z))) continue;
-      visitPristine(node.x, node.y, node.z, node.span);
+      const low = this.point(node.x, node.y, node.z);
+      const high = this.point(node.x + node.span, node.y + node.span, node.z + node.span);
+      const extrusion = this.material.extrusion?.find(
+        ({ axis, minimum, maximum }) =>
+          low.getComponent(axis) > minimum && high.getComponent(axis) < maximum,
+      );
+      const extrusionAxis =
+        extrusion?.axis ?? this.material.planarExtrusionAxis?.(new THREE.Box3(low, high));
+      if (extrusionAxis !== undefined && node.span > 1) {
+        // Preserve the fine cross-section contour; extrusion adds zero chord error.
+        const span: [number, number, number] = [1, 1, 1];
+        span[extrusionAxis] = node.span;
+        for (let z = node.z; z < node.z + node.span; z += span[2])
+          for (let y = node.y; y < node.y + node.span; y += span[1])
+            for (let x = node.x; x < node.x + node.span; x += span[0]) {
+              const centre = this.point(x + span[0] / 2, y + span[1] / 2, z + span[2] / 2);
+              if (Math.abs(this.material.distance(centre)) > Math.SQRT1_2 * this.resolutionMm)
+                continue;
+              const cell = this.boundaryData(x, y, z, span);
+              if (CELL_EDGES.every((_, index) => !Number.isFinite(cell.data[8 + index]))) continue;
+              temporaryBytes += cell.data.byteLength + cell.normals.byteLength + 160;
+              this.budget(temporaryBytes);
+              this.pristineSurfaceCells++;
+              add(cell);
+            }
+      } else visitPristine(node.x, node.y, node.z, node.span);
     }
     this.surfaceDataBytes = temporaryBytes;
     return chunks;

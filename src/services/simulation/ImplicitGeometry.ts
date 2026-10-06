@@ -3,6 +3,13 @@ import * as THREE from 'three';
 /** Negative inside; fields must be 1-Lipschitz for conservative region classification. */
 export interface ImplicitVolume {
   bounds: THREE.Box3;
+  /** Axial extrusion interval of the stock's unchanged cross section. */
+  extrusion?: readonly { axis: number; minimum: number; maximum: number }[];
+  planarExtrusionAxis?(bounds: THREE.Box3): number | undefined;
+  /** Exact max(radial field, lower - axial, axial - upper) sweep certificate. */
+  axialCoverage?: { key: string; axis: THREE.Vector3; lower: number; upper: number };
+  /** Equality of this key certifies equality of the complete distance field. */
+  identity?: string;
   distance(point: THREE.Vector3): number;
   normal?(point: THREE.Vector3, target: THREE.Vector3): THREE.Vector3;
   countCentres?(first: THREE.Vector3, span: number, spacing: number): number;
@@ -114,6 +121,11 @@ export function boxVolume(size: readonly number[]): ImplicitVolume {
   const half = new THREE.Vector3(size[0] / 2, size[1] / 2, size[2] / 2);
   return {
     bounds: new THREE.Box3(half.clone().negate(), half.clone()),
+    extrusion: [2, 0, 1].map((axis) => ({
+      axis,
+      minimum: -half.getComponent(axis),
+      maximum: half.getComponent(axis),
+    })),
     countCentres: (first, span, spacing) =>
       intervalCount(first.x, span, spacing, half.x) *
       intervalCount(first.y, span, spacing, half.y) *
@@ -152,6 +164,14 @@ export function cylinderVolume(radius: number, length: number): ImplicitVolume {
       new THREE.Vector3(-radius, -radius, -length / 2),
       new THREE.Vector3(radius, radius, length / 2),
     ),
+    extrusion: [{ axis: 2, minimum: -length / 2, maximum: length / 2 }],
+    planarExtrusionAxis: (bounds) =>
+      Math.hypot(
+        Math.max(Math.abs(bounds.min.x), Math.abs(bounds.max.x)),
+        Math.max(Math.abs(bounds.min.y), Math.abs(bounds.max.y)),
+      ) < radius
+        ? 0
+        : undefined,
     countCentres: (first, span, spacing) => {
       const axial = intervalCount(first.z, span, spacing, length / 2);
       if (!axial) return 0;

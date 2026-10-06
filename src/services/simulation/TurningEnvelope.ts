@@ -179,6 +179,7 @@ export function buildTurningEnvelope(
   };
   return {
     bounds,
+    identity: JSON.stringify(['turning', spindleOrigin.toArray(), spindleAxis.toArray(), polygon]),
     distance: evaluate,
     normal: field.normal
       ? (point, target) => {

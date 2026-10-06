@@ -77,7 +77,7 @@ function closed(chunks: StockSurfaceChunk[]): void {
     for (let j = 0; j < 3; j++) {
       const a = key(vertices[i + j]),
         b = key(vertices[i + ((j + 1) % 3)]);
-      expect(a).not.toBe(b);
+      if (a === b) throw new Error('Degenerate Float32 triangle edge');
       const id = a < b ? `${a}|${b}` : `${b}|${a}`;
       const edge = edges.get(id) ?? { count: 0, direction: 0 };
       edge.count++;
@@ -86,10 +86,221 @@ function closed(chunks: StockSurfaceChunk[]): void {
     }
   expect(edges.size).toBeGreaterThan(0);
   const invalid = [...edges].filter(([, edge]) => edge.count !== 2 || edge.direction !== 0);
-  expect(invalid, JSON.stringify(invalid.slice(0, 8))).toEqual([]);
+  expect(invalid.length, JSON.stringify(invalid.slice(0, 8))).toBe(0);
 }
 
 describe('Hermite feature reconstruction', () => {
+  it('extrudes pristine analytical panels without changing the fine radial contour or opening seams', () => {
+    const radius = 2;
+    const stock = new StockModel([4, 4, 5], 0.05, cylinderVolume(radius, 5));
+    const builder = new StockMeshBuilder();
+    builder.buildChanged(stock);
+    const chunks = builder.getChunks();
+    closed(chunks);
+    const cells = [...stock.getBoundaryChunks().values()].flat();
+    expect(cells.some((cell) => (cell.span?.[2] ?? 1) > 1)).toBe(true);
+    expect(cells.length).toBeLessThan(18000);
+    let axialMaximum = 0,
+      radialMaximum = 0,
+      sideError = 0;
+    for (const point of points(chunks)) {
+      axialMaximum = Math.max(axialMaximum, Math.abs(point.z));
+      radialMaximum = Math.max(radialMaximum, Math.hypot(point.x, point.y));
+      // The unchanged XY chord has the original fine-lattice error bound;
+      // extending it axially introduces exactly zero additional sagitta.
+      if (Math.abs(point.z) < 2.45)
+        sideError = Math.max(sideError, Math.abs(Math.hypot(point.x, point.y) - radius));
+    }
+    expect(axialMaximum).toBeLessThanOrEqual(2.500001);
+    expect(radialMaximum).toBeLessThanOrEqual(radius + 0.05 ** 2 / radius);
+    expect(sideError).toBeLessThan(0.05 ** 2 / radius);
+    stock.subtract(
+      new CuttingToolModel({
+        ...mill,
+        cutting: [{ type: 'endMill', diameter: 0.3, length: 3 }],
+      }).volume(new THREE.Matrix4().makeTranslation(1.95, 0.1, 0.17)),
+      () => {},
+    );
+    builder.buildChanged(stock);
+    closed(builder.getChunks());
+    const signature = (values: StockSurfaceChunk[]) =>
+      values
+        .sort((a, b) => a.id - b.id)
+        .map((chunk) => `${chunk.id}:${chunk.positions.join(',')}`)
+        .join('|');
+    expect(signature(builder.getChunks()) === signature(mesh(stock))).toBe(true);
+  }, 120000);
+
+  it('stitches newly detailed cut chunks to analytical box panels at .05 mm', () => {
+    const size: [number, number, number] = [4, 4, 5];
+    const original = boxVolume(size);
+    let fineEvaluations = 0,
+      analyticalEvaluations = 0;
+    const fineMaterial = {
+      ...original,
+      extrusion: undefined,
+      distance: (point: THREE.Vector3) => {
+        fineEvaluations++;
+        return original.distance(point);
+      },
+    };
+    const analyticalMaterial = {
+      ...original,
+      distance: (point: THREE.Vector3) => {
+        analyticalEvaluations++;
+        return original.distance(point);
+      },
+    };
+    const referenceStarted = performance.now();
+    const reference = new StockModel(size, 0.05, fineMaterial);
+    const referenceBuilder = new StockMeshBuilder();
+    referenceBuilder.buildChanged(reference);
+    const cutter = new CuttingToolModel(mill);
+    const pose = (z: number) => new THREE.Matrix4().makeTranslation(0.13, -0.07, z);
+    const sweep = cutter.translationSweep(pose(3), pose(-3))!;
+    let referenceChecks = 0;
+    reference.subtract(
+      { ...sweep, axialCoverage: undefined, identity: undefined },
+      () => referenceChecks++,
+    );
+    fineEvaluations = 0;
+    referenceBuilder.buildChanged(reference);
+    const referenceMs = performance.now() - referenceStarted;
+    const started = performance.now();
+    const stock = new StockModel(size, 0.05, analyticalMaterial);
+    const builder = new StockMeshBuilder();
+    builder.buildChanged(stock);
+    let checks = 0;
+    stock.subtract(sweep, () => checks++);
+    analyticalEvaluations = 0;
+    builder.buildChanged(stock);
+    const chunks = builder.getChunks();
+    const elapsedMs = performance.now() - started;
+    const bytes = (values: StockSurfaceChunk[]) =>
+      values.reduce((sum, chunk) => sum + chunk.positions.byteLength + chunk.normals.byteLength, 0);
+    closed(chunks);
+    expect(stock.removedCells).toBe(52866);
+    expect(stock.removedCells).toBe(reference.removedCells);
+    expect(bytes(chunks)).toBeLessThan(bytes(referenceBuilder.getChunks()));
+    expect(analyticalEvaluations).toBeLessThan(fineEvaluations);
+    expect(checks).toBe(referenceChecks);
+    console.info(
+      'stock .05 fixture',
+      JSON.stringify({
+        reference: {
+          ms: referenceMs,
+          checks: referenceChecks,
+          meshEvaluations: fineEvaluations,
+          surfaceBytes: bytes(referenceBuilder.getChunks()),
+          peakBytes: reference.peakAllocatedBytes,
+        },
+        analytical: {
+          ms: elapsedMs,
+          checks,
+          meshEvaluations: analyticalEvaluations,
+          surfaceBytes: bytes(chunks),
+          peakBytes: stock.peakAllocatedBytes,
+        },
+      }),
+    );
+    const before = checks;
+    stock.subtract(cutter.translationSweep(pose(3), pose(-3))!, () => checks++);
+    expect(checks).toBe(before);
+    expect(stock.coveredRegions).toBeGreaterThan(0);
+    expect(builder.buildChanged(stock)).toEqual([]);
+  }, 120000);
+
+  it('certifies only dominated parts of overlapping axial sweeps, including new end cuts', () => {
+    const size: [number, number, number] = [4, 4, 12];
+    const accelerated = new StockModel(size, 0.2, boxVolume(size));
+    const reference = new StockModel(size, 0.2, boxVolume(size));
+    const tool = new CuttingToolModel({
+      ...mill,
+      cutting: [{ type: 'endMill', diameter: 1.3, length: 1 }],
+    });
+    let acceleratedChecks = 0,
+      referenceChecks = 0;
+    const pose = (z: number) => new THREE.Matrix4().makeTranslation(0.13, -0.07, z);
+    for (const [start, end] of [
+      [-4, -1],
+      [-2, 1],
+      [0, 3],
+      [-4, -1],
+    ]) {
+      const sweep = tool.translationSweep(pose(start), pose(end))!;
+      accelerated.subtract(sweep, () => acceleratedChecks++);
+      reference.subtract(
+        { ...sweep, axialCoverage: undefined, identity: undefined },
+        () => referenceChecks++,
+      );
+      expect(accelerated.removedCells).toBe(reference.removedCells);
+    }
+    expect(accelerated.coveredRegions).toBeGreaterThan(0);
+    expect(acceleratedChecks).toBeLessThan(referenceChecks);
+    console.info(
+      'overlapping axial sweep checks',
+      JSON.stringify({
+        accelerated: acceleratedChecks,
+        reference: referenceChecks,
+        coveredRegions: accelerated.coveredRegions,
+      }),
+    );
+    const actual = mesh(accelerated),
+      expected = mesh(reference);
+    closed(actual);
+    expect(actual.map((chunk) => chunk.positions)).toEqual(
+      expected.map((chunk) => chunk.positions),
+    );
+  }, 30000);
+
+  it('bounds coverage history and never records an interrupted sweep as complete', () => {
+    const stock = new StockModel([4, 4, 5], 0.2, boxVolume([4, 4, 5]));
+    const cutter = new CuttingToolModel(mill);
+    const pose = (x: number, z: number) => new THREE.Matrix4().makeTranslation(x, 0, z);
+    const sweep = cutter.translationSweep(pose(0, 3), pose(0, -3))!;
+    expect(() =>
+      stock.subtract(sweep, () => {
+        throw new Error('cancelled');
+      }),
+    ).toThrow('cancelled');
+    let checks = 0;
+    stock.subtract(sweep, () => checks++);
+    expect(checks).toBeGreaterThan(0);
+    const allocated = stock.allocatedBytes;
+    for (let x = 100; x < 230; x++)
+      stock.subtract(cutter.translationSweep(pose(x, 3), pose(x, -3))!, () => checks++);
+    expect(stock.allocatedBytes - allocated).toBe(127 * 1024 + 31 * 2176);
+    const before = checks,
+      removed = stock.removedCells;
+    stock.subtract(sweep, () => checks++);
+    expect(checks).toBeGreaterThan(before);
+    expect(stock.removedCells).toBe(removed);
+  });
+
+  it('reuses identical lateral and sampled cutter fields, but not shifted overlapping cuts', () => {
+    const stock = new StockModel([4, 4, 5], 0.2, boxVolume([4, 4, 5]));
+    const cutter = new CuttingToolModel(mill);
+    const pose = (x: number, y: number) => new THREE.Matrix4().makeTranslation(x, y, -0.5);
+    let checks = 0;
+    stock.subtract(cutter.translationSweep(pose(-0.5, 0), pose(0.5, 0))!, () => checks++);
+    const before = checks,
+      removed = stock.removedCells;
+    stock.subtract(cutter.translationSweep(pose(-0.5, 0), pose(0.5, 0))!, () => checks++);
+    expect(checks).toBe(before);
+    stock.subtract(cutter.translationSweep(pose(-0.5, 0.3), pose(0.5, 0.3))!, () => checks++);
+    expect(checks).toBeGreaterThan(before);
+    expect(stock.removedCells).toBeGreaterThan(removed);
+    const ball = new CuttingToolModel({
+      ...mill,
+      cutting: [{ type: 'ballMill', diameter: 1.3, length: 6 }],
+    });
+    stock.subtract(ball.volume(pose(0, -0.4)), () => checks++);
+    const after = checks;
+    stock.subtract(ball.volume(pose(0, -0.4)), () => checks++);
+    expect(checks).toBe(after);
+    closed(mesh(stock));
+  });
+
   it('solves corners, rank-deficient planes and constrained vertices', () => {
     const bounds = new THREE.Box3(new THREE.Vector3(), new THREE.Vector3(1, 1, 1));
     const samples = [

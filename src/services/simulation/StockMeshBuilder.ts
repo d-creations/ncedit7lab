@@ -34,6 +34,33 @@ const PLANE_EDGES = [
   [8, 9, 11, 10],
 ] as const;
 
+function seamKey(cell: BoundaryCell, axis: number, side: number, direction: number): string {
+  const coordinates = [cell.x, cell.y, cell.z];
+  const other = 3 - axis - direction;
+  return `${axis}:${coordinates[axis] + side * (cell.span?.[axis] ?? 1)}:${coordinates[other]}:${direction}`;
+}
+
+function triangleCapacity(
+  cell: BoundaryCell,
+  seams: ReadonlyMap<string, ReadonlySet<number>>,
+): number {
+  const span = Math.max(...(cell.span ?? [1, 1, 1]));
+  if (span === 1 && planarEdges(cell)) return 2;
+  let segments = 0;
+  const direction = cell.span?.findIndex((size) => size > 1) ?? -1;
+  for (const face of FACES) {
+    let crossings = 0;
+    for (const edge of face.edges) if (Number.isFinite(cell.data[8 + edge])) crossings++;
+    segments += crossings;
+    if (crossings && direction >= 0 && face.axis !== direction) {
+      const start = [cell.x, cell.y, cell.z][direction];
+      for (const level of seams.get(seamKey(cell, face.axis, face.side, direction)) ?? [])
+        if (level > start && level < start + span) segments++;
+    }
+  }
+  return segments;
+}
+
 function planarEdges(cell: BoundaryCell): readonly number[] | undefined {
   let mask = 0;
   for (let i = 0; i < CELL_EDGES.length; i++) if (Number.isFinite(cell.data[8 + i])) mask |= 1 << i;
@@ -180,32 +207,52 @@ export class StockMeshBuilder {
     stock: StockModel,
     cells: readonly BoundaryCell[],
     intersections: Map<string, HermiteSample>,
+    seams: ReadonlyMap<string, ReadonlySet<number>>,
+    workspaceBytes: number,
     visit: (points: readonly THREE.Vector3[], normals: readonly THREE.Vector3[]) => void,
   ): void {
     const rounded = (point: THREE.Vector3): THREE.Vector3 =>
       point.set(Math.fround(point.x), Math.fround(point.y), Math.fround(point.z));
+    const vertices: THREE.Vector3[] = [];
+    const directions: THREE.Vector3[] = [];
+    const direction = new THREE.Vector3();
+    const secondEdge = new THREE.Vector3();
     const emit = (points: readonly SurfaceVertex[]): void => {
-      const vertices = points.map((vertex) => vertex.point);
-      const direction = vertices[1]
-        .clone()
+      for (let i = 0; i < 3; i++) vertices[i] = points[i].point;
+      direction
+        .copy(vertices[1])
         .sub(vertices[0])
-        .cross(vertices[2].clone().sub(vertices[0]));
+        .cross(secondEdge.copy(vertices[2]).sub(vertices[0]));
       if (direction.lengthSq() === 0) return;
       direction.normalize();
-      const directions = points.map((vertex) => patchNormal(vertex.samples, direction));
+      for (let i = 0; i < 3; i++) directions[i] = patchNormal(points[i].samples, direction);
       visit(vertices, directions);
     };
     for (const cell of cells) {
+      const span = cell.span ?? [1, 1, 1];
+      const extrusionAxis = span.findIndex((size) => size > 1);
       const samples = CELL_EDGES.map(([a, b], index): HermiteSample | undefined => {
         const t = cell.data[8 + index];
         if (!Number.isFinite(t)) return undefined;
         const first = CELL_CORNERS[a],
           last = CELL_CORNERS[b];
-        const key = `${cell.x + first[0]},${cell.y + first[1]},${cell.z + first[2]}:${b - a}`;
+        const edgeAxis = first.findIndex((coordinate, axis) => coordinate !== last[axis]);
+        const key = `${cell.x + first[0] * span[0]},${cell.y + first[1] * span[1]},${cell.z + first[2] * span[2]}:${b - a}:${span[edgeAxis]}`;
         let sample = intersections.get(key);
         if (!sample) {
-          const point = new THREE.Vector3(cell.x + first[0], cell.y + first[1], cell.z + first[2])
-            .lerp(new THREE.Vector3(cell.x + last[0], cell.y + last[1], cell.z + last[2]), t)
+          const point = new THREE.Vector3(
+            cell.x + first[0] * span[0],
+            cell.y + first[1] * span[1],
+            cell.z + first[2] * span[2],
+          )
+            .lerp(
+              new THREE.Vector3(
+                cell.x + last[0] * span[0],
+                cell.y + last[1] * span[1],
+                cell.z + last[2] * span[2],
+              ),
+              t,
+            )
             .multiplyScalar(stock.resolutionMm)
             .add(stock.latticeMinimum);
           const normal = new THREE.Vector3().fromArray(cell.normals, index * 3);
@@ -217,18 +264,21 @@ export class StockMeshBuilder {
         return sample;
       });
       const plane = planarEdges(cell);
-      if (plane) {
+      if (plane && extrusionAxis < 0) {
         const vertices = plane.map((index) => samples[index]!);
         const normal = vertices[0].normal;
         visit([vertices[0].point, vertices[1].point, vertices[2].point], [normal, normal, normal]);
         visit([vertices[0].point, vertices[2].point, vertices[3].point], [normal, normal, normal]);
-        stock.accountSurfaceWorkspace(intersections.size * 256 + 8192);
+        stock.accountSurfaceWorkspace(workspaceBytes + intersections.size * 256 + 8192);
         continue;
       }
       const minimum = new THREE.Vector3(cell.x, cell.y, cell.z)
         .multiplyScalar(stock.resolutionMm)
         .add(stock.latticeMinimum);
-      const bounds = new THREE.Box3(minimum, minimum.clone().addScalar(stock.resolutionMm));
+      const bounds = new THREE.Box3(
+        minimum,
+        minimum.clone().add(new THREE.Vector3(...span).multiplyScalar(stock.resolutionMm)),
+      );
       const contour = segments(cell);
       const parent = CELL_EDGES.map((_, i) => i);
       const root = (i: number): number => {
@@ -261,11 +311,38 @@ export class StockMeshBuilder {
           if (a.normal.dot(b.normal) <= 0.85) {
             const faceBounds = bounds.clone();
             const coordinate =
-              ([cell.x, cell.y, cell.z][next.axis] + next.side) * stock.resolutionMm +
+              ([cell.x, cell.y, cell.z][next.axis] + next.side * span[next.axis]) *
+                stock.resolutionMm +
               stock.latticeMinimum.getComponent(next.axis);
             faceBounds.min.setComponent(next.axis, coordinate);
             faceBounds.max.setComponent(next.axis, coordinate);
             polygon.push({ point: rounded(boundedQef([a, b], faceBounds)), samples: [a, b] });
+          }
+          if (
+            extrusionAxis >= 0 &&
+            next.axis !== extrusionAxis &&
+            a.point.getComponent(extrusionAxis) !== b.point.getComponent(extrusionAxis)
+          ) {
+            const start = [cell.x, cell.y, cell.z][extrusionAxis];
+            const levels = [
+              ...(seams.get(seamKey(cell, next.axis, next.side, extrusionAxis)) ?? []),
+            ]
+              .filter((level) => level > start && level < start + span[extrusionAxis])
+              .sort((u, v) =>
+                a.point.getComponent(extrusionAxis) < b.point.getComponent(extrusionAxis)
+                  ? u - v
+                  : v - u,
+              );
+            for (const level of levels) {
+              const point = a.point.clone();
+              point.setComponent(
+                extrusionAxis,
+                Math.fround(
+                  level * stock.resolutionMm + stock.latticeMinimum.getComponent(extrusionAxis),
+                ),
+              );
+              polygon.push({ point, samples: [a] });
+            }
           }
           previous = next;
           current = next.a === current ? next.b : next.a;
@@ -358,7 +435,7 @@ export class StockMeshBuilder {
             emit([centre, polygon[i], polygon[(i + 1) % polygon.length]]);
         }
       }
-      stock.accountSurfaceWorkspace(intersections.size * 256 + 8192);
+      stock.accountSurfaceWorkspace(workspaceBytes + intersections.size * 256 + 8192);
     }
   }
 
@@ -380,33 +457,94 @@ export class StockMeshBuilder {
               requested.add(a + nx * (b + ny * c));
           }
     }
-    const chunks = stock.getBoundaryChunks(this.cache.size ? requested : undefined);
+    const context = new Set(requested);
+    // The rebuilt ring needs the unchanged ring beyond it to retain its exact
+    // coarse/fine seam breakpoints. Context cells are not themselves rebuilt.
+    if (this.cache.size)
+      for (const id of requested) {
+        const x = id % nx,
+          y = Math.floor(id / nx) % ny,
+          z = Math.floor(id / (nx * ny));
+        for (let dz = -1; dz <= 1; dz++)
+          for (let dy = -1; dy <= 1; dy++)
+            for (let dx = -1; dx <= 1; dx++) {
+              const a = x + dx,
+                b = y + dy,
+                c = z + dz;
+              if (a >= 0 && a < nx && b >= 0 && b < ny && c >= 0 && c < nz)
+                context.add(a + nx * (b + ny * c));
+            }
+      }
+    const chunks = stock.getBoundaryChunks(this.cache.size ? context : undefined);
     const changedIds = new Set([
       ...requested,
       ...[...chunks.keys()].filter((id) => !this.cache.has(id)),
     ]);
     const intersections = new Map<string, HermiteSample>();
+    const seams = new Map<string, Set<number>>();
+    let seamBytes = 0;
+    for (const cells of chunks.values())
+      for (const cell of cells) {
+        const direction = cell.span?.findIndex((size) => size > 1) ?? -1;
+        if (direction < 0) continue;
+        for (const face of FACES) {
+          if (face.axis === direction) continue;
+          if (!face.edges.some((edge) => Number.isFinite(cell.data[8 + edge]))) continue;
+          const key = seamKey(cell, face.axis, face.side, direction);
+          if (!seams.has(key)) {
+            seams.set(key, new Set());
+            seamBytes += 192;
+            stock.accountSurfaceWorkspace(seamBytes);
+          }
+        }
+      }
+    for (const cells of chunks.values())
+      for (const cell of cells)
+        for (const face of FACES) {
+          if (!face.edges.some((edge) => Number.isFinite(cell.data[8 + edge]))) continue;
+          for (const direction of [0, 1, 2]) {
+            if (face.axis === direction) continue;
+            const key = seamKey(cell, face.axis, face.side, direction);
+            const levels = seams.get(key);
+            if (!levels) continue;
+            const coordinate = [cell.x, cell.y, cell.z][direction];
+            const previous = levels.size;
+            levels.add(coordinate);
+            levels.add(coordinate + (cell.span?.[direction] ?? 1));
+            seamBytes += (levels.size - previous) * 32;
+          }
+          stock.accountSurfaceWorkspace(seamBytes);
+        }
+    stock.accountSurfaceWorkspace(seamBytes);
     for (const id of changedIds) {
       const cells = chunks.get(id) ?? [];
-      const count = cells.reduce(
-        (sum, cell) => sum + (planarEdges(cell) ? 2 : segments(cell, false).length * 2),
-        0,
-      );
+      const count = cells.reduce((sum, cell) => sum + triangleCapacity(cell, seams), 0);
       const previous = (this.cache.get(id)?.positions.length ?? 0) / 9;
-      if (this.triangles - previous + count > this.faceLimit * 2)
-        throw new Error(
-          `Stock surface exceeds the ${this.faceLimit.toLocaleString()} face budget; use coarser boundary spacing`,
-        );
+      const workspaceBytes = seamBytes + this.triangles * 72 + count * 72;
+      stock.accountSurfaceWorkspace(workspaceBytes + intersections.size * 256);
       const positions = new Float32Array(count * 9),
         normals = new Float32Array(count * 9);
       let offset = 0;
-      this.visitTriangles(stock, cells, intersections, (points, directions) => {
-        for (let i = 0; i < 3; i++) {
-          points[i].toArray(positions, offset);
-          directions[i].toArray(normals, offset);
-          offset += 3;
-        }
-      });
+      this.visitTriangles(
+        stock,
+        cells,
+        intersections,
+        seams,
+        workspaceBytes,
+        (points, directions) => {
+          if (this.triangles - previous + offset / 9 >= this.faceLimit * 2)
+            throw new Error(
+              `Stock surface exceeds the ${this.faceLimit.toLocaleString()} face budget; use coarser boundary spacing`,
+            );
+          for (let i = 0; i < 3; i++) {
+            points[i].toArray(positions, offset);
+            directions[i].toArray(normals, offset);
+            offset += 3;
+          }
+        },
+      );
+      if (offset !== positions.length)
+        stock.accountSurfaceWorkspace(workspaceBytes + intersections.size * 256 + offset * 8);
       const chunk = {
         id,
         positions: offset === positions.length ? positions : positions.slice(0, offset),

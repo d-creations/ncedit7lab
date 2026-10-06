@@ -165,6 +165,7 @@ export class CuttingToolModel {
     const point = new THREE.Vector3();
     return {
       bounds: this.bounds.clone().applyMatrix4(matrix),
+      identity: JSON.stringify(['pose', this.part, inverse.elements]),
       distance: (value) => this.distancePart(point.copy(value).applyMatrix4(inverse)),
     };
   }
@@ -187,6 +188,25 @@ export class CuttingToolModel {
       const length = this.part.length;
       return {
         bounds,
+        identity: JSON.stringify(['axial', this.part, inverse.elements, lower, upper]),
+        axialCoverage:
+          this.part.type === 'endMill' && !this.part.cornerRadius
+            ? {
+                key: JSON.stringify([
+                  this.part.diameter,
+                  ...inverse.elements.slice(0, 12),
+                  inverse.elements[12],
+                  inverse.elements[13],
+                ]),
+                axis: new THREE.Vector3(
+                  inverse.elements[2],
+                  inverse.elements[6],
+                  inverse.elements[10],
+                ),
+                lower: lower - inverse.elements[14],
+                upper: length + upper - inverse.elements[14],
+              }
+            : undefined,
         distance: (value) => {
           point.copy(value).applyMatrix4(inverse);
           point.z -= lower;
@@ -201,6 +221,7 @@ export class CuttingToolModel {
     const squared = endOrigin.x ** 2 + endOrigin.y ** 2;
     return {
       bounds,
+      identity: JSON.stringify(['lateral', this.part, inverse.elements, endOrigin.toArray()]),
       distance: (value) => {
         point.copy(value).applyMatrix4(inverse);
         const t = THREE.MathUtils.clamp(

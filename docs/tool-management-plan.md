@@ -438,6 +438,24 @@ retain their polygon-distance evaluation; translational turning sweeps still req
 convex sections. Each subtraction caches shared lattice-corner distances for that
 sweep only; this temporary workspace participates in the stock memory budget.
 
+Flat-end-mill axial sweeps additionally carry an exact radial-frame/axial-interval
+certificate. Up to 128 completed certificates are retained (1024 estimated bytes
+each, charged to the same memory limit). Matching radial frames and radii allow
+skipping a node only where the earlier `max(radial, lower - axial, axial - upper)`
+field is provably no greater than the new field over the node's entire axial
+interval. Partially overlapping travel therefore still visits the newly exposed
+end and any uncertified region; overlapping bounding boxes alone never imply
+coverage. Different radial positions, orientations, cutter profiles, lateral
+sweeps and turning use the ordinary adaptive update. Eviction only loses an
+optimization. Interrupted sweeps do not enter this history.
+Separately, up to 32 exact complete-field identity keys avoid recomputing identical
+posed milling cutters, analytical milling sweeps and turning envelopes. Keys encode
+the actual profile/transformed field, not just tool numbers or AABBs. Keys longer
+than 1024 characters are not retained; each retained key reserves 2176 estimated
+bytes. Changed/overlapping fields still require the ordinary update unless the
+axial certificate proves regional dominance. Both histories are run-owned, bounded,
+memory-accounted and populated only after successful subtraction.
+
 Stock and cutter crossings on the twelve cube edges use bracketed Illinois
 interpolation, with a bounded bisection tail when interpolation has not converged.
 The positional bracket tolerance is the smaller of spacing / 2^24 and 0.0000001 mm,
@@ -458,6 +476,13 @@ of tangent planes, preserving analytical wall dimensions and reducing triangle c
 Shading blends compatible normals but retains separate normals at creases.
 Axis-aligned planar cells with four consistent, parallel edge crossings emit two
 triangles directly, avoiding general contour/QEF work and oversized staging buffers.
+The capacity pass counts face crossings without constructing directed contour
+objects; triangle emission reuses vector/array scratch. Seam maps are created only
+for crossing faces that actually touch a coarse analytical panel, not every fine
+cell face. Their estimated storage, staging arrays, retained surface buffers and
+canonical-edge workspace participate in peak memory accounting. The triangle limit
+checks emitted triangles, rather than rejecting a valid patch from a loose capacity
+estimate.
 
 Cell QEF fans are accepted only inside the contour's projected visibility kernel.
 Concave contours are triangulated while retaining every shared boundary vertex and
@@ -465,7 +490,21 @@ checking their indexed edge orientation. Patches without a valid single planar c
 use an oriented interior-cell fan rather than dropping polygons; these remain
 spacing-dependent approximations. Float32 positions are checked for degenerate
 triangles. Canonical edge samples and neighbouring-chunk rebuilds keep seams
-consistent. Untouched analytical stock uses the same fine boundary lattice.
+consistent. Pristine box faces use long analytical extrusion panels, as do cylinder
+walls along their axis and cylinder cap regions certified entirely inside the
+radial disk. Only the panel's cross section retains the fine boundary lattice;
+untouched axial length no longer requires one mesher cell per fine lattice layer.
+The cylinder's XY contour is unchanged, so axial panel extension introduces exactly
+zero additional radial chord/sagitta error. No larger angular steps or arbitrary
+geometric-error threshold are used. Planar extrusion similarly adds zero geometric
+error. Primitive corners/rims and affected regions retain the ordinary fine
+Hermite/QEF cells. Coarse panel contours insert precisely the neighbouring
+fine/coarse cell's axial breakpoints before triangulation, preserving the same
+Float32 boundary edges, including at cut seams. This is anisotropic analytical
+patching, not unrestricted octree-level contour coarsening.
+Incremental rebuilds read one additional unchanged chunk ring as seam context
+without rebuilding that ring; otherwise a rebuilt coarse panel could lose the
+breakpoints belonging to an unchanged fine neighbour outside the invalidated ring.
 This is a shared-face Hermite/QEF reconstruction, not a complete implementation of
 Dual Contouring or Cubical Marching Squares, and no universal topology guarantee
 for undersampled features is claimed.
@@ -495,6 +534,23 @@ the feature-reconstruction principles of [Dual Contouring](https://doi.org/10.11
 and [Cubical Marching Squares](https://doi.org/10.1111/j.1467-8659.2005.00879.x),
 not a reproduction of their full algorithms or the comparison study's inaccessible
 performance claims.
+
+The bounded 4 x 4 x 5 mm box regression at 0.05 mm spacing (diameter 1.3 mm axial
+through-hole, x=0.13, y=-0.07, z=3 to -3) compares analytical patching against a
+fine-only variant in the same local Vitest process, including initial meshing and
+an incremental rebuild. One measured run was 1982 ms fine-only / 580 ms analytical;
+both removed 52,866 cell-centre samples with 565,097 cutter checks. Rebuild stock-field
+evaluations (including unchanged seam context) fell from 733,828 to 120,042,
+final surface buffers from 8,155,296 to
+2,426,400 bytes, and peak estimated memory from 48,262,376 to 19,123,240 bytes.
+The tests assert work/buffer reductions and exact oriented Float32 closure, not a
+wall-time speedup. Timing depends on runtime and test order; these local numbers
+are not comparable with earlier hidden-browser timings and do not establish a
+universal speedup. Repeat certified sweeps require no cutter evaluations; shifted
+overlapping axial sweeps are compared against the uncertified update, including
+new end cuts and exact final mesh positions.
+The overlapping axial regression used 69,889 cutter checks with certificates versus
+74,715 without them, with 108 certified regional skips and identical final positions.
 
 Computation runs in a dedicated Web Worker. Progress is throttled; Cancel Removal,
 stale inputs, replacement and disconnect terminate pending workers and reject late

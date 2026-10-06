@@ -4,6 +4,7 @@ import * as THREE from 'three';
 export interface ImplicitVolume {
   bounds: THREE.Box3;
   distance(point: THREE.Vector3): number;
+  normal?(point: THREE.Vector3, target: THREE.Vector3): THREE.Vector3;
   countCentres?(first: THREE.Vector3, span: number, spacing: number): number;
 }
 
@@ -24,29 +25,20 @@ export const CELL_CORNERS = [
   [1, 1, 1],
 ] as const;
 
-// The same body diagonal in every cell gives matching triangulations on shared faces.
-export const CELL_TETRAHEDRA = [
-  [0, 1, 3, 7],
-  [0, 3, 2, 7],
-  [0, 2, 6, 7],
-  [0, 6, 4, 7],
-  [0, 4, 5, 7],
-  [0, 5, 1, 7],
+export const CELL_EDGES = [
+  [0, 1],
+  [2, 3],
+  [4, 5],
+  [6, 7],
+  [0, 2],
+  [1, 3],
+  [4, 6],
+  [5, 7],
+  [0, 4],
+  [1, 5],
+  [2, 6],
+  [3, 7],
 ] as const;
-
-export const CELL_EDGES: readonly (readonly [number, number])[] = (() => {
-  const edges = new Map<string, [number, number]>();
-  for (const tetra of CELL_TETRAHEDRA) {
-    for (let i = 0; i < 4; i++) {
-      for (let j = i + 1; j < 4; j++) {
-        const a = Math.min(tetra[i], tetra[j]),
-          b = Math.max(tetra[i], tetra[j]);
-        edges.set(`${a}:${b}`, [a, b]);
-      }
-    }
-  }
-  return [...edges.values()];
-})();
 
 export function edgeIndex(a: number, b: number): number {
   const index = CELL_EDGES.findIndex(([u, v]) => u === Math.min(a, b) && v === Math.max(a, b));
@@ -54,18 +46,68 @@ export function edgeIndex(a: number, b: number): number {
   return index;
 }
 
-export function edgeRoot(a: number, b: number, field: (t: number) => number): number {
-  if (Math.abs(a) < 1e-12) return 0;
-  if (Math.abs(b) < 1e-12) return 1;
+export function edgeRoot(
+  a: number,
+  b: number,
+  field: (t: number) => number,
+  tolerance = 2 ** -24,
+): number {
+  if (![a, b, tolerance].every(Number.isFinite) || tolerance < Number.EPSILON || tolerance >= 1)
+    throw new Error('Invalid surface intersection bracket or tolerance');
+  if (a === 0) return 0;
+  if (b === 0) return 1;
   if (a < 0 === b < 0) throw new Error('Surface edge has no bracketed intersection');
   let low = 0,
     high = 1;
-  for (let iteration = 0; iteration < 24; iteration++) {
-    const middle = (low + high) / 2;
-    if (field(middle) < 0 === a < 0) low = middle;
-    else high = middle;
+  let left = a,
+    right = b,
+    previousSide = 0;
+  for (let iteration = 0; high - low > tolerance; iteration++) {
+    // Illinois interpolation resolves planes immediately; bisection bounds the worst case.
+    let middle = iteration < 12 ? (low * right - high * left) / (right - left) : (low + high) / 2;
+    if (!(middle > low && middle < high)) middle = (low + high) / 2;
+    const value = field(middle);
+    if (!Number.isFinite(value)) throw new Error('Non-finite surface intersection field');
+    if (value === 0) return middle;
+    if (value < 0 === a < 0) {
+      low = middle;
+      left = value;
+      if (previousSide === 1) right *= 0.5;
+      previousSide = 1;
+    } else {
+      high = middle;
+      right = value;
+      if (previousSide === -1) left *= 0.5;
+      previousSide = -1;
+    }
   }
   return (low + high) / 2;
+}
+
+export function surfaceNormal(
+  volume: ImplicitVolume,
+  point: THREE.Vector3,
+  epsilon: number,
+  target = new THREE.Vector3(),
+  test: () => void = () => {},
+): THREE.Vector3 {
+  if (volume.normal) {
+    test();
+    volume.normal(point, target);
+  } else {
+    const sample = point.clone();
+    for (let axis = 0; axis < 3; axis++) {
+      sample.copy(point).setComponent(axis, point.getComponent(axis) + epsilon);
+      test();
+      const high = volume.distance(sample);
+      sample.setComponent(axis, point.getComponent(axis) - epsilon);
+      test();
+      target.setComponent(axis, high - volume.distance(sample));
+    }
+  }
+  if (!Number.isFinite(target.lengthSq()) || target.lengthSq() < 1e-24)
+    throw new Error('Cannot resolve stock/cutter surface normal');
+  return target.normalize();
 }
 
 export function boxVolume(size: readonly number[]): ImplicitVolume {
@@ -76,6 +118,23 @@ export function boxVolume(size: readonly number[]): ImplicitVolume {
       intervalCount(first.x, span, spacing, half.x) *
       intervalCount(first.y, span, spacing, half.y) *
       intervalCount(first.z, span, spacing, half.z),
+    normal: (point, target) => {
+      target.set(
+        Math.sign(point.x) * Math.max(Math.abs(point.x) - half.x, 0),
+        Math.sign(point.y) * Math.max(Math.abs(point.y) - half.y, 0),
+        Math.sign(point.z) * Math.max(Math.abs(point.z) - half.z, 0),
+      );
+      if (target.lengthSq() === 0) {
+        const distances = [
+          Math.abs(point.x) - half.x,
+          Math.abs(point.y) - half.y,
+          Math.abs(point.z) - half.z,
+        ];
+        const axis = distances.indexOf(Math.max(...distances));
+        target.setComponent(axis, point.getComponent(axis) < 0 ? -1 : 1);
+      }
+      return target.normalize();
+    },
     distance: (point) => {
       const x = Math.abs(point.x) - half.x;
       const y = Math.abs(point.y) - half.y;
@@ -103,6 +162,20 @@ export function cylinderVolume(radius: number, length: number): ImplicitVolume {
         }
       }
       return radial * axial;
+    },
+    normal: (point, target) => {
+      const radialLength = Math.hypot(point.x, point.y);
+      const radial = radialLength - radius;
+      const axial = Math.abs(point.z) - length / 2;
+      const radialWeight = radial > 0 || axial > 0 ? Math.max(radial, 0) : radial >= axial ? 1 : 0;
+      const axialWeight = radial > 0 || axial > 0 ? Math.max(axial, 0) : axial > radial ? 1 : 0;
+      return target
+        .set(
+          radialLength ? (radialWeight * point.x) / radialLength : 0,
+          radialLength ? (radialWeight * point.y) / radialLength : 0,
+          axialWeight * (point.z < 0 ? -1 : 1),
+        )
+        .normalize();
     },
     distance: (point) => {
       const radial = Math.hypot(point.x, point.y) - radius;

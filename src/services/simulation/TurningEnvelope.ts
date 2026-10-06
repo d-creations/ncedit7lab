@@ -39,6 +39,55 @@ function convexHull(points: THREE.Vector2[]): THREE.Vector2[] {
   return [...half(sorted), ...half(sorted.slice().reverse())];
 }
 
+function convexField(polygon: readonly THREE.Vector2[]) {
+  let area = 0;
+  for (let i = 0; i < polygon.length; i++) {
+    const a = polygon[i],
+      b = polygon[(i + 1) % polygon.length];
+    area += a.x * b.y - b.x * a.y;
+  }
+  const winding = Math.sign(area);
+  if (Math.abs(area) < 1e-12)
+    throw new SimulationCapabilityError('Degenerate turning envelope section');
+  const edges = polygon.map((a, i) => {
+    const b = polygon[(i + 1) % polygon.length];
+    const length = a.distanceTo(b);
+    if (length < 1e-12) throw new SimulationCapabilityError('Degenerate turning envelope edge');
+    const x = (winding * (b.y - a.y)) / length;
+    const y = (winding * (a.x - b.x)) / length;
+    return { x, y, offset: -(x * a.x + y * a.y) };
+  });
+  // Only convex sections admit a sign-correct maximum of supporting planes.
+  const convex = polygon.every((point) =>
+    edges.every((edge) => edge.x * point.x + edge.y * point.y + edge.offset <= 1e-8),
+  );
+  const activeEdge = (x: number, y: number): number => {
+    let distance = -Infinity,
+      index = 0;
+    for (let i = 0; i < edges.length; i++) {
+      const edge = edges[i];
+      const value = edge.x * x + edge.y * y + edge.offset;
+      if (value > distance) {
+        distance = value;
+        index = i;
+      }
+    }
+    return index;
+  };
+  return {
+    normal: convex ? (x: number, y: number) => edges[activeEdge(x, y)] : undefined,
+    distance: (x: number, y: number): number => {
+      if (!convex) return polygonDistance(x, y, polygon);
+      let distance = -Infinity;
+      for (const edge of edges) {
+        const value = edge.x * x + edge.y * y + edge.offset;
+        if (value > distance) distance = value;
+      }
+      return distance;
+    },
+  };
+}
+
 export function buildTurningSweep(
   cutter: CuttingToolModel,
   start: THREE.Matrix4,
@@ -98,6 +147,9 @@ export function buildTurningEnvelope(
     return new THREE.Vector2(relative.dot(radial), relative.dot(spindleAxis));
   });
   const polygon = endMatrix ? convexHull(projected) : projected;
+  const field = convexField(polygon);
+  const minimumRadial = Math.min(...polygon.map((point) => point.x));
+  const maximumRadial = Math.max(...polygon.map((point) => point.x));
   const radius = Math.max(...polygon.map((point) => Math.abs(point.x)));
   const zMin = Math.min(...polygon.map((point) => point.y));
   const zMax = Math.max(...polygon.map((point) => point.y));
@@ -113,17 +165,34 @@ export function buildTurningEnvelope(
   );
   const bounds = new THREE.Box3(centre.clone().sub(extent), centre.clone().add(extent));
   const relative = new THREE.Vector3();
+  let axial = 0,
+    radialLength = 0,
+    reflected = false;
+  const evaluate = (point: THREE.Vector3): number => {
+    relative.copy(point).sub(spindleOrigin);
+    axial = relative.dot(spindleAxis);
+    radialLength = Math.sqrt(Math.max(0, relative.lengthSq() - axial ** 2));
+    const positive = maximumRadial >= 0 ? field.distance(radialLength, axial) : Infinity;
+    const negative = minimumRadial <= 0 ? field.distance(-radialLength, axial) : Infinity;
+    reflected = negative < positive;
+    return Math.min(positive, negative);
+  };
   return {
     bounds,
-    distance: (point) => {
-      relative.copy(point).sub(spindleOrigin);
-      const axial = relative.dot(spindleAxis);
-      const radial = Math.sqrt(Math.max(0, relative.lengthSq() - axial ** 2));
-      return Math.min(
-        polygonDistance(radial, axial, polygon),
-        polygonDistance(-radial, axial, polygon),
-      );
-    },
+    distance: evaluate,
+    normal: field.normal
+      ? (point, target) => {
+          evaluate(point);
+          const edge = field.normal!(reflected ? -radialLength : radialLength, axial);
+          if (radialLength > 1e-12)
+            target.copy(relative).addScaledVector(spindleAxis, -axial).divideScalar(radialLength);
+          else target.copy(radial);
+          return target
+            .multiplyScalar(edge.x * (reflected ? -1 : 1))
+            .addScaledVector(spindleAxis, edge.y)
+            .normalize();
+        }
+      : undefined,
     inside: (point) => {
       relative.copy(point).sub(spindleOrigin);
       const axial = relative.dot(spindleAxis);

@@ -1,6 +1,12 @@
 import * as THREE from 'three';
 import { SIMULATION_LIMITS } from './SimulationTypes';
-import { CELL_CORNERS, CELL_EDGES, edgeRoot, type ImplicitVolume } from './ImplicitGeometry';
+import {
+  CELL_CORNERS,
+  CELL_EDGES,
+  edgeRoot,
+  surfaceNormal,
+  type ImplicitVolume,
+} from './ImplicitGeometry';
 
 export interface StockLimits {
   cells: number;
@@ -16,6 +22,7 @@ interface StockNode {
   children?: StockNode[];
   /** Eight corner fields, edge intersection parameters, and a centre field. */
   data?: Float64Array;
+  normals?: Float32Array;
   occupied: number;
 }
 
@@ -24,6 +31,7 @@ export interface BoundaryCell {
   y: number;
   z: number;
   data: Float64Array;
+  normals: Float32Array;
 }
 
 const NODE_BYTES = 128;
@@ -42,10 +50,13 @@ export class StockModel {
   private readonly pristine = new Set<StockNode>();
   private readonly latticeSide: number;
   private readonly material: ImplicitVolume;
+  private readonly intersectionTolerance: number;
   private nodeCount = 0;
   private dataBytes = 0;
   private initialCells = 0;
   private peakBytes = 0;
+  private surfaceDataBytes = 0;
+  private subtractionWorkspaceBytes = 0;
   regionTests = 0;
   bulkRemovedRegions = 0;
 
@@ -74,6 +85,7 @@ export class StockModel {
       Math.ceil((value + 2) / this.chunkSize),
     ) as [number, number, number];
     this.material = material;
+    this.intersectionTolerance = Math.min(resolutionMm * 2 ** -24, 1e-7);
     this.root = this.createNode(0, 0, 0, this.latticeSide);
     this.initialCells = this.root.occupied;
   }
@@ -99,10 +111,15 @@ export class StockModel {
   }
 
   private budget(extraBytes = 0): void {
-    this.peakBytes = Math.max(this.peakBytes, this.allocatedBytes + extraBytes);
+    const bytes = this.allocatedBytes + this.subtractionWorkspaceBytes + extraBytes;
+    this.peakBytes = Math.max(this.peakBytes, bytes);
     if (this.nodeCount > this.limits.cells) throw new Error('Adaptive stock cell budget exceeded');
-    if (this.allocatedBytes + extraBytes > this.limits.stockBytes)
+    if (bytes > this.limits.stockBytes)
       throw new Error('Adaptive stock memory budget exceeded; use a coarser boundary spacing');
+  }
+
+  accountSurfaceWorkspace(bytes: number): void {
+    this.budget(this.surfaceDataBytes + bytes);
   }
 
   private point(x: number, y: number, z: number, target = new THREE.Vector3()): THREE.Vector3 {
@@ -162,8 +179,10 @@ export class StockModel {
 
   private makeBoundary(node: StockNode): void {
     this.pristine.delete(node);
-    node.data = this.boundaryData(node.x, node.y, node.z);
-    this.dataBytes += node.data.byteLength + 64;
+    const cell = this.boundaryData(node.x, node.y, node.z);
+    node.data = cell.data;
+    node.normals = cell.normals;
+    this.dataBytes += node.data.byteLength + node.normals.byteLength + 96;
     this.budget();
     node.state = 'boundary';
     node.occupied = node.data[CENTRE] < 0 ? 1 : 0;
@@ -171,8 +190,9 @@ export class StockModel {
     this.dirtyChunks.add(this.chunkId(node.x, node.y, node.z));
   }
 
-  private boundaryData(x: number, y: number, z: number): Float64Array {
+  private boundaryData(x: number, y: number, z: number): BoundaryCell {
     const data = new Float64Array(CENTRE + 1);
+    const normals = new Float32Array(CELL_EDGES.length * 3);
     data.fill(NaN, 8, CENTRE);
     const corners = CELL_CORNERS.map(([dx, dy, dz]) => this.point(x + dx, y + dy, z + dz));
     corners.forEach((point, index) => {
@@ -181,12 +201,17 @@ export class StockModel {
     for (const [index, [a, b]] of CELL_EDGES.entries()) {
       if (data[a] < 0 === data[b] < 0) continue;
       const point = new THREE.Vector3();
-      data[8 + index] = edgeRoot(data[a], data[b], (t) =>
-        this.material.distance(point.copy(corners[a]).lerp(corners[b], t)),
+      data[8 + index] = edgeRoot(
+        data[a],
+        data[b],
+        (t) => this.material.distance(point.copy(corners[a]).lerp(corners[b], t)),
+        this.intersectionTolerance / corners[a].distanceTo(corners[b]),
       );
+      point.copy(corners[a]).lerp(corners[b], data[8 + index]);
+      surfaceNormal(this.material, point, this.resolutionMm * 1e-4).toArray(normals, index * 3);
     }
     data[CENTRE] = this.material.distance(this.point(x + 0.5, y + 0.5, z + 0.5));
-    return data;
+    return { x, y, z, data, normals };
   }
 
   centre(x: number, y: number, z: number, target: THREE.Vector3): THREE.Vector3 {
@@ -246,27 +271,55 @@ export class StockModel {
     }
     if (node.children) for (const child of node.children) this.release(child);
     if (node.data) {
-      this.dataBytes -= node.data.byteLength + 64;
+      this.dataBytes -= node.data.byteLength + (node.normals?.byteLength ?? 0) + 96;
       this.boundary.delete(this.id(node.x, node.y, node.z));
       this.dirtyChunks.add(this.chunkId(node.x, node.y, node.z));
     }
     if (!retain) this.nodeCount--;
     node.children = undefined;
     node.data = undefined;
+    node.normals = undefined;
     node.state = 'empty';
     node.occupied = 0;
   }
 
   subtract(volume: ImplicitVolume, test: () => void): void {
+    const checked: ImplicitVolume = {
+      ...volume,
+      distance: (point) => {
+        test();
+        const distance = volume.distance(point);
+        if (!Number.isFinite(distance)) throw new Error('Non-finite cutter distance field');
+        return distance;
+      },
+      normal: volume.normal
+        ? (point, target) => {
+            test();
+            return volume.normal!(point, target);
+          }
+        : undefined,
+    };
+    const corners = new Map<number, number>();
+    const side = this.latticeSide + 1;
+    const cornerDistance = (x: number, y: number, z: number, point: THREE.Vector3): number => {
+      const key = x + side * (y + side * z);
+      let distance = corners.get(key);
+      if (distance === undefined) {
+        distance = checked.distance(point);
+        corners.set(key, distance);
+        this.subtractionWorkspaceBytes = corners.size * 64;
+        this.budget();
+      }
+      return distance;
+    };
     const region = new THREE.Box3();
     const update = (node: StockNode): void => {
       if (node.state === 'empty') return;
       region.min.copy(this.point(node.x, node.y, node.z));
       region.max.copy(this.point(node.x + node.span, node.y + node.span, node.z + node.span));
       if (!region.intersectsBox(volume.bounds)) return;
-      test();
       this.regionTests++;
-      const distance = volume.distance(this.centreOf(node));
+      const distance = checked.distance(this.centreOf(node));
       const radius = (Math.sqrt(3) * node.span * this.resolutionMm) / 2;
       if (distance > radius) return;
       if (distance < -radius) {
@@ -282,19 +335,27 @@ export class StockModel {
         return;
       }
       if (!node.data) this.makeBoundary(node);
-      this.updateBoundary(node, volume, test);
+      this.updateBoundary(node, checked, cornerDistance);
     };
-    update(this.root);
+    try {
+      update(this.root);
+    } finally {
+      this.subtractionWorkspaceBytes = 0;
+    }
   }
 
-  private updateBoundary(node: StockNode, volume: ImplicitVolume, test: () => void): void {
+  private updateBoundary(
+    node: StockNode,
+    volume: ImplicitVolume,
+    cornerDistance: (x: number, y: number, z: number, point: THREE.Vector3) => number,
+  ): void {
     const data = node.data!;
     const old = data.slice();
     const corners = CELL_CORNERS.map(([x, y, z]) => this.point(node.x + x, node.y + y, node.z + z));
     let changed = false;
     corners.forEach((point, i) => {
-      test();
-      data[i] = Math.max(old[i], -volume.distance(point));
+      const [x, y, z] = CELL_CORNERS[i];
+      data[i] = Math.max(old[i], -cornerDistance(node.x + x, node.y + y, node.z + z, point));
       changed ||= data[i] !== old[i];
     });
     const centre = Math.max(old[CENTRE], -volume.distance(this.centreOf(node)));
@@ -310,9 +371,10 @@ export class StockModel {
       }
       const previous = old[8 + index];
       if (Number.isFinite(previous) && data[a] < 0 === old[a] < 0) {
-        test();
-        const rootTolerance = Math.sqrt(3) * this.resolutionMm * 2 ** -24;
-        if (volume.distance(point.copy(corners[a]).lerp(corners[b], previous)) >= -rootTolerance)
+        if (
+          volume.distance(point.copy(corners[a]).lerp(corners[b], previous)) >=
+          -this.intersectionTolerance
+        )
           continue;
       }
       const oldField = (t: number): number => {
@@ -322,10 +384,23 @@ export class StockModel {
           ? old[a] * (1 - t / previous)
           : old[b] * ((t - previous) / (1 - previous));
       };
-      data[8 + index] = edgeRoot(data[a], data[b], (t) => {
-        test();
-        return Math.max(oldField(t), -volume.distance(point.copy(corners[a]).lerp(corners[b], t)));
-      });
+      data[8 + index] = edgeRoot(
+        data[a],
+        data[b],
+        (t) => {
+          return Math.max(
+            oldField(t),
+            -volume.distance(point.copy(corners[a]).lerp(corners[b], t)),
+          );
+        },
+        this.intersectionTolerance / corners[a].distanceTo(corners[b]),
+      );
+      point.copy(corners[a]).lerp(corners[b], data[8 + index]);
+      if (-volume.distance(point) >= oldField(data[8 + index]) - this.intersectionTolerance) {
+        surfaceNormal(volume, point, this.resolutionMm * 1e-4)
+          .negate()
+          .toArray(node.normals!, index * 3);
+      }
     }
     this.dirtyChunks.add(this.chunkId(node.x, node.y, node.z));
   }
@@ -341,7 +416,7 @@ export class StockModel {
     };
     for (const node of this.boundary.values()) {
       if (onlyChunks && !onlyChunks.has(this.chunkId(node.x, node.y, node.z))) continue;
-      add({ x: node.x, y: node.y, z: node.z, data: node.data! });
+      add({ x: node.x, y: node.y, z: node.z, data: node.data!, normals: node.normals! });
     }
     const visitPristine = (x: number, y: number, z: number, span: number): void => {
       const half = span / 2;
@@ -352,16 +427,17 @@ export class StockModel {
           visitPristine(x + dx * half, y + dy * half, z + dz * half, half);
         return;
       }
-      const data = this.boundaryData(x, y, z);
-      if (CELL_EDGES.every((_, index) => !Number.isFinite(data[8 + index]))) return;
-      temporaryBytes += data.byteLength + 128;
+      const cell = this.boundaryData(x, y, z);
+      if (CELL_EDGES.every((_, index) => !Number.isFinite(cell.data[8 + index]))) return;
+      temporaryBytes += cell.data.byteLength + cell.normals.byteLength + 160;
       this.budget(temporaryBytes);
-      add({ x, y, z, data });
+      add(cell);
     };
     for (const node of this.pristine) {
       if (onlyChunks && !onlyChunks.has(this.chunkId(node.x, node.y, node.z))) continue;
       visitPristine(node.x, node.y, node.z, node.span);
     }
+    this.surfaceDataBytes = temporaryBytes;
     return chunks;
   }
 }

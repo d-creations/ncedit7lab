@@ -6,7 +6,8 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 - **Adaptive Material Removal**: Replaced uniform occupied voxel storage with an octree that batches solid/empty region updates and refines affected boundaries, while retaining untouched stock surfaces analytically.
-- **Intersection-Based Stock Surfaces**: Replaced exposed cube faces with shared-lattice tetrahedral surface reconstruction using stock/cutter edge intersections. Added analytical sweeps for supported straight milling and conventional turning motions.
+- **Hermite Stock Surfaces**: Replaced cube/tetrahedral surfaces with shared-face contours using edge intersections and outward normals, bounded QEF feature vertices, and crease-aware shading. Preserve sharp stock and cut corners; validate exact Float32 closed surfaces across chunk seams and mixed turning/milling cuts.
+- **Faster Stock Subtraction**: Precompute convex turning-envelope supporting planes, cache shared corner evaluations per sweep, use tolerance-bounded interpolated intersection searches, and batch only compatible contiguous straight analytical sweeps. Execution/progress counts, stopped prefixes and backend machining-mode rules are preserved.
 - **Removal Detail and Diagnostics**: Renamed voxel size to boundary spacing and report refined cells, peak estimated stock memory and surface-buffer usage. Added dimensional, closed-surface, repeat-cut and 0.05 mm resource regression tests; final-stock-only behavior remains unchanged.
 
 ### Fixed

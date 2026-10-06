@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { CuttingToolModel } from './CuttingToolModel';
-import { buildTurningEnvelope, buildTurningSweep } from './TurningEnvelope';
+import { buildTurningSweep } from './TurningEnvelope';
 import { WorkpieceFactory } from './WorkpieceFactory';
 import { StockMeshBuilder } from './StockMeshBuilder';
 import {
@@ -11,6 +11,70 @@ import {
 } from './SimulationTypes';
 import type { StockModel } from './StockModel';
 import type { DeepReadonly } from '../tools/SimulationMetadata';
+import { rotationQuaternion } from './SimulationTransforms';
+
+export function batchRemovalMotions(motions: DeepReadonly<RemovalMotion[]>): {
+  motion: DeepReadonly<RemovalMotion>;
+  endIndex: number;
+}[] {
+  const result: { motion: DeepReadonly<RemovalMotion>; endIndex: number }[] = [];
+  const equal = (a: readonly number[], b: readonly number[]): boolean =>
+    a.length === b.length &&
+    a.every((value, i) => Number.isFinite(value) && Math.abs(value - b[i]) <= 1e-12);
+  const compatible = (a: DeepReadonly<RemovalMotion>, b: DeepReadonly<RemovalMotion>): boolean => {
+    if (
+      a.mode !== b.mode ||
+      a.executedQ !== b.executedQ ||
+      JSON.stringify(a.tool) !== JSON.stringify(b.tool)
+    )
+      return false;
+    const poses = [a.start, a.end, b.start, b.end];
+    if (
+      !poses.every(
+        (pose) =>
+          pose.position.length === 3 &&
+          pose.orientation.length === 4 &&
+          Math.abs(Math.hypot(...pose.orientation) - 1) <= 1e-6 &&
+          pose.frameId === a.start.frameId &&
+          pose.reference === a.start.reference &&
+          equal(pose.orientation, a.start.orientation) &&
+          pose.position.every(Number.isFinite),
+      ) ||
+      !equal(a.end.position, b.start.position)
+    )
+      return false;
+    const first = new THREE.Vector3(...a.end.position).sub(new THREE.Vector3(...a.start.position));
+    const second = new THREE.Vector3(...b.end.position).sub(new THREE.Vector3(...b.start.position));
+    if (
+      first.lengthSq() === 0 ||
+      second.lengthSq() === 0 ||
+      first.dot(second) <= 0 ||
+      first.clone().cross(second).length() > first.length() * second.length() * 1e-12
+    )
+      return false;
+    if (a.mode === 'turning') return true;
+    const part = a.tool.cutting?.length === 1 ? a.tool.cutting[0] : undefined;
+    if (!part || part.type === 'insert') return false;
+    const orientation = new THREE.Quaternion(...a.start.orientation).multiply(
+      rotationQuaternion(part.rotation ?? [0, 0, 0]),
+    );
+    const direction = first.clone().normalize().applyQuaternion(orientation.invert());
+    return (
+      Math.hypot(direction.x, direction.y) < 1e-12 ||
+      (part.type === 'endMill' && !part.cornerRadius && Math.abs(direction.z) < 1e-12)
+    );
+  };
+  motions.forEach((motion, index) => {
+    const previous = result[result.length - 1];
+    if (previous && compatible(previous.motion, motion))
+      result[result.length - 1] = {
+        motion: { ...previous.motion, end: motion.end },
+        endIndex: index,
+      };
+    else result.push({ motion, endIndex: index });
+  });
+  return result;
+}
 
 export class MaterialRemovalEngine {
   readonly stock: StockModel;
@@ -49,10 +113,6 @@ export class MaterialRemovalEngine {
     return this.workpieceToStock
       .clone()
       .multiply(new THREE.Matrix4().compose(position, orientation, new THREE.Vector3(1, 1, 1)));
-  }
-
-  private turningEnvelope(cutter: CuttingToolModel, matrix: THREE.Matrix4) {
-    return buildTurningEnvelope(cutter, matrix, this.spindleOrigin, this.spindleAxis);
   }
 
   applyMotion(motion: DeepReadonly<RemovalMotion>): void {
@@ -94,8 +154,6 @@ export class MaterialRemovalEngine {
     if (motion.mode === 'turning') {
       if (angle > 1e-6)
         throw new Error('Changing insert orientation during turning is not supported');
-      this.turningEnvelope(cutter, this.poseMatrix(start, qStart));
-      this.turningEnvelope(cutter, this.poseMatrix(end, qEnd));
     } else if (cutter.part.type === 'insert') {
       throw new Error('Insert milling is not supported');
     }
@@ -156,10 +214,11 @@ export function simulateMaterialRemoval(
   const started = performance.now();
   const engine = new MaterialRemovalEngine(input);
   progress(0, input.motions.length);
-  input.motions.forEach((motion, index) => {
-    engine.applyMotion(motion);
-    progress(index + 1, input.motions.length);
-  });
+  let processed = 0;
+  for (const batch of batchRemovalMotions(input.motions)) {
+    engine.applyMotion(batch.motion);
+    while (processed <= batch.endIndex) progress(++processed, input.motions.length);
+  }
   const builder = new StockMeshBuilder();
   builder.buildChanged(engine.stock);
   const chunks = builder.getChunks();

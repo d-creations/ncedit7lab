@@ -397,7 +397,12 @@ end mills, ball mills and drill points with their declared part transforms. The
 tool display shares the same milling radius profiles. Holders never subtract stock.
 Fixed-orientation axial cutter travel and flat-end-mill lateral travel use analytical
 swept volumes. Conventional straight turning uses a convex insert-section sweep
-revolved about the bound spindle axis. Other milling path pairs are subdivided using
+revolved about the bound spindle axis. Consecutive collinear pairs are batched only
+when poses are contiguous, orientation/reference/frame, full tool definition and
+executed Q agree, and the sweep is analytical (turning, axial milling, or lateral
+flat-end-mill travel). Reversals, rotary changes and sampled diagonal milling remain
+separate. Original execution-occurrence/progress counts and stopped-prefix metadata
+are preserved. Other milling path pairs are subdivided using
 translation plus cutter-radius angular displacement, bounded to one third of the
 boundary spacing per sample. Backend rotary
 poses must already resolve angular travel; captured undersampled half/full turns
@@ -424,15 +429,46 @@ and removes fully covered regions in bulk. Untouched stock-boundary regions reta
 the analytical initial primitive at chunk scale; only affected regions allocate
 fine corner fields and stored intersections. Negative-inside, 1-Lipschitz fields
 provide conservative centre/radius region classification for all supported shapes.
+Convex turning envelopes precompute normalized supporting planes rather than
+repeatedly calculating segment distances and polygon containment at every sample.
+The resulting field is sign-correct and 1-Lipschitz, though not an exact Euclidean
+distance outside polygon corners. Only the necessary radial/reflected branch is
+evaluated for sections entirely on one side of the axis. Non-convex unswept sections
+retain their polygon-distance evaluation; translational turning sweeps still require
+convex sections. Each subtraction caches shared lattice-corner distances for that
+sweep only; this temporary workspace participates in the stock memory budget.
 
-Stock and cutter crossings on cell edges (including tetrahedral diagonals) are
-bracketed and bisected. Subsequent cuts update the CSG difference and retain old
+Stock and cutter crossings on the twelve cube edges use bracketed Illinois
+interpolation, with a bounded bisection tail when interpolation has not converged.
+The positional bracket tolerance is the smaller of spacing / 2^24 and 0.0000001 mm,
+not a claim of physical machining accuracy. Subsequent cuts update the CSG difference and retain old
 crossings when unaffected. Prior cut fields along an edge are piecewise-linear
 around its stored crossing, rather than retaining an unbounded cutter history.
-A consistent six-tetrahedra decomposition reconstructs triangles, not cube faces,
-with matching shared-face triangulations across chunks. Untouched analytical stock
-surfaces are evaluated on the same boundary lattice when meshed. No display-only
-smoothing is used to pretend that the cutting geometry is more accurate.
+Boundary leaves also store outward Hermite normals. Initial box/cylinder and convex
+turning fields provide analytical normals; other supported cutters use central field
+differences. Subtracted cutter normals are reversed, and unaffected old intersection
+normals survive later cuts.
+
+The Hermite mesher constructs directed shared-face contours, resolving checkerboard
+faces with the same bilinear saddle decision on both sides. Separate contour loops
+receive separate patches. Normal changes exceeding about 32 degrees identify feature
+patches; regularized, cell/face-bounded QEF solves place feature vertices. Smooth
+patches triangulate actual edge crossings instead of moving vertices to intersections
+of tangent planes, preserving analytical wall dimensions and reducing triangle counts.
+Shading blends compatible normals but retains separate normals at creases.
+Axis-aligned planar cells with four consistent, parallel edge crossings emit two
+triangles directly, avoiding general contour/QEF work and oversized staging buffers.
+
+Cell QEF fans are accepted only inside the contour's projected visibility kernel.
+Concave contours are triangulated while retaining every shared boundary vertex and
+checking their indexed edge orientation. Patches without a valid single planar chart
+use an oriented interior-cell fan rather than dropping polygons; these remain
+spacing-dependent approximations. Float32 positions are checked for degenerate
+triangles. Canonical edge samples and neighbouring-chunk rebuilds keep seams
+consistent. Untouched analytical stock uses the same fine boundary lattice.
+This is a shared-face Hermite/QEF reconstruction, not a complete implementation of
+Dual Contouring or Cubical Marching Squares, and no universal topology guarantee
+for undersampled features is claimed.
 
 The **Boundary spacing (mm)** setting remains 0.05..5 mm, default 0.5 mm. It controls
 the finest cells and reconstructed surface sampling, not all interior regions.
@@ -450,9 +486,15 @@ Surface crossings on analytical fixtures are sub-voxel accurate, but triangles,
 sampled rotating sweeps, prior-edge interpolation and features with multiple
 crossings within one cell remain resolution-dependent approximations. Features
 smaller than boundary spacing can be missed; 0.05 mm spacing is not a universal
-0.05 mm dimensional accuracy guarantee. This implementation is inspired by the
+0.05 mm dimensional accuracy guarantee. Shallow creases below the feature-normal
+threshold can remain smoothed, and high-curvature coarse patches can be classified
+as features. Hermite samples and canonical-edge workspace increase peak estimated
+stock memory even when surface buffers shrink. This implementation is inspired by the
 public abstract of the [voxel data-structure comparison study](https://doi.org/10.1007/s00170-025-16321-0),
-not a reproduction of its inaccessible full-text algorithms or performance claims.
+the feature-reconstruction principles of [Dual Contouring](https://doi.org/10.1145/566570.566586)
+and [Cubical Marching Squares](https://doi.org/10.1111/j.1467-8659.2005.00879.x),
+not a reproduction of their full algorithms or the comparison study's inaccessible
+performance claims.
 
 Computation runs in a dedicated Web Worker. Progress is throttled; Cancel Removal,
 stale inputs, replacement and disconnect terminate pending workers and reject late
@@ -467,11 +509,48 @@ Adaptive tests cover analytical cylinder/hole surface crossings, pocket floors a
 uncut flat faces, closed oriented surface edges across chunk borders, repeated
 cuts, bulk removal, coarse untouched storage, conservative cutter fields, existing
 mixed turning/milling fixtures, and a 4 x 4 x 5 mm through-hole benchmark at 0.05 mm.
-One local targeted run measured approximately 3.05 s, 8.2 MiB retained estimated
+Hermite regressions additionally cover all eight stock corners at 0.5 mm, sloped
+cut/stock corner intersections (within 0.000002 mm on those fixtures), rank-deficient
+and constrained QEF solves, ambiguous diagonal-hole faces, repeated cached-chunk
+updates, exactly lattice-aligned pocket floors, radial smooth-wall shading, and
+exact Float32 oriented-edge closure for turning -> milling -> turning.
+Batching tests cover occupancy equivalence, reversals, tool/Q/frame/orientation
+changes, unsupported sampled sweeps, malformed intermediate poses, progress and stops.
+
+A local integration run of the Hermite upgrade measured about 1.35 s for the small
+0.05 mm fixture, 9.7 MiB retained estimated stock, 42.6 MiB peak estimated
+stock/workspace and 7.8 MiB surface buffers. A representative STAR-style 20 mm
+diameter x 20 mm fixture at 0.2 mm completed in about 1.78 s: 86 captured straight
+pairs became nine analytical sweeps, about 1.16 million field/normal evaluations,
+43.9 MiB peak estimated stock/workspace and 7.5 MiB surface buffers. Its poses are
+an explicit computational fixture, not a freshly executed/calibrated machine run.
+The tests enforce completion, memory/work limits and closed surfaces, not a
+universal browser speedup.
+
+The final built worker was compared with an isolated worker built from the
+repository's pre-change source, using the same dependencies and hidden browser tab.
+For the small 0.05 mm fixture, the earlier worker took about 5.91 s and the Hermite
+worker 5.37 s. Both removed 52,866 cell-centre samples. Reported cutting checks fell
+from 2,169,260 to 565,097, and surface buffers from 28.8 to 7.8 MiB (about 73% less).
+Peak estimated stock/workspace increased from 22.8 to 42.6 MiB because normals and
+canonical-edge data are retained during reconstruction.
+
+For the same explicit STAR-style 86-pair fixture at 0.2 mm, the pre-change worker
+was terminated after about 20.95 s, with its last progress reporting 15/86 pairs.
+The updated worker completed all 86 pairs as nine analytical sweeps in about
+10.47 s, using 43.9 MiB peak estimated stock/workspace and 7.5 MiB surface buffers.
+A main-thread MessageChannel task responded in about 0.1 ms during computation.
+Cancellation after initial progress returned immediately, with no late result over
+a roughly 295 ms observation window. The page was hidden, so this is not a rendered
+frame-rate measurement. These are bounded fixture observations, not calibration or
+a guarantee for every program; no completion-time ratio is claimed for the
+cancelled baseline.
+
+Before the Hermite upgrade, one local targeted run measured approximately 3.05 s, 8.2 MiB retained estimated
 stock, 22.8 MiB peak estimated stock/workspace and 28.8 MiB surface buffers. These
 are fixture measurements in the test environment, not a live browser performance
 promise or an old-versus-new speedup claim.
-The built module worker was also exercised directly at `http://localhost:8000/`
+Before the Hermite upgrade, the built module worker was also exercised directly at `http://localhost:8000/`
 without replacing an editor program. The same 0.05 mm fixture completed in about
 1.16 s with transferable position/normal buffers, two progress events and 59 main
 thread heartbeats at a requested 20 ms interval. Its analytical hole-wall vertices

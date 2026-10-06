@@ -374,10 +374,15 @@ stock. This is a geometric preview, not spindle verification or safe-machine adv
 Ordinary linear G0/G00 rapid records with fewer than two samples are ignored for
 removal because they cannot cut. Incomplete feed, unknown or unsupported records
 still stop the result; no missing cutting sweep is inferred.
-FANUC mill singleton tool-selection markers with no motion semantics are also
-excluded, but only when their executed source line contains just a numeric T
-selection and optional M6, and the reported tool matches. Source text is used only
-to verify this non-cutting marker, never to infer machining mode or missing poses.
+FANUC-family singleton state markers (including STAR turning profiles) with no
+motion semantics are also excluded, but only when their executed source line
+contains just a numeric T selection and optional M6 with a matching reported tool,
+or only standard M3/M4/M5 spindle and M8/M9 coolant words with optional literal S
+values. Block numbers and ordinary parenthesized comments are ignored for this
+check. Mixed axis/motion commands, unknown M codes, macros and incomplete feed
+records still stop removal. Source text verifies only a non-cutting marker; it
+never infers machining mode, cutting geometry or missing poses. On STAR profiles,
+short T words can select offsets rather than change the captured tool identity.
 Unresolved stock binding and multi-channel order still block removal. At the first
 unknown mode, missing explicit cutting geometry/pose, target-frame switch or
 unsupported operation, prepare only the valid preceding motions and report a
@@ -385,13 +390,16 @@ unsupported operation, prepare only the valid preceding motions and report a
 display conversion are retained as removal-stop markers, not silently skipped.
 Synthetic default preview tools cannot substitute for physical cutting definitions.
 
-The pipeline is WorkpieceFactory -> chunked StockModel -> CuttingToolModel/
+The pipeline is WorkpieceFactory -> adaptive StockModel -> CuttingToolModel/
 MaterialRemovalEngine -> StockMeshBuilder -> run-owned MaterialSimulationSession.
 Stock starts as a box or solid cylinder. Cutting models support flat/corner-radius
 end mills, ball mills and drill points with their declared part transforms. The
 tool display shares the same milling radius profiles. Holders never subtract stock.
-Each sampled path pair is further subdivided using translation plus cutter-radius
-angular displacement, bounded to one third of a voxel per sample. Backend rotary
+Fixed-orientation axial cutter travel and flat-end-mill lateral travel use analytical
+swept volumes. Conventional straight turning uses a convex insert-section sweep
+revolved about the bound spindle axis. Other milling path pairs are subdivided using
+translation plus cutter-radius angular displacement, bounded to one third of the
+boundary spacing per sample. Backend rotary
 poses must already resolve angular travel; captured undersampled half/full turns
 are rejected rather than reconstructed from equal endpoint quaternions.
 
@@ -407,25 +415,70 @@ Only ordinary G0/G1/G2/G3 motion source codes are admitted when supplied.
 One 3D stock is retained across turning -> milling -> turning. Milling pockets
 cannot be refilled by restoring an axisymmetric profile. This first implementation
 displays final stock or the valid stopped prefix, not cursor-dependent historical
-stock. Timed playback, checkpoints, adaptive refinement, part transfer, synchronized
+stock. Timed playback, checkpoints, part transfer, synchronized
 channels and collision checking remain deferred.
 
-Algorithm version 1 uses uniform-resolution occupied voxel chunks, not an octree.
-Default resolution is 0.5 mm; the explicit 0.05..5 mm setting never silently coarsens.
-Limits are 4,000,000 candidate stock cells, 16 MiB occupied-chunk arrays, 200,000
-exposed faces (about 27.5 MiB position/normal buffers), 100,000 pose samples and
-50,000,000 candidate-cell tests. Exceeding a limit reports failure and leaves initial
-stock visible, never a success-shaped partial cut. Cell-centre occupancy and sampled
-sweeps are resolution-dependent approximations, not a 0.05 mm accuracy guarantee.
+Algorithm version 2 replaces the occupied voxel arrays and exposed-cube mesher.
+An octree keeps fully solid/empty regions coarse, rejects disjoint cutter regions,
+and removes fully covered regions in bulk. Untouched stock-boundary regions retain
+the analytical initial primitive at chunk scale; only affected regions allocate
+fine corner fields and stored intersections. Negative-inside, 1-Lipschitz fields
+provide conservative centre/radius region classification for all supported shapes.
+
+Stock and cutter crossings on cell edges (including tetrahedral diagonals) are
+bracketed and bisected. Subsequent cuts update the CSG difference and retain old
+crossings when unaffected. Prior cut fields along an edge are piecewise-linear
+around its stored crossing, rather than retaining an unbounded cutter history.
+A consistent six-tetrahedra decomposition reconstructs triangles, not cube faces,
+with matching shared-face triangulations across chunks. Untouched analytical stock
+surfaces are evaluated on the same boundary lattice when meshed. No display-only
+smoothing is used to pretend that the cutting geometry is more accurate.
+
+The **Boundary spacing (mm)** setting remains 0.05..5 mm, default 0.5 mm. It controls
+the finest cells and reconstructed surface sampling, not all interior regions.
+The initial surface grid has a half-cell exterior halo to close the stock boundary.
+Limits are 4,000,000 allocated tree nodes, 64 MiB conservative estimated stock memory
+(including temporary analytical-surface reconstruction data), 600,000 triangles
+(about 41.2 MiB position/normal buffers), 100,000 sampled/swept volumes and 50,000,000
+region/corner/intersection tests. Node and Map overhead is estimated, not a browser
+heap measurement. The UI reports peak estimated stock memory, surface buffer bytes,
+refined boundary cells, elapsed time and removed cell-centre samples. The sample
+count is not an exact removed volume. Limits remain explicit, with no silent
+coarsening; a failure leaves initial stock visible, never a success-shaped result.
+
+Surface crossings on analytical fixtures are sub-voxel accurate, but triangles,
+sampled rotating sweeps, prior-edge interpolation and features with multiple
+crossings within one cell remain resolution-dependent approximations. Features
+smaller than boundary spacing can be missed; 0.05 mm spacing is not a universal
+0.05 mm dimensional accuracy guarantee. This implementation is inspired by the
+public abstract of the [voxel data-structure comparison study](https://doi.org/10.1007/s00170-025-16321-0),
+not a reproduction of its inaccessible full-text algorithms or performance claims.
 
 Computation runs in a dedicated Web Worker. Progress is throttled; Cancel Removal,
 stale inputs, replacement and disconnect terminate pending workers and reject late
-responses. Meshing caches exposed surfaces per chunk and marks neighbour chunks
-dirty on boundary changes; only the final surface is installed for this no-playback
+responses. Meshing caches intersection surfaces per chunk and marks changed
+boundary chunks dirty; only the final surface is installed for this no-playback
 scope. Meshes share a material and owned resources are released once. The session
 retains detached simulation inputs/version, statistics and derived buffers under
 its plot run ID, outside the immutable source snapshot. Cursor motion performs no
 new removal, parsing or execution. Worker/meshing failure is surfaced explicitly.
+
+Adaptive tests cover analytical cylinder/hole surface crossings, pocket floors and
+uncut flat faces, closed oriented surface edges across chunk borders, repeated
+cuts, bulk removal, coarse untouched storage, conservative cutter fields, existing
+mixed turning/milling fixtures, and a 4 x 4 x 5 mm through-hole benchmark at 0.05 mm.
+One local targeted run measured approximately 3.05 s, 8.2 MiB retained estimated
+stock, 22.8 MiB peak estimated stock/workspace and 28.8 MiB surface buffers. These
+are fixture measurements in the test environment, not a live browser performance
+promise or an old-versus-new speedup claim.
+The built module worker was also exercised directly at `http://localhost:8000/`
+without replacing an editor program. The same 0.05 mm fixture completed in about
+1.16 s with transferable position/normal buffers, two progress events and 59 main
+thread heartbeats at a requested 20 ms interval. Its analytical hole-wall vertices
+were within 0.000002 mm of the reference radius (triangle interiors still have
+finite-spacing chord error). Termination after initial progress returned immediately
+and no result arrived during a 100 ms observation window. This verifies the built
+worker and responsiveness on that fixture, not calibration of a real NC program.
 
 Tests: box/cylinder serialization, fixed-mm validation, centred bounds, rotations, front/top-face helpers, missing/removal behavior, preservation during machine-style conversion, manual edit and undo/redo synchronization, and conflicting multi-channel material. Later execution tests must cover work-offset transforms and turning diameter-mode conversion before material/tool intersections are considered accurate.
 

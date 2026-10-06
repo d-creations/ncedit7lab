@@ -10,6 +10,7 @@ import { WorkpieceFactory } from '../WorkpieceFactory';
 import { getInsertQShift, TURN_Q_VECTORS } from '../TurningReference';
 import { buildInsertContour } from '../../tools/InsertOutline';
 import { SIMULATION_LIMITS, type SimulationInput, type RemovalMotion } from '../SimulationTypes';
+import { boxVolume } from '../ImplicitGeometry';
 
 const mill: ProgramToolDefinition = {
   toolNumber: 'mill',
@@ -57,7 +58,7 @@ function motion(
 }
 function input(): SimulationInput {
   return {
-    algorithmVersion: 1,
+    algorithmVersion: 2,
     stock: { type: 'box', width: 12, height: 8, depth: 6 },
     binding: {
       frameId: 'workpiece:test',
@@ -250,25 +251,32 @@ describe('bounded geometric material subtraction', () => {
   });
 
   it('rejects unbounded grids, excessive sampling and surface allocations explicitly', () => {
-    expect(() => new StockModel([100, 100, 100], 0.05, () => true)).toThrow('cell budget');
+    expect(() => new StockModel([1e8, 1e8, 1e8], 0.05, boxVolume([1e8, 1e8, 1e8]))).toThrow(
+      'cell budget',
+    );
     expect(
-      () => new StockModel([1, 1, 1], 0.25, () => true, { cells: 1000, stockBytes: 1 }),
+      () => new StockModel([1, 1, 1], 0.25, boxVolume([1, 1, 1]), { cells: 1000, stockBytes: 1 }),
     ).toThrow('memory budget');
     const engine = new MaterialRemovalEngine(input());
-    expect(() => engine.applyMotion(motion([0, 0, 0], [100000, 0, 0]))).toThrow('sampling budget');
+    const excessive = motion([0, 0, 0], [100000, 0, 0]);
+    excessive.end.orientation = [0, Math.SQRT1_2, 0, Math.SQRT1_2];
+    expect(() => engine.applyMotion(excessive)).toThrow('sampling budget');
     expect(engine.stock.removedCells).toBe(0);
     expect(() => new StockMeshBuilder(1).buildChanged(engine.stock)).toThrow('face budget');
   });
 
   it('rebuilds dirty surface chunks and their boundary neighbours, not unchanged chunks', () => {
-    const stock = new StockModel([12, 4, 4], 0.5, () => true);
+    const stock = new StockModel([12, 4, 4], 0.5, boxVolume([12, 4, 4]));
     const builder = new StockMeshBuilder();
     const first = builder.buildChanged(stock);
     expect(first).toHaveLength(2);
     expect(builder.buildChanged(stock)).toHaveLength(0);
-    stock.removeWhere(
-      new THREE.Box3(new THREE.Vector3(1.5, -2, -2), new THREE.Vector3(2.5, 2, 2)),
-      () => true,
+    const volume = boxVolume([1, 6, 6]);
+    stock.subtract(
+      {
+        bounds: volume.bounds.clone().translate(new THREE.Vector3(2, 0, 0)),
+        distance: (point) => volume.distance(point.clone().sub(new THREE.Vector3(2, 0, 0))),
+      },
       () => {},
     );
     expect(builder.buildChanged(stock)).toHaveLength(2);

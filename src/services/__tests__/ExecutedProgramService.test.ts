@@ -142,7 +142,7 @@ describe('ExecutedProgramService', () => {
       { program: 'T1 G1 X1', toolNumber: 1, traversal: undefined, machineName: 'FANUC_MILL_DEMO' },
       { program: 'T1', toolNumber: 2, traversal: undefined, machineName: 'FANUC_MILL_DEMO' },
       { program: 'T1', toolNumber: 1, traversal: 'FEED', machineName: 'FANUC_MILL_DEMO' },
-      { program: 'T1', toolNumber: 1, traversal: undefined, machineName: 'FANUC_TURN' },
+      { program: 'T1', toolNumber: 1, traversal: undefined, machineName: 'SIEMENS_840DI' },
       { program: 'M6', toolNumber: 1, traversal: undefined, machineName: 'FANUC_MILL_DEMO' },
     ])('retains an unverified singleton as a removal stop (%j)', async (fixture) => {
       vi.mocked(mockBackend.requestPlot).mockResolvedValue({
@@ -155,6 +155,45 @@ describe('ExecutedProgramService', () => {
       const result = await service.executeProgram({ ...request, ...fixture });
       expect(result.plotMetadata!.removalStops).toHaveLength(1);
     });
+
+    it.each(['FANUC_STAR_SR20R_IV_B', 'FANUC_STAR_SV20R', 'FANUC_STAR_SG42', 'FANUC_TURN'])(
+      'ignores verified tool, spindle and coolant markers without losing turning feeds (%s)',
+      async (machineName) => {
+        const lines = ['T100', 'M3 S2000', 'N20 M03 s2000 (spindle)', 'S2000M4',
+          'M5', 'M8', 'M09', 'T3200', 'G1 X9'];
+        vi.mocked(mockBackend.requestPlot).mockResolvedValue({
+          canal: { '1': { segments: lines.map((_, index) => index === lines.length - 1
+            ? move({ machiningMode: 'turning', toolNumber: 100, executionStep: 9, lineNumber: 9 })
+            : move({ geometry: undefined, traversal: undefined, sourceCode: undefined,
+              toolNumber: index === 7 ? 3200 : 100, executionStep: index, lineNumber: index + 1,
+              points: [{ x: 0, y: 0, z: 0 }] })) } },
+        });
+        const result = await service.executeProgram({
+          ...request, machineName, program: lines.join('\n'),
+        });
+        expect(result.plotMetadata!.removalStops ?? []).toEqual([]);
+        expect(result.plotMetadata!.segments).toHaveLength(1);
+        expect(result.plotMetadata!.segments[0]).toMatchObject({
+          machiningMode: 'turning', sourceSegmentIndex: 8, executionStep: 9,
+        });
+      },
+    );
+
+    it.each(['M3 G1 X1', 'M3 X1', 'M3 G76', 'M36', 'M300', 'T1 M3', 'S2000', 'M3 S#100'])(
+      'does not skip unverified, mixed or potentially cutting singleton source %s',
+      async (program) => {
+        vi.mocked(mockBackend.requestPlot).mockResolvedValue({
+          canal: { '1': { segments: [
+            move({ geometry: undefined, traversal: undefined, sourceCode: undefined,
+              toolNumber: 1, lineNumber: 1, executionStep: 0, points: [{ x: 0, y: 0, z: 0 }] }),
+          ] } },
+        });
+        const result = await service.executeProgram({
+          ...request, machineName: 'FANUC_STAR_SR20R_IV_B', program,
+        });
+        expect(result.plotMetadata!.removalStops).toHaveLength(1);
+      },
+    );
 
     it('rejects invalid mode values and publishes an execution error rather than guessing', async () => {
       const errors = vi.fn();

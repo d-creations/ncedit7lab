@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+- **Adaptive Material Removal**: Replaced uniform occupied voxel storage with an octree that batches solid/empty region updates and refines affected boundaries, while retaining untouched stock surfaces analytically.
+- **Intersection-Based Stock Surfaces**: Replaced exposed cube faces with shared-lattice tetrahedral surface reconstruction using stock/cutter edge intersections. Added analytical sweeps for supported straight milling and conventional turning motions.
+- **Removal Detail and Diagnostics**: Renamed voxel size to boundary spacing and report refined cells, peak estimated stock memory and surface-buffer usage. Added dimensional, closed-surface, repeat-cut and 0.05 mm resource regression tests; final-stock-only behavior remains unchanged.
+
+### Fixed
+- **STAR Turning Removal Startup**: Verified singleton tool-selection, standard spindle and coolant state records no longer stop removal before the first feed. Unknown records and incomplete cutting motions remain explicit blockers; backend tool/offset and machining-mode rules are unchanged.
+
 ## [1.2.1] - 2026-10-05
 
 ### Added

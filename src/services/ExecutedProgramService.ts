@@ -32,16 +32,20 @@ function parseMachiningMode(value: unknown): MachiningMode {
   throw new Error(`Invalid backend machining mode: ${String(value)}`);
 }
 
-function isToolSelectionMarker(segment: BackendPlotSegment, sourceLine: string | undefined): boolean {
+function isNonCuttingStateMarker(segment: BackendPlotSegment, sourceLine: string | undefined): boolean {
   if (
     segment.points?.length !== 1 ||
     segment.geometry != null || segment.traversal != null || segment.sourceCode != null ||
     !sourceLine
   ) return false;
   // Verify the executed source: missing motion metadata alone must never authorize skipping.
-  const selection = /^\s*(?:N\d+\s*)?T(\d+)\s*(?:M0?6\s*)?$/i.exec(sourceLine);
-  return selection !== null &&
-    (segment.toolNumber === Number(selection[1]) || segment.toolNumber === selection[1]);
+  const code = sourceLine.replace(/\([^()]*\)/g, ' ').replace(/^\s*N\d+\s*/i, '').trim();
+  const selection = /^T(\d+)\s*(?:M0?6\s*)?$/i.exec(code);
+  if (selection) {
+    return segment.toolNumber === Number(selection[1]) || segment.toolNumber === selection[1];
+  }
+  return /M0?[34589]/i.test(code) &&
+    /^(?:(?:M0?[34589]|S[+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*)+$/i.test(code);
 }
 
 export interface ExecutionRequest {
@@ -318,7 +322,7 @@ export class ExecutedProgramService {
     targetChannelId?: string,
     request?: ExecutionRequest,
   ): ExecutedProgramResult {
-    const sourceLines = request?.machineName.startsWith('FANUC_MILL')
+    const sourceLines = request?.machineName.startsWith('FANUC_')
       ? this.preprocessProgram(request.program).split('\n')
       : undefined;
     const result: ExecutedProgramResult = {
@@ -420,7 +424,7 @@ export class ExecutedProgramService {
           canal.segments.forEach((segment, sourceSegmentIndex) => {
             const machiningMode = parseMachiningMode(segment.machiningMode);
             if (
-              isToolSelectionMarker(segment, sourceLines?.[(segment.lineNumber ?? 0) - 1])
+              isNonCuttingStateMarker(segment, sourceLines?.[(segment.lineNumber ?? 0) - 1])
             ) return;
             if (segment.points && segment.points.length >= 2) {
               let segmentType: 'rapid' | 'feed' | 'arc' | undefined;

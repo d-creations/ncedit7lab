@@ -5,6 +5,7 @@ import { buildInsertContour } from '../tools/InsertOutline';
 import { getInsertQShift, TURN_Q_VECTORS } from './TurningReference';
 import { rotationQuaternion } from './SimulationTransforms';
 import { SimulationCapabilityError } from './SimulationTypes';
+import type { ImplicitVolume } from './ImplicitGeometry';
 
 export function pointInPolygon(x: number, y: number, polygon: readonly THREE.Vector2[]): boolean {
   let inside = false;
@@ -129,5 +130,90 @@ export class CuttingToolModel {
     if (z < 0 || z > part.length) return false;
     const cuttingRadius = cuttingRadiusAt(part, z);
     return this.point.x ** 2 + this.point.y ** 2 <= cuttingRadius ** 2;
+  }
+
+  private distancePart(point: THREE.Vector3, length?: number): number {
+    const part = this.part;
+    if (part.type === 'insert') throw new Error('An insert requires the turning envelope');
+    const radius = part.diameter / 2;
+    const top = length ?? part.length;
+    const radial = Math.hypot(point.x, point.y);
+    const z = point.z;
+    if (part.type === 'drill') {
+      const halfAngle = THREE.MathUtils.degToRad(part.tipAngle / 2);
+      return Math.max(
+        radial * Math.cos(halfAngle) - z * Math.sin(halfAngle),
+        radial - radius,
+        -z,
+        z - top,
+      );
+    }
+    const corner = part.type === 'ballMill' ? radius : (part.cornerRadius ?? 0);
+    if (corner > 0) {
+      const rounded = Math.max(
+        Math.hypot(Math.max(radial - (radius - corner), 0), z - corner) - corner,
+        z - corner,
+      );
+      const upper = Math.max(radial - radius, corner - z);
+      return Math.max(Math.min(rounded, upper), z - top);
+    }
+    return Math.max(radial - radius, -z, z - top);
+  }
+
+  volume(matrix: THREE.Matrix4): ImplicitVolume {
+    const inverse = matrix.clone().multiply(this.partToAssembly).invert();
+    const point = new THREE.Vector3();
+    return {
+      bounds: this.bounds.clone().applyMatrix4(matrix),
+      distance: (value) => this.distancePart(point.copy(value).applyMatrix4(inverse)),
+    };
+  }
+
+  /** Exact union for fixed-orientation axial travel and flat-mill lateral travel. */
+  translationSweep(start: THREE.Matrix4, end: THREE.Matrix4): ImplicitVolume | undefined {
+    if (this.part.type === 'insert') return undefined;
+    const inverse = start.clone().multiply(this.partToAssembly).invert();
+    const endOrigin = new THREE.Vector3()
+      .setFromMatrixPosition(end.clone().multiply(this.partToAssembly))
+      .applyMatrix4(inverse);
+    const point = new THREE.Vector3();
+    const bounds = this.bounds
+      .clone()
+      .applyMatrix4(start)
+      .union(this.bounds.clone().applyMatrix4(end));
+    if (Math.hypot(endOrigin.x, endOrigin.y) < 1e-9) {
+      const lower = Math.min(0, endOrigin.z),
+        upper = Math.max(0, endOrigin.z);
+      const length = this.part.length;
+      return {
+        bounds,
+        distance: (value) => {
+          point.copy(value).applyMatrix4(inverse);
+          point.z -= lower;
+          return this.distancePart(point, length + upper - lower);
+        },
+      };
+    }
+    if (this.part.type !== 'endMill' || this.part.cornerRadius || Math.abs(endOrigin.z) > 1e-9)
+      return undefined;
+    const length = this.part.length,
+      radius = this.part.diameter / 2;
+    const squared = endOrigin.x ** 2 + endOrigin.y ** 2;
+    return {
+      bounds,
+      distance: (value) => {
+        point.copy(value).applyMatrix4(inverse);
+        const t = THREE.MathUtils.clamp(
+          (point.x * endOrigin.x + point.y * endOrigin.y) / squared,
+          0,
+          1,
+        );
+        return Math.max(
+          Math.hypot(point.x - t * endOrigin.x, point.y - t * endOrigin.y) - radius,
+          -point.z,
+          point.z - length,
+        );
+      },
+    };
   }
 }

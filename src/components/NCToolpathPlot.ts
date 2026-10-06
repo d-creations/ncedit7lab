@@ -308,7 +308,7 @@ export class NCToolpathPlot extends HTMLElement {
         const stopped = result.stop
           ? `Stopped before step ${result.stop.executionStep ?? '?'}${result.stop.lineNumber === undefined ? '' : `, line ${result.stop.lineNumber}`}: ${result.stop.message}.`
           : 'Completed.';
-        status.textContent = `Geometric removal: ${stopped} ${result.processedMotions} motions; ${result.resolutionMm} mm voxels; ${result.removedCells} cells removed; ${(result.allocatedStockBytes / 1048576).toFixed(1)} MiB stock, ${(result.surfaceBytes / 1048576).toFixed(1)} MiB surface; ${result.elapsedMs.toFixed(0)} ms. Feed cutting is assumed; spindle operation is not verified.`;
+        status.textContent = `Geometric removal: ${stopped} ${result.processedMotions} motions; ${result.resolutionMm} mm boundary spacing; ${result.boundaryCells} refined boundary cells; ${result.removedCells} cell-centre samples removed; ${(result.peakStockBytes / 1048576).toFixed(1)} MiB peak estimated stock, ${(result.surfaceBytes / 1048576).toFixed(1)} MiB surface; ${result.elapsedMs.toFixed(0)} ms. Feed cutting is assumed; spindle operation is not verified.`;
       }
     } catch (error) {
       if (generation !== this.removalGeneration) return;
@@ -629,7 +629,7 @@ export class NCToolpathPlot extends HTMLElement {
               `).join('')}</div>
             `).join('')}
             <label>Turning spindle axis <select id="removal-spindle-axis"><option value="z">+Z</option><option value="x">+X</option><option value="y">+Y</option></select></label>
-            <label>Voxel size (mm) <input id="removal-resolution" type="number" min="0.05" max="5" step="0.05" value="0.5" style="width:65px"></label>
+            <label>Boundary spacing (mm) <input id="removal-resolution" type="number" min="0.05" max="5" step="0.05" value="0.5" style="width:65px"></label>
             <button class="plot-button" id="run-removal">Bind stock and run removal</button>
           </details>
           <div class="axis-controls">

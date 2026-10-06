@@ -6,7 +6,7 @@ import type { SimulationInput, SimulationWorkerMessage } from '../SimulationType
 
 function input(): SimulationInput {
   return {
-    algorithmVersion: 1,
+    algorithmVersion: 2,
     stock: { type: 'box', width: 2, height: 2, depth: 2 },
     resolutionMm: 0.5,
     motions: [],

@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { CuttingToolModel } from './CuttingToolModel';
-import { buildTurningEnvelope } from './TurningEnvelope';
+import { buildTurningEnvelope, buildTurningSweep } from './TurningEnvelope';
 import { WorkpieceFactory } from './WorkpieceFactory';
 import { StockMeshBuilder } from './StockMeshBuilder';
 import {
@@ -23,7 +23,7 @@ export class MaterialRemovalEngine {
   samples = 0;
 
   constructor(private readonly input: DeepReadonly<SimulationInput>) {
-    if (input.algorithmVersion !== 1)
+    if (input.algorithmVersion !== 2)
       throw new Error('Unsupported material removal algorithm version');
     const workpiece = new WorkpieceFactory().create(input);
     this.stock = workpiece.stock;
@@ -105,6 +105,33 @@ export class MaterialRemovalEngine {
         (start.distanceTo(end) + angle * cutter.sweepRadius) / (this.stock.resolutionMm / 3),
       ),
     );
+    if (motion.mode === 'turning') {
+      if (this.samples + 1 > SIMULATION_LIMITS.samples)
+        throw new Error('Removal sampling budget exceeded');
+      const sweep = buildTurningSweep(
+        cutter,
+        this.poseMatrix(start, qStart),
+        this.poseMatrix(end, qEnd),
+        this.spindleOrigin,
+        this.spindleAxis,
+      );
+      this.samples++;
+      this.stock.subtract(sweep, this.testCell);
+      return;
+    }
+    if (motion.mode === 'milling' && angle < 1e-9) {
+      const sweep = cutter.translationSweep(
+        this.poseMatrix(start, qStart),
+        this.poseMatrix(end, qEnd),
+      );
+      if (sweep) {
+        if (this.samples + 1 > SIMULATION_LIMITS.samples)
+          throw new Error('Removal sampling budget exceeded');
+        this.samples++;
+        this.stock.subtract(sweep, this.testCell);
+        return;
+      }
+    }
     if (this.samples + divisions + 1 > SIMULATION_LIMITS.samples) {
       throw new Error(
         'Removal sampling budget exceeded; use a coarser resolution or a smaller program',
@@ -112,24 +139,12 @@ export class MaterialRemovalEngine {
     }
     const position = new THREE.Vector3();
     const orientation = new THREE.Quaternion();
-    const local = new THREE.Vector3();
     for (let step = 0; step <= divisions; step++) {
       this.samples++;
       position.copy(start).lerp(end, step / divisions);
       orientation.copy(qStart).slerp(qEnd, step / divisions);
       const matrix = this.poseMatrix(position, orientation);
-      if (motion.mode === 'turning') {
-        const envelope = this.turningEnvelope(cutter, matrix);
-        this.stock.removeWhere(envelope.bounds, envelope.inside, this.testCell);
-      } else {
-        const inverse = matrix.clone().invert();
-        const bounds = cutter.bounds.clone().applyMatrix4(matrix);
-        this.stock.removeWhere(
-          bounds,
-          (point) => cutter!.containsAssembly(local.copy(point).applyMatrix4(inverse)),
-          this.testCell,
-        );
-      }
+      this.stock.subtract(cutter.volume(matrix), this.testCell);
     }
   }
 }
@@ -149,7 +164,7 @@ export function simulateMaterialRemoval(
   builder.buildChanged(engine.stock);
   const chunks = builder.getChunks();
   return {
-    algorithmVersion: 1,
+    algorithmVersion: 2,
     status: input.stop ? 'stopped' : 'completed',
     stop: input.stop,
     chunks,
@@ -159,6 +174,7 @@ export function simulateMaterialRemoval(
     removedCells: engine.stock.removedCells,
     remainingCells: engine.stock.remainingCells,
     allocatedStockBytes: engine.stock.allocatedBytes,
+    peakStockBytes: engine.stock.peakAllocatedBytes,
     surfaceBytes: chunks.reduce(
       (bytes, chunk) => bytes + chunk.positions.byteLength + chunk.normals.byteLength,
       0,
@@ -166,5 +182,9 @@ export function simulateMaterialRemoval(
     cellTests: engine.cellTests,
     samples: engine.samples,
     elapsedMs: performance.now() - started,
+    boundaryCells: engine.stock.boundaryCells,
+    allocatedNodes: engine.stock.allocatedNodes,
+    regionTests: engine.stock.regionTests,
+    bulkRemovedRegions: engine.stock.bulkRemovedRegions,
   };
 }

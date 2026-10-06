@@ -32,7 +32,7 @@ export interface RemovalStop {
 }
 
 export interface SimulationInput {
-  algorithmVersion: 1;
+  algorithmVersion: 2;
   stock: DeepReadonly<ProgramMaterialDefinition>;
   binding: DeepReadonly<StockBinding>;
   resolutionMm: number;
@@ -42,8 +42,8 @@ export interface SimulationInput {
 
 export const SIMULATION_LIMITS = Object.freeze({
   cells: 4_000_000,
-  stockBytes: 16 * 1024 * 1024,
-  surfaceFaces: 200_000,
+  stockBytes: 64 * 1024 * 1024,
+  surfaceFaces: 300_000,
   samples: 100_000,
   cellTests: 50_000_000,
   chunkSize: 16,
@@ -63,7 +63,7 @@ export interface StockSurfaceChunk {
 }
 
 export interface SimulationResult {
-  algorithmVersion: 1;
+  algorithmVersion: 2;
   status: 'completed' | 'stopped';
   stop?: RemovalStop;
   chunks: StockSurfaceChunk[];
@@ -73,10 +73,15 @@ export interface SimulationResult {
   removedCells: number;
   remainingCells: number;
   allocatedStockBytes: number;
+  peakStockBytes: number;
   surfaceBytes: number;
   cellTests: number;
   samples: number;
   elapsedMs: number;
+  boundaryCells: number;
+  allocatedNodes: number;
+  regionTests: number;
+  bulkRemovedRegions: number;
 }
 
 export type SimulationWorkerMessage =

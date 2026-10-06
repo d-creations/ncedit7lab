@@ -127,7 +127,7 @@ export function prepareMaterialRemoval(
   }
 
   const simulation: SimulationInput = {
-    algorithmVersion: 1,
+    algorithmVersion: 2,
     stock: structuredClone(stock),
     binding: structuredClone(configured.binding),
     resolutionMm: configured.resolutionMm,

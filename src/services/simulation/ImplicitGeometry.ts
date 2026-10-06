@@ -1,5 +1,16 @@
 import * as THREE from 'three';
 
+export interface IntervalCoverage {
+  key: string;
+  axis: THREE.Vector3;
+  lower: number;
+  upper: number;
+  /** False permits whole-interval containment only, not regional dominance. */
+  partial?: boolean;
+  /** The field is monotone in distance to this projected interval. */
+  projected?: boolean;
+}
+
 /** Negative inside; fields must be 1-Lipschitz for conservative region classification. */
 export interface ImplicitVolume {
   bounds: THREE.Box3;
@@ -7,7 +18,9 @@ export interface ImplicitVolume {
   extrusion?: readonly { axis: number; minimum: number; maximum: number }[];
   planarExtrusionAxis?(bounds: THREE.Box3): number | undefined;
   /** Exact max(radial field, lower - axial, axial - upper) sweep certificate. */
-  axialCoverage?: { key: string; axis: THREE.Vector3; lower: number; upper: number };
+  axialCoverage?: IntervalCoverage;
+  /** Same collinear ball-cutter family; lateral fields also admit regional dominance. */
+  sweepCoverage?: IntervalCoverage;
   /** Equality of this key certifies equality of the complete distance field. */
   identity?: string;
   distance(point: THREE.Vector3): number;

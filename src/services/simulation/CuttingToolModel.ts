@@ -6,6 +6,7 @@ import { getInsertQShift, TURN_Q_VECTORS } from './TurningReference';
 import { rotationQuaternion } from './SimulationTransforms';
 import { SimulationCapabilityError } from './SimulationTypes';
 import type { ImplicitVolume } from './ImplicitGeometry';
+import { BallMillSweep } from './BallMillSweep';
 
 export function pointInPolygon(x: number, y: number, polygon: readonly THREE.Vector2[]): boolean {
   let inside = false;
@@ -53,12 +54,15 @@ export class CuttingToolModel {
   readonly sweepRadius: number;
   readonly insertSection?: THREE.Vector3[];
   private readonly point = new THREE.Vector3();
+  private readonly ballField?: BallMillSweep;
 
   constructor(tool: DeepReadonly<ProgramToolDefinition>, executedQ?: number) {
     validateProgramTool(tool);
     if (tool.cutting?.length !== 1)
       throw new SimulationCapabilityError('Removal currently requires exactly one cutting part');
     this.part = tool.cutting[0];
+    if (this.part.type === 'ballMill')
+      this.ballField = new BallMillSweep(this.part.diameter / 2, this.part.length);
     const effective = { ...tool, Q: executedQ ?? tool.Q };
     if (
       this.part.type === 'insert' &&
@@ -139,6 +143,8 @@ export class CuttingToolModel {
     const top = length ?? part.length;
     const radial = Math.hypot(point.x, point.y);
     const z = point.z;
+    if (part.type === 'ballMill')
+      return Math.max(Math.hypot(radial, Math.min(z - radius, 0)) - radius, z - top);
     if (part.type === 'drill') {
       const halfAngle = THREE.MathUtils.degToRad(part.tipAngle / 2);
       return Math.max(
@@ -148,7 +154,7 @@ export class CuttingToolModel {
         z - top,
       );
     }
-    const corner = part.type === 'ballMill' ? radius : (part.cornerRadius ?? 0);
+    const corner = part.cornerRadius ?? 0;
     if (corner > 0) {
       const rounded = Math.max(
         Math.hypot(Math.max(radial - (radius - corner), 0), z - corner) - corner,
@@ -161,16 +167,24 @@ export class CuttingToolModel {
   }
 
   volume(matrix: THREE.Matrix4): ImplicitVolume {
-    const inverse = matrix.clone().multiply(this.partToAssembly).invert();
+    const partMatrix = matrix.clone().multiply(this.partToAssembly);
+    const inverse = partMatrix.clone().invert();
     const point = new THREE.Vector3();
+    const field = this.ballField;
     return {
       bounds: this.bounds.clone().applyMatrix4(matrix),
       identity: JSON.stringify(['pose', this.part, inverse.elements]),
       distance: (value) => this.distancePart(point.copy(value).applyMatrix4(inverse)),
+      normal: field
+        ? (value, target) => {
+            field.evaluate(point.copy(value).applyMatrix4(inverse), target);
+            return target.transformDirection(partMatrix);
+          }
+        : undefined,
     };
   }
 
-  /** Exact union for fixed-orientation axial travel and flat-mill lateral travel. */
+  /** Continuous fixed-orientation sweeps for balls, axial travel and flat-mill lateral travel. */
   translationSweep(start: THREE.Matrix4, end: THREE.Matrix4): ImplicitVolume | undefined {
     if (this.part.type === 'insert') return undefined;
     const inverse = start.clone().multiply(this.partToAssembly).invert();
@@ -182,6 +196,48 @@ export class CuttingToolModel {
       .clone()
       .applyMatrix4(start)
       .union(this.bounds.clone().applyMatrix4(end));
+    if (this.part.type === 'ballMill') {
+      const field = new BallMillSweep(this.part.diameter / 2, this.part.length, endOrigin);
+      const partMatrix = start.clone().multiply(this.partToAssembly);
+      let sweepCoverage: ImplicitVolume['sweepCoverage'];
+      if (endOrigin.lengthSq() > 0) {
+        const direction = endOrigin.clone().normalize();
+        const largest = direction.toArray().map(Math.abs);
+        if (direction.getComponent(largest.indexOf(Math.max(...largest))) < 0) direction.negate();
+        const axis = direction.clone().transformDirection(partMatrix);
+        const origin = new THREE.Vector3().setFromMatrixPosition(partMatrix);
+        const finish = new THREE.Vector3().setFromMatrixPosition(
+          end.clone().multiply(this.partToAssembly),
+        );
+        const lower = origin.dot(axis),
+          upper = finish.dot(axis);
+        const lineMoment = origin.clone().cross(axis);
+        sweepCoverage = {
+          key: JSON.stringify([
+            'ballLinear',
+            this.part,
+            inverse.elements.slice(0, 12),
+            direction.toArray(),
+            lineMoment.toArray(),
+          ]),
+          axis,
+          lower: Math.min(lower, upper),
+          upper: Math.max(lower, upper),
+          partial: endOrigin.z === 0,
+          projected: endOrigin.z === 0,
+        };
+      }
+      return {
+        bounds,
+        identity: JSON.stringify(['ballLinear', this.part, inverse.elements, endOrigin.toArray()]),
+        sweepCoverage,
+        distance: (value) => field.evaluate(point.copy(value).applyMatrix4(inverse)),
+        normal: (value, target) => {
+          field.evaluate(point.copy(value).applyMatrix4(inverse), target);
+          return target.transformDirection(partMatrix);
+        },
+      };
+    }
     if (Math.hypot(endOrigin.x, endOrigin.y) < 1e-9) {
       const lower = Math.min(0, endOrigin.z),
         upper = Math.max(0, endOrigin.z);

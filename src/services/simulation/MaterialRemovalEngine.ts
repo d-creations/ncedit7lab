@@ -55,6 +55,7 @@ export function batchRemovalMotions(motions: DeepReadonly<RemovalMotion[]>): {
     if (a.mode === 'turning') return true;
     const part = a.tool.cutting?.length === 1 ? a.tool.cutting[0] : undefined;
     if (!part || part.type === 'insert') return false;
+    if (part.type === 'ballMill') return true;
     const orientation = new THREE.Quaternion(...a.start.orientation).multiply(
       rotationQuaternion(part.rotation ?? [0, 0, 0]),
     );
@@ -136,11 +137,7 @@ export class MaterialRemovalEngine {
     ) {
       throw new Error('Cutting pose is not in the explicitly bound stock frame');
     }
-    const key = JSON.stringify([
-      typeof motion.tool.toolNumber,
-      motion.tool.toolNumber,
-      motion.executedQ,
-    ]);
+    const key = JSON.stringify([motion.tool, motion.executedQ]);
     let cutter = this.cutters.get(key);
     if (!cutter) {
       cutter = new CuttingToolModel(motion.tool, motion.executedQ);
@@ -148,9 +145,15 @@ export class MaterialRemovalEngine {
     }
     const start = new THREE.Vector3(...motion.start.position);
     const end = new THREE.Vector3(...motion.end.position);
-    const qStart = new THREE.Quaternion(...motion.start.orientation);
-    const qEnd = new THREE.Quaternion(...motion.end.orientation);
-    const angle = qStart.angleTo(qEnd);
+    const qStart = new THREE.Quaternion(...motion.start.orientation).normalize();
+    const qEnd = new THREE.Quaternion(...motion.end.orientation).normalize();
+    if (qStart.dot(qEnd) < 0) qEnd.set(-qEnd.x, -qEnd.y, -qEnd.z, -qEnd.w);
+    const angle =
+      4 *
+      Math.atan2(
+        Math.hypot(qStart.x - qEnd.x, qStart.y - qEnd.y, qStart.z - qEnd.z, qStart.w - qEnd.w),
+        Math.hypot(qStart.x + qEnd.x, qStart.y + qEnd.y, qStart.z + qEnd.z, qStart.w + qEnd.w),
+      );
     if (motion.mode === 'turning') {
       if (angle > 1e-6)
         throw new Error('Changing insert orientation during turning is not supported');

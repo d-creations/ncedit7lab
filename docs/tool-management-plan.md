@@ -395,18 +395,36 @@ MaterialRemovalEngine -> StockMeshBuilder -> run-owned MaterialSimulationSession
 Stock starts as a box or solid cylinder. Cutting models support flat/corner-radius
 end mills, ball mills and drill points with their declared part transforms. The
 tool display shares the same milling radius profiles. Holders never subtract stock.
-Fixed-orientation axial cutter travel and flat-end-mill lateral travel use analytical
-swept volumes. Conventional straight turning uses a convex insert-section sweep
+Fixed-orientation ball-mill translations (axial, lateral and diagonal), other axial
+cutter travel and flat-end-mill lateral travel use analytical swept volumes.
+Conventional straight turning uses a convex insert-section sweep
 revolved about the bound spindle axis. Consecutive collinear pairs are batched only
 when poses are contiguous, orientation/reference/frame, full tool definition and
-executed Q agree, and the sweep is analytical (turning, axial milling, or lateral
-flat-end-mill travel). Reversals, rotary changes and sampled diagonal milling remain
+executed Q agree, and the sweep is analytical (turning, any fixed-orientation
+ball-mill translation, other axial milling, or lateral flat-end-mill travel).
+Reversals, rotary changes and other sampled diagonal milling remain
 separate. Original execution-occurrence/progress counts and stopped-prefix metadata
 are preserved. Other milling path pairs are subdivided using
 translation plus cutter-radius angular displacement, bounded to one third of the
 boundary spacing per sample. Backend rotary
 poses must already resolve angular travel; captured undersampled half/full turns
 are rejected rather than reconstructed from equal endpoint quaternions.
+
+Ball mills use the convex local field
+`max(hypot(x, y, min(z - radius, 0)) - radius, z - cuttingLength)`.
+It includes the lower rounded tip, cylindrical body and finite top, with no
+artificial internal zero plane at the equator. A translated sweep minimizes this
+field over the complete movement segment. Endpoints, rounded-field stationary
+points, the equator and quadratic intersections with the top plane form a bounded
+candidate set, so neither lateral nor diagonal travel needs intermediate stamps.
+This is a sign-correct 1-Lipschitz field, not a claim of exact Euclidean distance.
+Analytical normals include the blended finite-rim envelope on diagonal sweeps;
+working candidate storage and transforms are reused. A capsule of the spherical
+tip alone would omit the cylindrical body or overcut a short cutting length.
+Validated near-unit pose quaternions are normalized and their relative angle uses
+a stable difference/sum formula, preventing identical rounded poses from taking
+the rotary fallback. Genuine orientation changes still use bounded sampling.
+Cutter cache keys include the full tool definition and executed Q.
 
 Conventional turning uses the insert's rounded radial/axial cutting section,
 rotationally swept about the explicitly bound spindle axis. Its section must lie
@@ -439,15 +457,34 @@ convex sections. Each subtraction caches shared lattice-corner distances for tha
 sweep only; this temporary workspace participates in the stock memory budget.
 
 Flat-end-mill axial sweeps additionally carry an exact radial-frame/axial-interval
-certificate. Up to 128 completed certificates are retained (1024 estimated bytes
-each, charged to the same memory limit). Matching radial frames and radii allow
+certificate. Ball sweeps additionally carry a complete profile/orientation and
+canonical collinear-line key with a travel interval. Up to 128 completed
+certificates are retained (2304 estimated bytes each, including a key of at most
+1024 characters, charged to the same memory limit). Matching radial frames and radii allow
 skipping a node only where the earlier `max(radial, lower - axial, axial - upper)`
 field is provably no greater than the new field over the node's entire axial
 interval. Partially overlapping travel therefore still visits the newly exposed
 end and any uncertified region; overlapping bounding boxes alone never imply
-coverage. Different radial positions, orientations, cutter profiles, lateral
-sweeps and turning use the ordinary adaptive update. Eviction only loses an
+coverage. Lateral ball fields are monotone in distance to the projected travel
+interval: certified projection ranges and bisector bounds permit covered-region
+skips while retaining newly exposed ends. General diagonal/axial ball sweeps only
+reuse an interval fully contained in a prior matching interval; arbitrary diagonal
+overlap is not certified. Different lines, orientations, cutter profiles, other
+lateral sweeps and turning use the ordinary adaptive update. Eviction only loses an
 optimization. Interrupted sweeps do not enter this history.
+
+Ball-mill regressions compare lateral/diagonal/axial and short-length sweeps with
+independent convex minimization, check the 1-Lipschitz bound and analytical normals,
+and validate exact Float32 closed meshes and geometry with/without overlap reuse.
+A representative .05 mm diagonal fixture replaces 101 posed cutters with one
+continuous sweep and retains 63,866 removed cell-centre samples. A separate
+10,015-pair straight fixture with rounded pose quaternions checks one batched
+sweep, original progress counts and fewer than one million evaluations.
+These are explicit computational fixtures, not a replay of the user's complete
+ball-milling program or a guarantee that every large/rotating program stays within
+the unchanged work and memory limits. Turning's rounded insert-section sweep and
+backend machining-mode rules are unchanged.
+
 Separately, up to 32 exact complete-field identity keys avoid recomputing identical
 posed milling cutters, analytical milling sweeps and turning envelopes. Keys encode
 the actual profile/transformed field, not just tool numbers or AABBs. Keys longer

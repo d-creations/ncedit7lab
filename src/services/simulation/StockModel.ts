@@ -106,7 +106,7 @@ export class StockModel {
     return (
       this.nodeCount * NODE_BYTES +
       this.dataBytes +
-      this.coverage.length * 1024 +
+      this.coverage.length * 2304 +
       this.completedVolumes.length * 2176
     );
   }
@@ -341,7 +341,7 @@ export class StockModel {
       region.min.copy(this.point(node.x, node.y, node.z));
       region.max.copy(this.point(node.x + node.span, node.y + node.span, node.z + node.span));
       if (!region.intersectsBox(volume.bounds)) return;
-      const certificate = volume.axialCoverage;
+      const certificate = volume.axialCoverage ?? volume.sweepCoverage;
       if (certificate) {
         const half = (node.span * this.resolutionMm) / 2;
         const axis = certificate.axis;
@@ -354,6 +354,8 @@ export class StockModel {
           if (previous.key !== certificate.key) return false;
           if (previous.lower <= certificate.lower && previous.upper >= certificate.upper)
             return true;
+          if (certificate.partial === false) return false;
+          if (certificate.projected && low >= previous.lower && high <= previous.upper) return true;
           if (previous.lower <= certificate.lower)
             return high <= (certificate.lower + previous.upper) / 2;
           if (previous.upper >= certificate.upper)
@@ -386,9 +388,10 @@ export class StockModel {
     };
     try {
       update(this.root);
-      if (volume.axialCoverage) {
+      const certificate = volume.axialCoverage ?? volume.sweepCoverage;
+      if (certificate && certificate.key.length <= 1024) {
         if (this.coverage.length === 128) this.coverage.shift();
-        this.coverage.push(volume.axialCoverage);
+        this.coverage.push(certificate);
         this.budget();
       }
       if (volume.identity && volume.identity.length <= 1024) {

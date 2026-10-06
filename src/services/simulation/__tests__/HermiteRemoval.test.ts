@@ -269,7 +269,7 @@ describe('Hermite feature reconstruction', () => {
     const allocated = stock.allocatedBytes;
     for (let x = 100; x < 230; x++)
       stock.subtract(cutter.translationSweep(pose(x, 3), pose(x, -3))!, () => checks++);
-    expect(stock.allocatedBytes - allocated).toBe(127 * 1024 + 31 * 2176);
+    expect(stock.allocatedBytes - allocated).toBe(127 * 2304 + 31 * 2176);
     const before = checks,
       removed = stock.removedCells;
     stock.subtract(sweep, () => checks++);

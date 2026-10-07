@@ -12,12 +12,16 @@ import {
 import type { StockModel } from './StockModel';
 import type { DeepReadonly } from '../tools/SimulationMetadata';
 import { rotationQuaternion } from './SimulationTransforms';
+import { IndexedBallSweeps, MAX_INDEXED_SWEEPS } from './IndexedBallSweeps';
+import type { ImplicitVolume } from './ImplicitGeometry';
 
-export function batchRemovalMotions(motions: DeepReadonly<RemovalMotion[]>): {
+interface RemovalBatch {
   motion: DeepReadonly<RemovalMotion>;
   endIndex: number;
-}[] {
-  const result: { motion: DeepReadonly<RemovalMotion>; endIndex: number }[] = [];
+}
+
+export function batchRemovalMotions(motions: DeepReadonly<RemovalMotion[]>): RemovalBatch[] {
+  const result: RemovalBatch[] = [];
   const equal = (a: readonly number[], b: readonly number[]): boolean =>
     a.length === b.length &&
     a.every((value, i) => Number.isFinite(value) && Math.abs(value - b[i]) <= 1e-12);
@@ -86,6 +90,9 @@ export class MaterialRemovalEngine {
   private readonly cutters = new Map<string, CuttingToolModel>();
   cellTests = 0;
   samples = 0;
+  indexedBatches = 0;
+  indexedPrimitiveTests = 0;
+  indexedBoundTests = 0;
 
   constructor(private readonly input: DeepReadonly<SimulationInput>) {
     if (input.algorithmVersion !== 2)
@@ -116,7 +123,10 @@ export class MaterialRemovalEngine {
       .multiply(new THREE.Matrix4().compose(position, orientation, new THREE.Vector3(1, 1, 1)));
   }
 
-  applyMotion(motion: DeepReadonly<RemovalMotion>): void {
+  applyMotion(
+    motion: DeepReadonly<RemovalMotion>,
+    acceptBallSweep?: (sweep: ImplicitVolume) => void,
+  ): void {
     if (
       [motion.start, motion.end].some(
         (pose) =>
@@ -189,7 +199,8 @@ export class MaterialRemovalEngine {
         if (this.samples + 1 > SIMULATION_LIMITS.samples)
           throw new Error('Removal sampling budget exceeded');
         this.samples++;
-        this.stock.subtract(sweep, this.testCell);
+        if (acceptBallSweep && sweep.ballBounds) acceptBallSweep(sweep);
+        else this.stock.subtract(sweep, this.testCell);
         return;
       }
     }
@@ -208,6 +219,98 @@ export class MaterialRemovalEngine {
       this.stock.subtract(cutter.volume(matrix), this.testCell);
     }
   }
+
+  applyBatches(
+    batches: readonly RemovalBatch[],
+    progress: (processed: number) => void = () => {},
+    indexed = true,
+  ): void {
+    let pending: ImplicitVolume[] = [];
+    let pendingKey: string | undefined;
+    let pendingEnd = -1;
+    let processed = 0;
+    const advance = (end: number): void => {
+      while (processed <= end) progress(++processed);
+    };
+    const flush = (): void => {
+      if (pending.length === 1) this.stock.subtract(pending[0], this.testCell);
+      else if (pending.length > 1) {
+        const batch = new IndexedBallSweeps(pending, this.testCell, () => {
+          if (++this.indexedBoundTests > SIMULATION_LIMITS.cellTests * 8)
+            throw new Error('Indexed sweep traversal budget exceeded; use a smaller program');
+        });
+        this.stock.subtract(batch.volume, this.testCell);
+        this.indexedBatches++;
+        this.indexedPrimitiveTests += batch.primitiveTests;
+      }
+      if (pending.length) advance(pendingEnd);
+      pending = [];
+      pendingKey = undefined;
+    };
+    const key = (motion: DeepReadonly<RemovalMotion>): string | undefined => {
+      if (
+        !indexed ||
+        motion.mode !== 'milling' ||
+        motion.tool.cutting?.length !== 1 ||
+        motion.tool.cutting[0].type !== 'ballMill' ||
+        motion.start.frameId !== motion.end.frameId ||
+        motion.start.reference !== motion.end.reference ||
+        !motion.start.orientation.every(Number.isFinite) ||
+        !motion.end.orientation.every(Number.isFinite)
+      )
+        return undefined;
+      const start = new THREE.Quaternion(...motion.start.orientation).normalize();
+      const end = new THREE.Quaternion(...motion.end.orientation).normalize();
+      if (start.dot(end) < 0) end.set(-end.x, -end.y, -end.z, -end.w);
+      if (!start.equals(end)) return undefined;
+      if (
+        start.w < 0 ||
+        (start.w === 0 &&
+          (start.x < 0 || (start.x === 0 && (start.y < 0 || (start.y === 0 && start.z < 0)))))
+      )
+        start.set(-start.x, -start.y, -start.z, -start.w);
+      return JSON.stringify([
+        motion.tool,
+        motion.executedQ,
+        motion.start.frameId,
+        motion.start.reference,
+        start.toArray(),
+      ]);
+    };
+    for (const batch of batches) {
+      const currentKey = key(batch.motion);
+      if (
+        currentKey === undefined ||
+        currentKey !== pendingKey ||
+        pending.length === MAX_INDEXED_SWEEPS
+      )
+        flush();
+      if (currentKey === undefined) {
+        this.applyMotion(batch.motion);
+        advance(batch.endIndex);
+      } else {
+        this.applyMotion(batch.motion, (sweep) => {
+          if (pending.length && !pending[0].ballBounds!.frame.equals(sweep.ballBounds!.frame))
+            flush();
+          const certificate = sweep.sweepCoverage;
+          const covered =
+            certificate &&
+            pending.some((previous) => {
+              const interval = previous.sweepCoverage;
+              return (
+                interval?.key === certificate.key &&
+                interval.lower <= certificate.lower &&
+                interval.upper >= certificate.upper
+              );
+            });
+          if (!covered) pending.push(sweep);
+          pendingKey = currentKey;
+          pendingEnd = batch.endIndex;
+        });
+      }
+    }
+    flush();
+  }
 }
 
 export function simulateMaterialRemoval(
@@ -217,11 +320,10 @@ export function simulateMaterialRemoval(
   const started = performance.now();
   const engine = new MaterialRemovalEngine(input);
   progress(0, input.motions.length);
-  let processed = 0;
-  for (const batch of batchRemovalMotions(input.motions)) {
-    engine.applyMotion(batch.motion);
-    while (processed <= batch.endIndex) progress(++processed, input.motions.length);
-  }
+  engine.applyBatches(batchRemovalMotions(input.motions), (processed) =>
+    progress(processed, input.motions.length),
+  );
+  const subtractionMs = performance.now() - started;
   const builder = new StockMeshBuilder();
   builder.buildChanged(engine.stock);
   const chunks = builder.getChunks();
@@ -248,5 +350,14 @@ export function simulateMaterialRemoval(
     allocatedNodes: engine.stock.allocatedNodes,
     regionTests: engine.stock.regionTests,
     bulkRemovedRegions: engine.stock.bulkRemovedRegions,
+    subtractionMs,
+    meshingMs: performance.now() - started - subtractionMs,
+    indexedBatches: engine.indexedBatches,
+    indexedPrimitiveTests: engine.indexedPrimitiveTests,
+    indexedBoundTests: engine.indexedBoundTests,
+    surfaceToleranceMm: input.resolutionMm * 0.1,
+    surfaceAdaptationSkippedChunks: builder.skippedChunks,
+    peakSurfaceIntersectionCacheEntries: builder.peakIntersectionCacheEntries,
+    peakSubtractionCornerCacheEntries: engine.stock.peakCornerCacheEntries,
   };
 }

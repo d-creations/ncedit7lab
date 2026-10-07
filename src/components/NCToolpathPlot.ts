@@ -308,7 +308,13 @@ export class NCToolpathPlot extends HTMLElement {
         const stopped = result.stop
           ? `Stopped before step ${result.stop.executionStep ?? '?'}${result.stop.lineNumber === undefined ? '' : `, line ${result.stop.lineNumber}`}: ${result.stop.message}.`
           : 'Completed.';
-        status.textContent = `Geometric removal: ${stopped} ${result.processedMotions} motions; ${result.resolutionMm} mm boundary spacing; ${result.boundaryCells} refined boundary cells; ${result.removedCells} cell-centre samples removed; ${(result.peakStockBytes / 1048576).toFixed(1)} MiB peak estimated stock, ${(result.surfaceBytes / 1048576).toFixed(1)} MiB surface; ${result.elapsedMs.toFixed(0)} ms. Feed cutting is assumed; spindle operation is not verified.`;
+        const phases = result.subtractionMs !== undefined && result.meshingMs !== undefined
+          ? ` (${result.subtractionMs.toFixed(0)} ms subtraction, ${result.meshingMs.toFixed(0)} ms meshing)`
+          : '';
+        const retainedFine = result.surfaceAdaptationSkippedChunks
+          ? ` ${result.surfaceAdaptationSkippedChunks} surface chunks retained at fine detail because optional reduction workspace would exceed the budget.`
+          : '';
+        status.textContent = `Geometric removal: ${stopped} ${result.processedMotions} motions; ${result.resolutionMm} mm boundary spacing; ${result.boundaryCells} refined boundary cells; ${result.removedCells} cell-centre samples removed; ${(result.peakStockBytes / 1048576).toFixed(1)} MiB peak estimated stock, ${(result.surfaceBytes / 1048576).toFixed(1)} MiB surface; ${result.elapsedMs.toFixed(0)} ms${phases}.${retainedFine} Feed cutting is assumed; spindle operation is not verified.`;
       }
     } catch (error) {
       if (generation !== this.removalGeneration) return;

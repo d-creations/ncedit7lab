@@ -41,11 +41,11 @@ export interface SimulationInput {
 }
 
 export const SIMULATION_LIMITS = Object.freeze({
-  cells: 4_000_000,
-  stockBytes: 64 * 1024 * 1024,
-  surfaceFaces: 300_000,
-  samples: 100_000,
-  cellTests: 50_000_000,
+  cells: 16_000_000,
+  stockBytes: 256 * 1024 * 1024,
+  surfaceFaces: 1_200_000,
+  samples: 400_000,
+  cellTests: 500_000_000,
   chunkSize: 16,
 });
 
@@ -82,6 +82,15 @@ export interface SimulationResult {
   allocatedNodes: number;
   regionTests: number;
   bulkRemovedRegions: number;
+  subtractionMs?: number;
+  meshingMs?: number;
+  indexedBatches?: number;
+  indexedPrimitiveTests?: number;
+  indexedBoundTests?: number;
+  surfaceToleranceMm?: number;
+  surfaceAdaptationSkippedChunks?: number;
+  peakSurfaceIntersectionCacheEntries?: number;
+  peakSubtractionCornerCacheEntries?: number;
 }
 
 export type SimulationWorkerMessage =

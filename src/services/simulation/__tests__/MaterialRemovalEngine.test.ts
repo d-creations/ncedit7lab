@@ -81,6 +81,18 @@ function occupied(engine: MaterialRemovalEngine, point: [number, number, number]
 }
 
 describe('bounded geometric material subtraction', () => {
+  it('uses the expanded finite resource budgets without changing chunk partitioning', () => {
+    expect(SIMULATION_LIMITS).toEqual({
+      cells: 16_000_000,
+      stockBytes: 256 * 1024 * 1024,
+      surfaceFaces: 1_200_000,
+      samples: 400_000,
+      cellTests: 500_000_000,
+      chunkSize: 16,
+    });
+    expect(Object.isFrozen(SIMULATION_LIMITS)).toBe(true);
+  });
+
   it('cuts an entire milling slot, including the middle, without subtracting the holder', () => {
     const engine = new MaterialRemovalEngine(input());
     engine.applyMotion(motion([-4, 0, -1], [4, 0, -1]));

@@ -14,6 +14,14 @@ export interface IntervalCoverage {
 /** Negative inside; fields must be 1-Lipschitz for conservative region classification. */
 export interface ImplicitVolume {
   bounds: THREE.Box3;
+  /** Ball translations in a shared rotation-only cutter frame. */
+  ballBounds?: {
+    frame: THREE.Matrix4;
+    tips: THREE.Box3;
+    radius: number;
+    length: number;
+  };
+  workspaceBytes?: number;
   /** Axial extrusion interval of the stock's unchanged cross section. */
   extrusion?: readonly { axis: number; minimum: number; maximum: number }[];
   planarExtrusionAxis?(bounds: THREE.Box3): number | undefined;

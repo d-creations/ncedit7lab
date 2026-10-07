@@ -199,6 +199,13 @@ export class CuttingToolModel {
     if (this.part.type === 'ballMill') {
       const field = new BallMillSweep(this.part.diameter / 2, this.part.length, endOrigin);
       const partMatrix = start.clone().multiply(this.partToAssembly);
+      const frame = new THREE.Matrix4().extractRotation(partMatrix).invert();
+      const tips = new THREE.Box3().setFromPoints([
+        new THREE.Vector3().setFromMatrixPosition(partMatrix).applyMatrix4(frame),
+        new THREE.Vector3()
+          .setFromMatrixPosition(end.clone().multiply(this.partToAssembly))
+          .applyMatrix4(frame),
+      ]);
       let sweepCoverage: ImplicitVolume['sweepCoverage'];
       if (endOrigin.lengthSq() > 0) {
         const direction = endOrigin.clone().normalize();
@@ -229,6 +236,7 @@ export class CuttingToolModel {
       }
       return {
         bounds,
+        ballBounds: { frame, tips, radius: this.part.diameter / 2, length: this.part.length },
         identity: JSON.stringify(['ballLinear', this.part, inverse.elements, endOrigin.toArray()]),
         sweepCoverage,
         distance: (value) => field.evaluate(point.copy(value).applyMatrix4(inverse)),

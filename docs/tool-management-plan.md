@@ -485,6 +485,59 @@ ball-milling program or a guarantee that every large/rotating program stays with
 the unchanged work and memory limits. Turning's rounded insert-section sweep and
 backend machining-mode rules are unchanged.
 
+Consecutive fixed-orientation ball sweeps with the same full tool definition,
+executed Q, reference and exact normalized cutter frame additionally form bounded
+spatial batches of at most 128 retained sweeps. Non-collinear movements and
+reversals remain complete swept volumes, not simplified toolpaths. Certified
+contained return sweeps can reuse an earlier field. Tool/reference/frame changes,
+turning and genuine rotary motions flush the pending batch before continuing.
+Original occurrence progress is emitted after its batch completes; stopped
+preparation prefixes are unchanged.
+
+Each batch is a continuous minimum of cutter fields, indexed by a BVH over tip
+intervals in a common rotation-only cutter frame. Its lower bound combines the
+rounded body's enclosing semi-box with a conservative finite-top plane, including
+a roundoff margin. AABB overlap or distance alone does not certify signed-field
+dominance. Exact winner fields and analytical normals are retained. Index nodes
+and sweep closures have a conservative charged workspace estimate. Expensive
+primitive/normal evaluations count toward the existing work budget; lightweight
+BVH comparisons are reported separately and have a cumulative traversal limit
+of eight times that budget. The result also records subtraction and meshing times.
+
+Subtraction corner caching is bounded to 16,384 entries (1 MiB estimated) per batch
+or sweep. Eviction only repeats an evaluation and does not change its value.
+Fine leaves without edge crossings retain their eight corner fields and centre
+in compact storage, expanding on later cuts; no previous distance information is
+discarded. Crossed leaves store only finite edge roots and their corresponding
+normal vectors, with explicit edge masks; omitted NaNs and unused normals are
+reconstructed on demand. Float64 roots/fields and Float32 normals keep their exact
+values, without quantization or a change in boundary spacing.
+Bit-identical boundary arrays can share immutable storage with
+copy-on-write on subsequent updates. Normal buffers are shared independently,
+so different distance fields can still reuse identical analytical normals.
+Bounded 4096-entry single-owner candidate caches limit sharing metadata;
+active shared buffers participate in memory
+accounting. Leaves whose stored corners and centre are all nonnegative are already
+empty in the current representation and release their unused boundary storage.
+This does not solve the existing multiple-crossing/sub-cell feature limitation.
+
+Smooth rendered surfaces can be adapted with a target of 10% of boundary spacing.
+At 0.05 mm this allows at most 0.005 mm additional geometric deviation relative to
+the existing fine reconstructed mesh, not relative to the exact cutter or physical
+workpiece. Only certified interior manifold patches are reduced; seams, creases,
+thin/folded and unproven patches keep fine geometry. Computational stock cells
+remain fine. Adaptation can reduce surface buffers but is not itself a reduction
+of retained subtraction nodes or stock fields. The reference mesher can disable it
+with `new StockMeshBuilder(faceLimit, { surfaceToleranceRatio: 0 })`.
+The current adaptation is a single-pass reduction of convex manifold stars, not
+coarse computational-octree refinement. Its projected-overlay certificate controls
+the full reference patch, not just a QEF residual or a few sampled vertices.
+Canonical intersection caching is local to the current output chunk, retaining
+the same lattice arithmetic and Float32 rounding on both sides of each seam.
+If optional reduction cannot fit its workspace, that chunk retains the original
+fine mesh instead; the result and plot status report how many chunks were kept
+fine. Core stock, staging, output and triangle budget failures remain explicit.
+
 Separately, up to 32 exact complete-field identity keys avoid recomputing identical
 posed milling cutters, analytical milling sweeps and turning envelopes. Keys encode
 the actual profile/transformed field, not just tool numbers or AABBs. Keys longer
@@ -549,11 +602,15 @@ for undersampled features is claimed.
 The **Boundary spacing (mm)** setting remains 0.05..5 mm, default 0.5 mm. It controls
 the finest cells and reconstructed surface sampling, not all interior regions.
 The initial surface grid has a half-cell exterior halo to close the stock boundary.
-Limits are 4,000,000 allocated tree nodes, 64 MiB conservative estimated stock memory
-(including temporary analytical-surface reconstruction data), 600,000 triangles
-(about 41.2 MiB position/normal buffers), 100,000 sampled/swept volumes and 50,000,000
+Limits are 16,000,000 allocated tree nodes, 256 MiB conservative estimated stock memory
+(including temporary analytical-surface reconstruction data), 1,200,000 triangles
+(about 82.4 MiB position/normal buffers), 400,000 sampled/swept volumes and 500,000,000
 region/corner/intersection tests. Node and Map overhead is estimated, not a browser
-heap measurement. The UI reports peak estimated stock memory, surface buffer bytes,
+heap measurement. These expanded budgets permit larger jobs but do not accelerate
+computation; longer waits and higher browser/renderer memory use are possible.
+The 256 MiB estimate is not a cap on total application or GPU memory.
+Chunk size remains 16; boundary spacing, cancellation and explicit failure behavior
+are unchanged. The UI reports peak estimated stock memory, surface buffer bytes,
 refined boundary cells, elapsed time and removed cell-centre samples. The sample
 count is not an exact removed volume. Limits remain explicit, with no silent
 coarsening; a failure leaves initial stock visible, never a success-shaped result.

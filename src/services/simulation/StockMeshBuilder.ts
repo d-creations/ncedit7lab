@@ -1,8 +1,14 @@
 import * as THREE from 'three';
-import { StockModel, type BoundaryCell } from './StockModel';
+import {
+  StockModel,
+  boundaryEdgeRoot,
+  boundaryNormalComponent,
+  type BoundaryCell,
+} from './StockModel';
 import { CELL_CORNERS, CELL_EDGES, edgeIndex } from './ImplicitGeometry';
 import { boundedQef, type HermiteSample } from './HermiteQef';
 import { SIMULATION_LIMITS, type StockSurfaceChunk } from './SimulationTypes';
+import { adaptSurface, surfaceAdaptationWorkspaceBound } from './SurfaceAdaptation';
 
 const FACES = [
   { axis: 0, side: 0, corners: [0, 2, 6, 4] },
@@ -50,7 +56,7 @@ function triangleCapacity(
   const direction = cell.span?.findIndex((size) => size > 1) ?? -1;
   for (const face of FACES) {
     let crossings = 0;
-    for (const edge of face.edges) if (Number.isFinite(cell.data[8 + edge])) crossings++;
+    for (const edge of face.edges) if (Number.isFinite(boundaryEdgeRoot(cell, edge))) crossings++;
     segments += crossings;
     if (crossings && direction >= 0 && face.axis !== direction) {
       const start = [cell.x, cell.y, cell.z][direction];
@@ -63,7 +69,8 @@ function triangleCapacity(
 
 function planarEdges(cell: BoundaryCell): readonly number[] | undefined {
   let mask = 0;
-  for (let i = 0; i < CELL_EDGES.length; i++) if (Number.isFinite(cell.data[8 + i])) mask |= 1 << i;
+  for (let i = 0; i < CELL_EDGES.length; i++)
+    if (Number.isFinite(boundaryEdgeRoot(cell, i))) mask |= 1 << i;
   const axis = [15, 240, 3840].indexOf(mask);
   if (axis < 0) return undefined;
   const edges = PLANE_EDGES[axis];
@@ -71,7 +78,8 @@ function planarEdges(cell: BoundaryCell): readonly number[] | undefined {
   if (
     edges.some((edge) =>
       [0, 1, 2].some(
-        (component) => cell.normals[edge * 3 + component] !== (component === axis ? sign : 0),
+        (component) =>
+          boundaryNormalComponent(cell, edge, component) !== (component === axis ? sign : 0),
       ),
     )
   )
@@ -82,7 +90,7 @@ function planarEdges(cell: BoundaryCell): readonly number[] | undefined {
 function segments(cell: BoundaryCell, orient = true): Segment[] {
   const result: Segment[] = [];
   for (const face of FACES) {
-    const crossing = face.edges.filter((edge) => Number.isFinite(cell.data[8 + edge]));
+    const crossing = face.edges.filter((edge) => Number.isFinite(boundaryEdgeRoot(cell, edge)));
     const add = (a: number, b: number): void => {
       if (orient) {
         const axes = [0, 1, 2].filter((axis) => axis !== face.axis);
@@ -200,8 +208,35 @@ function triangulateContour(projected: THREE.Vector2[]): number[][] | undefined 
 export class StockMeshBuilder {
   private readonly cache = new Map<number, StockSurfaceChunk>();
   private triangles = 0;
+  private readonly surfaceToleranceRatio: number;
+  private skippedAdaptationChunks = 0;
+  private intersectionCachePeak = 0;
 
-  constructor(private readonly faceLimit: number = SIMULATION_LIMITS.surfaceFaces) {}
+  /** Cumulative chunk rebuilds retaining fine geometry due to optional workspace. */
+  get skippedChunks(): number {
+    return this.skippedAdaptationChunks;
+  }
+
+  get peakIntersectionCacheEntries(): number {
+    return this.intersectionCachePeak;
+  }
+
+  private surfaceCacheBytes(): number {
+    return this.triangles * 72 + this.cache.size * 256;
+  }
+
+  constructor(
+    private readonly faceLimit: number = SIMULATION_LIMITS.surfaceFaces,
+    options: { surfaceToleranceRatio?: number } = {},
+  ) {
+    this.surfaceToleranceRatio = options.surfaceToleranceRatio ?? 0.1;
+    if (
+      !Number.isFinite(this.surfaceToleranceRatio) ||
+      this.surfaceToleranceRatio < 0 ||
+      this.surfaceToleranceRatio > 0.1
+    )
+      throw new Error('Surface tolerance ratio must be finite and between 0 and 0.1');
+  }
 
   private visitTriangles(
     stock: StockModel,
@@ -209,7 +244,11 @@ export class StockMeshBuilder {
     intersections: Map<string, HermiteSample>,
     seams: ReadonlyMap<string, ReadonlySet<number>>,
     workspaceBytes: number,
-    visit: (points: readonly THREE.Vector3[], normals: readonly THREE.Vector3[]) => void,
+    visit: (
+      points: readonly THREE.Vector3[],
+      normals: readonly THREE.Vector3[],
+      adaptable: boolean,
+    ) => void,
   ): void {
     const rounded = (point: THREE.Vector3): THREE.Vector3 =>
       point.set(Math.fround(point.x), Math.fround(point.y), Math.fround(point.z));
@@ -217,6 +256,7 @@ export class StockMeshBuilder {
     const directions: THREE.Vector3[] = [];
     const direction = new THREE.Vector3();
     const secondEdge = new THREE.Vector3();
+    let adaptable = false;
     const emit = (points: readonly SurfaceVertex[]): void => {
       for (let i = 0; i < 3; i++) vertices[i] = points[i].point;
       direction
@@ -226,13 +266,14 @@ export class StockMeshBuilder {
       if (direction.lengthSq() === 0) return;
       direction.normalize();
       for (let i = 0; i < 3; i++) directions[i] = patchNormal(points[i].samples, direction);
-      visit(vertices, directions);
+      visit(vertices, directions, adaptable);
     };
     for (const cell of cells) {
+      adaptable = cell.span === undefined;
       const span = cell.span ?? [1, 1, 1];
       const extrusionAxis = span.findIndex((size) => size > 1);
       const samples = CELL_EDGES.map(([a, b], index): HermiteSample | undefined => {
-        const t = cell.data[8 + index];
+        const t = boundaryEdgeRoot(cell, index);
         if (!Number.isFinite(t)) return undefined;
         const first = CELL_CORNERS[a],
           last = CELL_CORNERS[b];
@@ -255,11 +296,16 @@ export class StockMeshBuilder {
             )
             .multiplyScalar(stock.resolutionMm)
             .add(stock.latticeMinimum);
-          const normal = new THREE.Vector3().fromArray(cell.normals, index * 3);
+          const normal = new THREE.Vector3(
+            boundaryNormalComponent(cell, index, 0),
+            boundaryNormalComponent(cell, index, 1),
+            boundaryNormalComponent(cell, index, 2),
+          );
           if (!Number.isFinite(normal.lengthSq()) || normal.lengthSq() < 0.5)
             throw new Error('Missing Hermite surface normal');
           sample = { point: rounded(point), normal: normal.normalize() };
           intersections.set(key, sample);
+          this.intersectionCachePeak = Math.max(this.intersectionCachePeak, intersections.size);
         }
         return sample;
       });
@@ -267,8 +313,16 @@ export class StockMeshBuilder {
       if (plane && extrusionAxis < 0) {
         const vertices = plane.map((index) => samples[index]!);
         const normal = vertices[0].normal;
-        visit([vertices[0].point, vertices[1].point, vertices[2].point], [normal, normal, normal]);
-        visit([vertices[0].point, vertices[2].point, vertices[3].point], [normal, normal, normal]);
+        visit(
+          [vertices[0].point, vertices[1].point, vertices[2].point],
+          [normal, normal, normal],
+          adaptable,
+        );
+        visit(
+          [vertices[0].point, vertices[2].point, vertices[3].point],
+          [normal, normal, normal],
+          adaptable,
+        );
         stock.accountSurfaceWorkspace(workspaceBytes + intersections.size * 256 + 8192);
         continue;
       }
@@ -475,33 +529,39 @@ export class StockMeshBuilder {
                 context.add(a + nx * (b + ny * c));
             }
       }
-    const chunks = stock.getBoundaryChunks(this.cache.size ? context : undefined);
-    const changedIds = new Set([
-      ...requested,
-      ...[...chunks.keys()].filter((id) => !this.cache.has(id)),
-    ]);
+    const extractionContext = this.cache.size ? context : undefined;
+    const chunkIds = new Set<number>();
     const intersections = new Map<string, HermiteSample>();
     const seams = new Map<string, Set<number>>();
     let seamBytes = 0;
-    for (const cells of chunks.values())
+    const retainedWorkspace = (): number => this.surfaceCacheBytes() + seamBytes;
+    // Discover coarse seam keys before collecting fine breakpoints. Each pass
+    // retains only one chunk's extracted cells, not the whole fine surface.
+    for (const [id, cells] of stock.iterateBoundaryChunks(extractionContext, retainedWorkspace)) {
+      chunkIds.add(id);
       for (const cell of cells) {
         const direction = cell.span?.findIndex((size) => size > 1) ?? -1;
         if (direction < 0) continue;
         for (const face of FACES) {
           if (face.axis === direction) continue;
-          if (!face.edges.some((edge) => Number.isFinite(cell.data[8 + edge]))) continue;
+          if (!face.edges.some((edge) => Number.isFinite(boundaryEdgeRoot(cell, edge)))) continue;
           const key = seamKey(cell, face.axis, face.side, direction);
           if (!seams.has(key)) {
             seams.set(key, new Set());
             seamBytes += 192;
-            stock.accountSurfaceWorkspace(seamBytes);
+            stock.accountSurfaceWorkspace(retainedWorkspace());
           }
         }
       }
-    for (const cells of chunks.values())
+    }
+    const changedIds = new Set([
+      ...requested,
+      ...[...chunkIds].filter((id) => !this.cache.has(id)),
+    ]);
+    for (const [, cells] of stock.iterateBoundaryChunks(extractionContext, retainedWorkspace))
       for (const cell of cells)
         for (const face of FACES) {
-          if (!face.edges.some((edge) => Number.isFinite(cell.data[8 + edge]))) continue;
+          if (!face.edges.some((edge) => Number.isFinite(boundaryEdgeRoot(cell, edge)))) continue;
           for (const direction of [0, 1, 2]) {
             if (face.axis === direction) continue;
             const key = seamKey(cell, face.axis, face.side, direction);
@@ -513,17 +573,21 @@ export class StockMeshBuilder {
             levels.add(coordinate + (cell.span?.[direction] ?? 1));
             seamBytes += (levels.size - previous) * 32;
           }
-          stock.accountSurfaceWorkspace(seamBytes);
+          stock.accountSurfaceWorkspace(retainedWorkspace());
         }
-    stock.accountSurfaceWorkspace(seamBytes);
-    for (const id of changedIds) {
-      const cells = chunks.get(id) ?? [];
+    stock.accountSurfaceWorkspace(retainedWorkspace());
+    for (const [id, cells] of stock.iterateBoundaryChunks(changedIds, retainedWorkspace)) {
+      // Shared edges use the same ascending lattice endpoints, stored root and
+      // Float32 calculation in either chunk. Memoization need not retain samples
+      // from completed chunks; face-QEF inputs remain exactly canonical.
+      intersections.clear();
       const count = cells.reduce((sum, cell) => sum + triangleCapacity(cell, seams), 0);
       const previous = (this.cache.get(id)?.positions.length ?? 0) / 9;
-      const workspaceBytes = seamBytes + this.triangles * 72 + count * 72;
+      const workspaceBytes = retainedWorkspace() + count * 73;
       stock.accountSurfaceWorkspace(workspaceBytes + intersections.size * 256);
       const positions = new Float32Array(count * 9),
         normals = new Float32Array(count * 9);
+      const eligible = new Uint8Array(count);
       let offset = 0;
       this.visitTriangles(
         stock,
@@ -531,11 +595,8 @@ export class StockMeshBuilder {
         intersections,
         seams,
         workspaceBytes,
-        (points, directions) => {
-          if (this.triangles - previous + offset / 9 >= this.faceLimit * 2)
-            throw new Error(
-              `Stock surface exceeds the ${this.faceLimit.toLocaleString()} face budget; use coarser boundary spacing`,
-            );
+        (points, directions, adaptable) => {
+          eligible[offset / 9] = adaptable ? 1 : 0;
           for (let i = 0; i < 3; i++) {
             points[i].toArray(positions, offset);
             directions[i].toArray(normals, offset);
@@ -543,15 +604,72 @@ export class StockMeshBuilder {
           }
         },
       );
-      if (offset !== positions.length)
-        stock.accountSurfaceWorkspace(workspaceBytes + intersections.size * 256 + offset * 8);
+      const baseBytes = workspaceBytes + intersections.size * 256;
+      // Fine staging is budgeted independently; the actual reduced triangle
+      // count is checked before allocating its final output buffers.
+      const x = id % nx,
+        y = Math.floor(id / nx) % ny,
+        z = Math.floor(id / (nx * ny));
+      const minimum = new THREE.Vector3(x, y, z)
+        .multiplyScalar(stock.chunkSize * stock.resolutionMm)
+        .add(stock.latticeMinimum);
+      let adaptationBytes = 0;
+      const adaptable =
+        this.surfaceToleranceRatio > 0 && eligible.subarray(0, offset / 9).some(Boolean);
+      const canAdapt =
+        adaptable &&
+        stock.canAccountSurfaceWorkspace(
+          baseBytes + surfaceAdaptationWorkspaceBound(offset / 9) + offset * 8,
+        );
+      // Deliberately retain the fine mesh (zero added deviation) when optional
+      // worst-case work plus final output cannot fit. Core budget errors above
+      // and below still propagate; this is not an exception fallback.
+      if (adaptable && !canAdapt) this.skippedAdaptationChunks++;
+      const selection = canAdapt
+        ? adaptSurface(
+            positions.subarray(0, offset),
+            normals.subarray(0, offset),
+            eligible.subarray(0, offset / 9),
+            stock.resolutionMm * this.surfaceToleranceRatio,
+            (bytes) => {
+              adaptationBytes = bytes;
+              stock.accountSurfaceWorkspace(baseBytes + bytes);
+            },
+            new THREE.Box3(
+              minimum,
+              minimum.clone().addScalar(stock.chunkSize * stock.resolutionMm),
+            ),
+          )
+        : undefined;
+      const outputTriangles = selection ? selection.length / 3 : offset / 9;
+      if (this.triangles - previous + outputTriangles > this.faceLimit * 2)
+        throw new Error(
+          `Stock surface exceeds the ${this.faceLimit.toLocaleString()} face budget; use coarser boundary spacing`,
+        );
+      let outputPositions = positions,
+        outputNormals = normals;
+      if (selection) {
+        stock.accountSurfaceWorkspace(baseBytes + adaptationBytes + outputTriangles * 72);
+        outputPositions = new Float32Array(outputTriangles * 9);
+        outputNormals = new Float32Array(outputTriangles * 9);
+        selection.forEach((source, index) => {
+          for (let axis = 0; axis < 3; axis++) {
+            outputPositions[index * 3 + axis] = positions[source + axis];
+            outputNormals[index * 3 + axis] = normals[source + axis];
+          }
+        });
+      } else if (offset !== positions.length) {
+        stock.accountSurfaceWorkspace(baseBytes + offset * 8);
+        outputPositions = positions.slice(0, offset);
+        outputNormals = normals.slice(0, offset);
+      }
       const chunk = {
         id,
-        positions: offset === positions.length ? positions : positions.slice(0, offset),
-        normals: offset === normals.length ? normals : normals.slice(0, offset),
+        positions: outputPositions,
+        normals: outputNormals,
       };
       this.cache.set(id, chunk);
-      this.triangles += offset / 9 - previous;
+      this.triangles += outputTriangles - previous;
       changed.push(chunk);
     }
     stock.dirtyChunks.clear();

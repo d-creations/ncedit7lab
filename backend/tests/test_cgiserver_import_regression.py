@@ -285,6 +285,34 @@ def test_build_segments_preserves_execution_occurrences_and_active_tools():
     assert other["segments"][0]["executionStep"] is None
 
 
+def test_api_returns_authoritative_occurrences_including_non_motion_commands():
+    result = execute_adapter(api, {"toolPathMode": "center", "machinedata": [{
+        "machineName": "FANUC_MILL", "canalNr": "1",
+        "program": "T1\nG90 G17\nG0 X0 Y0 Z0\nM3 S1000\nG1 X1 F100\nM5\nG1 X2",
+    }]})
+    assert result["success"] is True
+    channel = result["canal"]["1"]
+    occurrences = channel["executionOccurrences"]
+    assert [item["executionStep"] for item in occurrences] == list(range(len(occurrences)))
+    assert {1, 2, 4, 6}.issubset({item["lineNumber"] for item in occurrences})
+    for segment in channel["segments"]:
+        assert occurrences[segment["executionStep"]]["lineNumber"] == segment["lineNumber"]
+
+
+def test_command_trace_contract_preserves_repeated_lines_and_rejects_mismatches(caplog):
+    control = SimpleNamespace(_canals={1: SimpleNamespace(_exec_sequence=[
+        SimpleNamespace(nc_code_line_nr=line) for line in [1, 2, 3, 2]
+    ])})
+    segments = [{"executionStep": 1, "lineNumber": 2}, {"executionStep": 3, "lineNumber": 2}]
+    assert api.build_execution_occurrences(control, 1, segments) == [
+        {"executionStep": step, "lineNumber": line} for step, line in enumerate([1, 2, 3, 2])
+    ]
+    with pytest.raises(ValueError, match="does not match"):
+        api.build_execution_occurrences(control, 1, [{"executionStep": 3, "lineNumber": 99}])
+    assert api.build_execution_occurrences(SimpleNamespace(), 1, []) is None
+    assert "motion-only" in caplog.text
+
+
 def test_build_segments_preserves_immutable_motion_context():
     context = {
         "channelId": "1", "startAxes": {"X": 0.0, "B": 0.0, "C": 0.0},

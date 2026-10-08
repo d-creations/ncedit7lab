@@ -75,6 +75,7 @@ function convexField(polygon: readonly THREE.Vector2[]) {
     return index;
   };
   return {
+    planes: convex ? edges : undefined,
     normal: convex ? (x: number, y: number) => edges[activeEdge(x, y)] : undefined,
     distance: (x: number, y: number): number => {
       if (!convex) return polygonDistance(x, y, polygon);
@@ -179,6 +180,12 @@ export function buildTurningEnvelope(
   };
   return {
     bounds,
+    rotationalSection: {
+      spindleOrigin: spindleOrigin.clone(),
+      spindleAxis: spindleAxis.clone(),
+      polygon,
+      planes: field.planes,
+    },
     identity: JSON.stringify(['turning', spindleOrigin.toArray(), spindleAxis.toArray(), polygon]),
     distance: evaluate,
     normal: field.normal

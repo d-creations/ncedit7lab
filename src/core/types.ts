@@ -226,6 +226,8 @@ export type VariableValue = number | string | boolean;
 export interface PlotMetadata {
   points: PlotPoint[];
   segments: PlotSegment[];
+  /** Authoritative executed commands, including commands without plotted motion. */
+  executionOccurrences?: ExecutionOccurrence[];
   /** Motions omitted by display conversion must still stop material subtraction. */
   removalStops?: Array<{
     channelId: ChannelId;
@@ -234,6 +236,12 @@ export interface PlotMetadata {
     lineNumber?: number;
     message: string;
   }>;
+}
+
+export interface ExecutionOccurrence {
+  channelId: ChannelId;
+  executionStep: number;
+  lineNumber?: number;
 }
 
 export interface PlotPoint {
@@ -342,6 +350,7 @@ export interface BackendPlotSegment {
 
 export interface BackendPlotChannel {
   segments?: BackendPlotSegment[];
+  executionOccurrences?: Array<Omit<ExecutionOccurrence, 'channelId'>>;
   executedLines?: number[];
   variables?: Record<string, number>;
   namedVariables?: Record<string, VariableValue>;

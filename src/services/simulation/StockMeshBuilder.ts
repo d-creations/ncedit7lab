@@ -4,6 +4,7 @@ import {
   boundaryEdgeRoot,
   boundaryNormalComponent,
   type BoundaryCell,
+  type BoundaryCoordinates,
 } from './StockModel';
 import { CELL_CORNERS, CELL_EDGES, edgeIndex } from './ImplicitGeometry';
 import { boundedQef, type HermiteSample } from './HermiteQef';
@@ -34,13 +35,24 @@ interface SurfaceVertex {
   samples: readonly HermiteSample[];
 }
 
+export interface StockChunkMeshDiagnostics {
+  id: number;
+  cells: number;
+  analyticalPanels: number;
+  fineTriangles: number;
+  outputTriangles: number;
+  triangulationMs: number;
+  adaptationMs: number;
+  elapsedMs: number;
+}
+
 const PLANE_EDGES = [
   [0, 1, 3, 2],
   [4, 5, 7, 6],
   [8, 9, 11, 10],
 ] as const;
 
-function seamKey(cell: BoundaryCell, axis: number, side: number, direction: number): string {
+function seamKey(cell: BoundaryCoordinates, axis: number, side: number, direction: number): string {
   const coordinates = [cell.x, cell.y, cell.z];
   const other = 3 - axis - direction;
   return `${axis}:${coordinates[axis] + side * (cell.span?.[axis] ?? 1)}:${coordinates[other]}:${direction}`;
@@ -206,6 +218,8 @@ function triangulateContour(projected: THREE.Vector2[]): number[][] | undefined 
 }
 
 export class StockMeshBuilder {
+  readonly chunkDiagnostics: StockChunkMeshDiagnostics[] = [];
+  extractionMs = 0;
   private readonly cache = new Map<number, StockSurfaceChunk>();
   private triangles = 0;
   private readonly surfaceToleranceRatio: number;
@@ -494,6 +508,9 @@ export class StockMeshBuilder {
   }
 
   buildChanged(stock: StockModel): StockSurfaceChunk[] {
+    const extractionBefore = stock.boundaryExtractionMs;
+    this.chunkDiagnostics.length = 0;
+    this.extractionMs = 0;
     const changed: StockSurfaceChunk[] = [];
     const requested = new Set<number>();
     const [nx, ny, nz] = stock.chunkDimensions;
@@ -534,17 +551,18 @@ export class StockMeshBuilder {
     const intersections = new Map<string, HermiteSample>();
     const seams = new Map<string, Set<number>>();
     let seamBytes = 0;
-    const retainedWorkspace = (): number => this.surfaceCacheBytes() + seamBytes;
+    const retainedWorkspace = (): number =>
+      this.surfaceCacheBytes() + seamBytes + this.chunkDiagnostics.length * 256;
     // Discover coarse seam keys before collecting fine breakpoints. Each pass
     // retains only one chunk's extracted cells, not the whole fine surface.
-    for (const [id, cells] of stock.iterateBoundaryChunks(extractionContext, retainedWorkspace)) {
+    for (const [id, cells] of stock.iterateBoundaryTopology(extractionContext, retainedWorkspace)) {
       chunkIds.add(id);
       for (const cell of cells) {
         const direction = cell.span?.findIndex((size) => size > 1) ?? -1;
         if (direction < 0) continue;
         for (const face of FACES) {
           if (face.axis === direction) continue;
-          if (!face.edges.some((edge) => Number.isFinite(boundaryEdgeRoot(cell, edge)))) continue;
+          if (!face.edges.some((edge) => cell.crossedEdges & (1 << edge))) continue;
           const key = seamKey(cell, face.axis, face.side, direction);
           if (!seams.has(key)) {
             seams.set(key, new Set());
@@ -558,10 +576,10 @@ export class StockMeshBuilder {
       ...requested,
       ...[...chunkIds].filter((id) => !this.cache.has(id)),
     ]);
-    for (const [, cells] of stock.iterateBoundaryChunks(extractionContext, retainedWorkspace))
+    for (const [, cells] of stock.iterateBoundaryTopology(extractionContext, retainedWorkspace))
       for (const cell of cells)
         for (const face of FACES) {
-          if (!face.edges.some((edge) => Number.isFinite(boundaryEdgeRoot(cell, edge)))) continue;
+          if (!face.edges.some((edge) => cell.crossedEdges & (1 << edge))) continue;
           for (const direction of [0, 1, 2]) {
             if (face.axis === direction) continue;
             const key = seamKey(cell, face.axis, face.side, direction);
@@ -576,7 +594,16 @@ export class StockMeshBuilder {
           stock.accountSurfaceWorkspace(retainedWorkspace());
         }
     stock.accountSurfaceWorkspace(retainedWorkspace());
+    for (const id of changedIds)
+      if (!chunkIds.has(id)) {
+        const previous = this.cache.get(id);
+        if (!previous) continue;
+        this.triangles -= previous.positions.length / 9;
+        this.cache.delete(id);
+        changed.push({ id, positions: new Float32Array(), normals: new Float32Array() });
+      }
     for (const [id, cells] of stock.iterateBoundaryChunks(changedIds, retainedWorkspace)) {
+      const chunkStarted = performance.now();
       // Shared edges use the same ascending lattice endpoints, stored root and
       // Float32 calculation in either chunk. Memoization need not retain samples
       // from completed chunks; face-QEF inputs remain exactly canonical.
@@ -605,6 +632,7 @@ export class StockMeshBuilder {
         },
       );
       const baseBytes = workspaceBytes + intersections.size * 256;
+      const triangulationMs = performance.now() - chunkStarted;
       // Fine staging is budgeted independently; the actual reduced triangle
       // count is checked before allocating its final output buffers.
       const x = id % nx,
@@ -625,6 +653,7 @@ export class StockMeshBuilder {
       // worst-case work plus final output cannot fit. Core budget errors above
       // and below still propagate; this is not an exception fallback.
       if (adaptable && !canAdapt) this.skippedAdaptationChunks++;
+      const adaptationStarted = performance.now();
       const selection = canAdapt
         ? adaptSurface(
             positions.subarray(0, offset),
@@ -641,6 +670,7 @@ export class StockMeshBuilder {
             ),
           )
         : undefined;
+      const adaptationMs = performance.now() - adaptationStarted;
       const outputTriangles = selection ? selection.length / 3 : offset / 9;
       if (this.triangles - previous + outputTriangles > this.faceLimit * 2)
         throw new Error(
@@ -671,9 +701,21 @@ export class StockMeshBuilder {
       this.cache.set(id, chunk);
       this.triangles += outputTriangles - previous;
       changed.push(chunk);
+      stock.accountSurfaceWorkspace(retainedWorkspace() + 256);
+      this.chunkDiagnostics.push({
+        id,
+        cells: cells.length,
+        analyticalPanels: cells.filter((cell) => cell.span?.some((span) => span > 1)).length,
+        fineTriangles: offset / 9,
+        outputTriangles,
+        triangulationMs,
+        adaptationMs,
+        elapsedMs: performance.now() - chunkStarted,
+      });
     }
     stock.dirtyChunks.clear();
     stock.accountSurfaceWorkspace(0);
+    this.extractionMs = stock.boundaryExtractionMs - extractionBefore;
     return changed;
   }
 

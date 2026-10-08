@@ -31,7 +31,10 @@ import type { NCBottomPanel } from './NCBottomPanel';
 import { ToolGeometryFactory } from './ToolGeometryFactory';
 import { prepareMaterialRemoval, type MaterialRemovalPreparation } from '@services/tools/MaterialRemovalPreparation';
 import { MaterialSimulationSession } from '@services/simulation/MaterialSimulationSession';
-import type { StockBinding, SimulationResult } from '@services/simulation/SimulationTypes';
+import { MaterialReplaySession } from '@services/simulation/MaterialReplaySession';
+import type { ReplayFrame } from '@services/simulation/MaterialReplayEngine';
+import { createPlotReplayTimeline, type PlotReplayTimeline } from '@services/tools/PlotReplayTimeline';
+import type { StockBinding, SimulationInput, SimulationResult } from '@services/simulation/SimulationTypes';
 import { rotationQuaternion } from '@services/simulation/SimulationTransforms';
 
 export class NCToolpathPlot extends HTMLElement {
@@ -70,6 +73,16 @@ export class NCToolpathPlot extends HTMLElement {
   private removalSetup?: { binding: StockBinding; resolutionMm: number };
   private removalSetupScope?: string;
   private removalGeneration = 0;
+  private removalPreparation?: DeepReadonly<MaterialRemovalPreparation>;
+  private materialReplay?: MaterialReplaySession;
+  private replayTimeline?: PlotReplayTimeline;
+  private replayPosition = 0;
+  private replayRequestedPosition = 0;
+  private replayGeneration = 0;
+  private replayBusy = false;
+  private replayPlaying = false;
+  private replayTimer?: ReturnType<typeof setTimeout>;
+  private readonly stockMeshes = new Map<number, THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>>();
 
   constructor() {
     super();
@@ -118,6 +131,7 @@ export class NCToolpathPlot extends HTMLElement {
       if (!run || data.runId === this.displayedRunId) return;
       this.cancelMaterialRemoval();
       this.displayedRunId = run.runId;
+      this.removalPreparation = run.materialRemoval;
       this.simulationEnabled = run.toolPathMode === 'simulation';
       this.clearSelection();
       this.resolveSelection = createPlotSelectionResolver(run);
@@ -126,6 +140,7 @@ export class NCToolpathPlot extends HTMLElement {
       this.updatePlot(structuredClone(run.plotMetadata) as PlotMetadata, materials);
       this.updateMaterialRemovalStatus();
       this.updateRemovalSetup();
+      this.updateReplayControls();
       this.refreshStaleness();
       if (!this.stale && run.materialRemoval?.status === 'ready') {
         void this.startMaterialRemoval(run.materialRemoval);
@@ -280,21 +295,15 @@ export class NCToolpathPlot extends HTMLElement {
   private async startMaterialRemoval(preparation: DeepReadonly<MaterialRemovalPreparation>): Promise<void> {
     if (!preparation.simulation || !this.displayedRunId || !this.scene) return;
     this.cancelMaterialRemoval();
+    this.removalPreparation = preparation;
+    this.updateReplayControls();
     const generation = this.removalGeneration;
     const session = this.createMaterialSimulationSession(this.displayedRunId);
     this.materialSimulation = session;
     const status = this.shadowRoot?.getElementById('material-removal-status');
     const cancel = this.shadowRoot?.querySelector<HTMLButtonElement>('#cancel-removal');
     if (cancel) cancel.hidden = false;
-    const raw = this.toolGeometryFactory.createMaterialMesh(preparation.simulation.stock);
-    if (raw) {
-      raw.matrixAutoUpdate = false;
-      raw.matrix.compose(
-        new THREE.Vector3(...preparation.simulation.binding.position),
-        rotationQuaternion(preparation.simulation.binding.rotation), new THREE.Vector3(1, 1, 1),
-      );
-      this.replaceMaterialObject(raw);
-    }
+    this.showInitialStock(preparation.simulation);
     try {
       const result = await session.start(preparation.simulation, (processed, total) => {
         if (generation !== this.removalGeneration || !status) return;
@@ -309,12 +318,29 @@ export class NCToolpathPlot extends HTMLElement {
           ? `Stopped before step ${result.stop.executionStep ?? '?'}${result.stop.lineNumber === undefined ? '' : `, line ${result.stop.lineNumber}`}: ${result.stop.message}.`
           : 'Completed.';
         const phases = result.subtractionMs !== undefined && result.meshingMs !== undefined
-          ? ` (${result.subtractionMs.toFixed(0)} ms subtraction, ${result.meshingMs.toFixed(0)} ms meshing)`
+          ? ` (${result.subtractionMs.toFixed(0)} ms subtraction, ${result.meshingMs.toFixed(0)} ms ${result.meshingAttribution === 'final-only' ? 'final ' : ''}meshing)`
+          : '';
+        const meshPhases = result.extractionMs !== undefined && result.triangulationMs !== undefined && result.adaptationMs !== undefined
+          ? ` [${result.extractionMs.toFixed(0)}/${result.triangulationMs.toFixed(0)}/${result.adaptationMs.toFixed(0)} ms extraction/triangulation/adaptation]`
+          : '';
+        const operations = result.operationDiagnostics;
+        const operationTotals = operations?.reduce(
+          (totals, operation) => {
+            totals[operation.mode]++;
+            totals[`${operation.mode}Ms`] += operation.elapsedMs;
+            totals.rotational += operation.rotationalFastPathSubtractions;
+            totals.indexed += operation.indexedBatches;
+            return totals;
+          },
+          { turning: 0, milling: 0, turningMs: 0, millingMs: 0, rotational: 0, indexed: 0 },
+        );
+        const operationSummary = operationTotals
+          ? ` ${operationTotals.turning} turning (${operationTotals.turningMs.toFixed(0)} ms) / ${operationTotals.milling} milling (${operationTotals.millingMs.toFixed(0)} ms) operations; ${operationTotals.rotational} rotational-fast subtractions; ${operationTotals.indexed} indexed batches.`
           : '';
         const retainedFine = result.surfaceAdaptationSkippedChunks
           ? ` ${result.surfaceAdaptationSkippedChunks} surface chunks retained at fine detail because optional reduction workspace would exceed the budget.`
           : '';
-        status.textContent = `Geometric removal: ${stopped} ${result.processedMotions} motions; ${result.resolutionMm} mm boundary spacing; ${result.boundaryCells} refined boundary cells; ${result.removedCells} cell-centre samples removed; ${(result.peakStockBytes / 1048576).toFixed(1)} MiB peak estimated stock, ${(result.surfaceBytes / 1048576).toFixed(1)} MiB surface; ${result.elapsedMs.toFixed(0)} ms${phases}.${retainedFine} Feed cutting is assumed; spindle operation is not verified.`;
+        status.textContent = `Geometric removal: ${stopped} ${result.processedMotions} motions; ${result.resolutionMm} mm boundary spacing; ${result.boundaryCells} refined boundary cells; ${result.removedCells} cell-centre samples removed; ${(result.peakStockBytes / 1048576).toFixed(1)} MiB peak estimated stock, ${(result.surfaceBytes / 1048576).toFixed(1)} MiB surface; ${result.elapsedMs.toFixed(0)} ms${phases}${meshPhases}.${operationSummary}${retainedFine} Feed cutting is assumed; spindle operation is not verified.`;
       }
     } catch (error) {
       if (generation !== this.removalGeneration) return;
@@ -328,17 +354,30 @@ export class NCToolpathPlot extends HTMLElement {
     }
   }
 
+  private showInitialStock(input: DeepReadonly<SimulationInput>): void {
+    const raw = this.toolGeometryFactory.createMaterialMesh(input.stock);
+    if (raw) {
+      raw.matrixAutoUpdate = false;
+      raw.matrix.compose(
+        new THREE.Vector3(...input.binding.position),
+        rotationQuaternion(input.binding.rotation), new THREE.Vector3(1, 1, 1),
+      );
+      this.replaceMaterialObject(raw);
+    }
+  }
+
   private replaceMaterialObject(group: THREE.Group): void {
     if (!this.scene) return;
     if (this.materialObject) this.removeOwnedPlotObject(this.materialObject);
     group.userData.isMaterial = true;
     group.visible = this.materialVisible;
     this.materialObject = group;
+    this.stockMeshes.clear();
     this.scene.add(group);
     this.updateMaterialControl();
   }
 
-  private installStockSurface(result: SimulationResult): void {
+  private installStockSurface(result: Pick<SimulationResult, 'chunks' | 'stockToWorkpiece'>): void {
     const group = new THREE.Group();
     group.name = 'machined-stock';
     group.matrixAutoUpdate = false;
@@ -350,15 +389,22 @@ export class NCToolpathPlot extends HTMLElement {
       const geometry = new THREE.BufferGeometry();
       geometry.setAttribute('position', new THREE.BufferAttribute(chunk.positions, 3));
       geometry.setAttribute('normal', new THREE.BufferAttribute(chunk.normals, 3));
-      group.add(new THREE.Mesh(geometry, material));
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.userData.stockChunkId = chunk.id;
+      group.add(mesh);
     }
     this.replaceMaterialObject(group);
+    for (const mesh of group.children) {
+      if (mesh instanceof THREE.Mesh && mesh.material instanceof THREE.MeshStandardMaterial)
+        this.stockMeshes.set(mesh.userData.stockChunkId, mesh);
+    }
   }
 
   private cancelMaterialRemoval(): void {
     this.removalGeneration++;
     this.materialSimulation?.cancel();
     this.materialSimulation = undefined;
+    this.cancelReplay();
     const cancel = this.shadowRoot?.querySelector<HTMLButtonElement>('#cancel-removal');
     if (cancel) cancel.hidden = true;
   }
@@ -374,6 +420,19 @@ export class NCToolpathPlot extends HTMLElement {
       return;
     }
     const location = this.selectionLocation;
+    if (this.materialReplay && this.shadowRoot?.querySelector<HTMLInputElement>('#replay-follow')?.checked) {
+      const index = this.replayTimeline?.occurrences.findIndex((occurrence) =>
+        occurrence.channelId === location.channelId && occurrence.lineNumber === location.lineNumber &&
+        (step === undefined || occurrence.executionStep === step));
+      if (index !== undefined && index >= 0) {
+        void this.seekReplay(index + 1);
+      } else {
+        this.clearSelection();
+        const status = this.shadowRoot?.getElementById('plot-status');
+        if (status) status.textContent = 'No executed occurrence for this location; replay stock is unchanged.';
+      }
+      return;
+    }
     const selection = this.resolveSelection?.(location, step);
     this.highlightSegment(selection?.segment);
     const control = this.shadowRoot?.querySelector<HTMLSelectElement>('#plot-occurrence');
@@ -410,6 +469,243 @@ export class NCToolpathPlot extends HTMLElement {
       subsegmentIndex: selection.segment.subsegmentIndex,
       toolNumber: selection.segment.toolNumber, toolDefinitionAvailable: Boolean(tool),
       machiningMode: selection.segment.machiningMode ?? 'unknown',
+    });
+  }
+
+  private createMaterialReplaySession(runId: string): MaterialReplaySession {
+    return new MaterialReplaySession(runId);
+  }
+
+  private updateReplayControls(): void {
+    const controls = this.shadowRoot?.getElementById('stock-replay');
+    if (!controls) return;
+    const available = Boolean(this.simulationEnabled && this.removalPreparation?.simulation &&
+      this.displayedRunId && !this.stale);
+    controls.hidden = !this.simulationEnabled || !this.removalPreparation?.stock;
+    const active = Boolean(this.materialReplay && this.replayTimeline);
+    const button = (id: string) => this.shadowRoot?.querySelector<HTMLButtonElement>(`#replay-${id}`);
+    const start = button('start');
+    if (start) {
+      start.disabled = !available;
+      start.textContent = active ? 'Restart Replay' : 'Start Replay';
+    }
+    const play = button('play');
+    if (play) {
+      play.disabled = !active || this.stale || (this.replayBusy && this.replayPosition === 0);
+      play.textContent = this.replayPlaying ? 'Pause' : 'Play';
+      play.setAttribute('aria-pressed', String(this.replayPlaying));
+    }
+    const previous = button('previous');
+    if (previous) previous.disabled = !active || this.stale || this.replayRequestedPosition <= 0;
+    const next = button('next');
+    if (next) next.disabled = !active || this.stale ||
+      this.replayRequestedPosition >= (this.replayTimeline?.occurrences.length ?? 0);
+    const final = button('final');
+    if (final) final.disabled = !available || !active;
+    const timeline = this.shadowRoot?.querySelector<HTMLInputElement>('#replay-position');
+    if (timeline) {
+      timeline.disabled = !active || this.stale;
+      timeline.max = String(this.replayTimeline?.occurrences.length ?? 0);
+      timeline.value = String(this.replayRequestedPosition);
+      timeline.setAttribute('aria-valuetext', `${this.replayRequestedPosition} completed execution occurrences`);
+    }
+    const follow = this.shadowRoot?.querySelector<HTMLInputElement>('#replay-follow');
+    if (follow) follow.disabled = !active || this.stale;
+    controls.setAttribute('aria-busy', String(this.replayBusy));
+    const cancel = this.shadowRoot?.querySelector<HTMLButtonElement>('#cancel-removal');
+    if (cancel && active) cancel.hidden = false;
+  }
+
+  private pauseReplay(): void {
+    this.replayPlaying = false;
+    if (this.replayTimer !== undefined) clearTimeout(this.replayTimer);
+    this.replayTimer = undefined;
+    this.updateReplayControls();
+  }
+
+  private cancelReplay(): void {
+    const active = Boolean(this.materialReplay);
+    this.replayGeneration++;
+    this.pauseReplay();
+    this.materialReplay?.cancel();
+    this.materialReplay = undefined;
+    this.replayTimeline = undefined;
+    this.replayBusy = false;
+    this.replayPosition = 0;
+    this.replayRequestedPosition = 0;
+    const cancel = this.shadowRoot?.querySelector<HTMLButtonElement>('#cancel-removal');
+    if (cancel && !this.materialSimulation) cancel.hidden = true;
+    if (active) this.replayStatus('Replay stopped. Last displayed stock is retained; no further cuts are applied.');
+    this.updateReplayControls();
+  }
+
+  private replayStatus(text: string): void {
+    const status = this.shadowRoot?.getElementById('replay-status');
+    if (status) status.textContent = text;
+  }
+
+  private async startReplay(): Promise<void> {
+    this.refreshStaleness();
+    const run = this.displayedRunId ? this.executedProgramService.getPlotRun(this.displayedRunId) : undefined;
+    const input = this.removalPreparation?.simulation;
+    if (!run || !input || this.stale) {
+      this.replayStatus('Bind stock and plot the current program before starting replay.');
+      return;
+    }
+    let generation = this.replayGeneration;
+    try {
+      const timeline = createPlotReplayTimeline(run);
+      this.cancelMaterialRemoval();
+      generation = this.replayGeneration;
+      const session = this.createMaterialReplaySession(run.runId);
+      this.materialReplay = session;
+      this.replayTimeline = timeline;
+      this.replayBusy = true;
+      this.clearSelection();
+      this.showInitialStock(input);
+      this.updateReplayControls();
+      this.replayStatus('Preparing initial stock for replay...');
+      const status = this.shadowRoot?.getElementById('material-removal-status');
+      if (status) {
+        status.hidden = false;
+        status.textContent = 'Line replay: stock is shown after completed execution occurrences. Feed cutting is assumed; spindle operation is not verified.';
+      }
+      const frame = await session.start(input, timeline.occurrences.map((occurrence) => occurrence.executionStep),
+        (processed, total) => {
+          if (this.materialReplay === session && !this.stale)
+            this.replayStatus(`Updating replay stock: ${processed}/${total} cutting motions...`);
+        });
+      if (generation !== this.replayGeneration || this.stale || session.runId !== this.displayedRunId) return;
+      this.installReplayFrame(frame);
+    } catch (error) {
+      if (generation !== this.replayGeneration || (error instanceof DOMException && error.name === 'AbortError')) return;
+      console.error('Material replay failed:', error);
+      this.cancelReplay();
+      this.replayStatus(`Replay unavailable: ${error instanceof Error ? error.message : 'Worker failure'}. Stock is not a completed result.`);
+    } finally {
+      if (generation === this.replayGeneration) {
+        this.replayBusy = false;
+        this.updateReplayControls();
+      }
+    }
+  }
+
+  private async seekReplay(position: number, playback = false): Promise<void> {
+    const session = this.materialReplay;
+    if (!session || this.stale) return;
+    if (!playback) this.pauseReplay();
+    const generation = ++this.replayGeneration;
+    this.replayBusy = true;
+    this.replayRequestedPosition = position;
+    this.updateReplayControls();
+    this.replayStatus(`Seeking executed occurrence ${position}...`);
+    try {
+      const frame = await session.seek(position);
+      if (generation !== this.replayGeneration || this.stale || session !== this.materialReplay) return;
+      this.installReplayFrame(frame);
+      if (frame.stop || frame.position === frame.total) this.pauseReplay();
+    } catch (error) {
+      if (generation !== this.replayGeneration || (error instanceof DOMException && error.name === 'AbortError')) return;
+      console.error('Material replay seek failed:', error);
+      this.cancelReplay();
+      this.replayStatus(`Replay failed: ${error instanceof Error ? error.message : 'Worker failure'}. Last displayed stock is retained; it is not a completed result.`);
+    } finally {
+      if (generation === this.replayGeneration) {
+        this.replayBusy = false;
+        this.updateReplayControls();
+        if (this.replayPlaying) this.scheduleReplayStep();
+      }
+    }
+  }
+
+  private scheduleReplayStep(): void {
+    if (this.replayTimer !== undefined) clearTimeout(this.replayTimer);
+    this.replayTimer = setTimeout(() => {
+      this.replayTimer = undefined;
+      if (this.replayPlaying && !this.replayBusy && this.replayTimeline)
+        void this.seekReplay(Math.min(this.replayPosition + 1, this.replayTimeline.occurrences.length), true);
+    }, 150);
+  }
+
+  private installReplayFrame(frame: ReplayFrame): void {
+    if (frame.replace || !this.materialObject || this.materialObject.name !== 'machined-stock') {
+      this.installStockSurface(frame);
+    } else {
+      const group = this.materialObject;
+      let material = this.stockMeshes.values().next().value?.material;
+      for (const chunk of frame.chunks) {
+        const previous = this.stockMeshes.get(chunk.id);
+        if (previous) {
+          group.remove(previous);
+          previous.geometry.dispose();
+          this.stockMeshes.delete(chunk.id);
+        }
+        if (!chunk.positions.length) continue;
+        material ??= new THREE.MeshStandardMaterial({ color: 0xd9c7a6, metalness: 0.25, roughness: 0.8 });
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.BufferAttribute(chunk.positions, 3));
+        geometry.setAttribute('normal', new THREE.BufferAttribute(chunk.normals, 3));
+        const mesh = new THREE.Mesh(geometry, material);
+        mesh.userData.stockChunkId = chunk.id;
+        group.add(mesh);
+        this.stockMeshes.set(chunk.id, mesh);
+      }
+      if (!this.stockMeshes.size) material?.dispose();
+    }
+    this.replayPosition = frame.position;
+    this.replayRequestedPosition = frame.position;
+    this.selectReplayFrame(frame);
+    const occurrence = this.replayTimeline?.occurrences[frame.position - 1];
+    const prefix = frame.position
+      ? `${frame.position}/${frame.total}, step ${frame.executionStep}, line ${occurrence?.lineNumber ?? '?'}`
+      : `Initial stock (0/${frame.total})`;
+    const stopped = frame.stop ? ` Stopped before unsupported step ${frame.stop.executionStep ?? '?'}: ${frame.stop.message}.` : '';
+    const incomplete = this.replayTimeline?.complete ? '' : ' Motion occurrences only: backend command history is unavailable.';
+    this.replayStatus(`${prefix}. ${frame.processedMotions} cutting motions; ${frame.subtractionMs.toFixed(0)} ms subtraction, ${frame.meshingMs.toFixed(0)} ms meshing${frame.checkpointMs ? `, ${frame.checkpointMs.toFixed(0)} ms checkpoints` : ''}. Checkpoints: ${frame.checkpointCount}, ${(frame.checkpointBytes / 1048576).toFixed(1)} MiB${frame.skippedCheckpoints ? `; ${frame.skippedCheckpoints} skipped for memory` : ''}${frame.evictedCheckpoints ? `; ${frame.evictedCheckpoints} evicted` : ''}.${stopped}${incomplete}`);
+    this.updateReplayControls();
+  }
+
+  private selectReplayFrame(frame: ReplayFrame): void {
+    const occurrence = this.replayTimeline?.occurrences[frame.position - 1];
+    if (!occurrence) {
+      this.clearSelection();
+      const status = this.shadowRoot?.getElementById('plot-status');
+      if (status) status.textContent = 'Replay: initial stock';
+      return;
+    }
+    this.selectedExecutionStep = occurrence.executionStep;
+    this.selectionLocation = occurrence.lineNumber === undefined ? undefined : {
+      channelId: occurrence.channelId, lineNumber: occurrence.lineNumber,
+    };
+    const control = this.shadowRoot?.querySelector<HTMLSelectElement>('#plot-occurrence');
+    if (control) {
+      const occurrences = this.replayTimeline!.occurrences.filter((entry) =>
+        entry.channelId === occurrence.channelId && entry.lineNumber === occurrence.lineNumber);
+      control.replaceChildren(...occurrences.map((entry, index) =>
+        new Option(`${index + 1} / ${occurrences.length} (step ${entry.executionStep})`, String(entry.executionStep))));
+      control.disabled = false;
+      control.value = String(occurrence.executionStep);
+    }
+    const segment = this.replayTimeline?.segments.get(occurrence.executionStep);
+    const run = this.displayedRunId ? this.executedProgramService.getPlotRun(this.displayedRunId) : undefined;
+    const source = run?.inputs[0]?.snapshot;
+    const tool = source && segment && this.executedProgramService.getRunTool(
+      run!.runId, source.identity.programId, occurrence.channelId, segment.toolNumber);
+    this.highlightSegment(segment ? structuredClone(segment) : undefined);
+    if (segment) this.updateToolMesh(structuredClone(segment), tool);
+    else {
+      this.selectedSegment = undefined;
+      this.selectedTool = undefined;
+      this.updateToolMesh();
+    }
+    const status = this.shadowRoot?.getElementById('plot-status');
+    if (status) status.textContent = `Replay step ${occurrence.executionStep}, line ${occurrence.lineNumber ?? '?'}: ${segment ? segment.type : 'non-motion command (no stock removal)'}`;
+    this.eventBus.publish(EVENT_NAMES.PLOT_SELECTION_CHANGED, {
+      runId: this.displayedRunId, status: 'selected', source: source?.identity,
+      location: this.selectionLocation, executionStep: occurrence.executionStep, fraction: 1,
+      sourceSegmentIndex: segment?.sourceSegmentIndex, subsegmentIndex: segment?.subsegmentIndex,
+      toolNumber: segment?.toolNumber, toolDefinitionAvailable: Boolean(tool),
+      machiningMode: segment?.machiningMode ?? 'unknown',
     });
   }
 
@@ -638,6 +934,19 @@ export class NCToolpathPlot extends HTMLElement {
             <label>Boundary spacing (mm) <input id="removal-resolution" type="number" min="0.05" max="5" step="0.05" value="0.5" style="width:65px"></label>
             <button class="plot-button" id="run-removal">Bind stock and run removal</button>
           </details>
+          <details id="stock-replay" hidden style="max-height:230px;overflow:auto;background:var(--vscode-editor-background,#282c34);padding:8px">
+            <summary>Line-by-line stock replay</summary>
+            <div style="display:flex;flex-wrap:wrap;gap:4px;margin:6px 0">
+              <button class="plot-button" id="replay-start" disabled>Start Replay</button>
+              <button class="plot-button" id="replay-previous" disabled>Previous</button>
+              <button class="plot-button" id="replay-play" aria-pressed="false" disabled>Play</button>
+              <button class="plot-button" id="replay-next" disabled>Next</button>
+              <button class="plot-button" id="replay-final" disabled title="Leave replay and calculate the final stock">Final Stock</button>
+            </div>
+            <label>Executed timeline <input id="replay-position" type="range" min="0" max="0" value="0" step="1" disabled style="width:100%"></label>
+            <label><input id="replay-follow" type="checkbox" disabled> Follow editor cursor / selected occurrence</label>
+            <div id="replay-status" role="status" style="margin-top:6px">Replay is optional. Repeated source lines are separate executed occurrences.</div>
+          </details>
           <div class="axis-controls">
             <button class="plot-button" id="rotate-x" title="Rotate around X axis">Rot X</button>
             <button class="plot-button" id="rotate-y" title="Rotate around Y axis">Rot Y</button>
@@ -664,6 +973,30 @@ export class NCToolpathPlot extends HTMLElement {
   }
 
   private attachControlListeners() {
+    this.shadowRoot?.getElementById('replay-start')?.addEventListener('click', () => void this.startReplay());
+    this.shadowRoot?.getElementById('replay-previous')?.addEventListener('click', () =>
+      void this.seekReplay(this.replayRequestedPosition - 1));
+    this.shadowRoot?.getElementById('replay-next')?.addEventListener('click', () =>
+      void this.seekReplay(this.replayRequestedPosition + 1));
+    this.shadowRoot?.getElementById('replay-play')?.addEventListener('click', () => {
+      if (this.replayPlaying) this.pauseReplay();
+      else {
+        this.replayPlaying = true;
+        this.updateReplayControls();
+        if (!this.replayBusy) {
+          if (this.replayPosition === this.replayTimeline?.occurrences.length) void this.seekReplay(0, true);
+          else this.scheduleReplayStep();
+        }
+      }
+    });
+    this.shadowRoot?.getElementById('replay-final')?.addEventListener('click', () => {
+      if (this.removalPreparation) void this.startMaterialRemoval(this.removalPreparation);
+    });
+    this.shadowRoot?.querySelector<HTMLInputElement>('#replay-position')?.addEventListener('input', (event) =>
+      void this.seekReplay(Number((event.currentTarget as HTMLInputElement).value)));
+    this.shadowRoot?.querySelector<HTMLInputElement>('#replay-follow')?.addEventListener('change', () => {
+      if (this.selectionLocation) this.selectOccurrence(this.selectedExecutionStep);
+    });
     this.shadowRoot?.querySelector<HTMLSelectElement>('#plot-occurrence')?.addEventListener('change', (event) => {
       const control = event.currentTarget as HTMLSelectElement;
       this.selectOccurrence(Number(control.value));
@@ -681,9 +1014,12 @@ export class NCToolpathPlot extends HTMLElement {
     materialButton?.addEventListener('click', () => this.toggleMaterial());
     this.shadowRoot?.getElementById('run-removal')?.addEventListener('click', () => void this.runRemovalFromSetup());
     this.shadowRoot?.getElementById('cancel-removal')?.addEventListener('click', () => {
+      const replay = Boolean(this.materialReplay);
       this.cancelMaterialRemoval();
       const status = this.shadowRoot?.getElementById('material-removal-status');
-      if (status) status.textContent = 'Material removal cancelled. Initial stock is shown, not a completed result.';
+      if (status) status.textContent = replay
+        ? 'Replay cancelled. Last displayed stock is retained; it is not the final result.'
+        : 'Material removal cancelled. Initial stock is shown, not a completed result.';
     });
 
     const orbitButton = this.shadowRoot?.getElementById('toggle-orbit');
@@ -1054,6 +1390,7 @@ export class NCToolpathPlot extends HTMLElement {
     toRemove.forEach((obj) => this.removeOwnedPlotObject(obj));
     this.materialObject = null;
     this.materialVisible = true;
+    this.stockMeshes.clear();
 
     // Remove highlight object if exists
     if (this.highlightObject) {
@@ -1297,11 +1634,13 @@ export class NCToolpathPlot extends HTMLElement {
     this.executedProgramService.cancelPendingPlot();
     if (this.displayedRunId) this.executedProgramService.discardPlotRun(this.displayedRunId);
     this.displayedRunId = undefined;
+    this.removalPreparation = undefined;
     this.resolveSelection = undefined;
     this.stale = false;
     this.simulationEnabled = false;
     this.updateMaterialRemovalStatus();
     this.updateRemovalSetup();
+    this.updateReplayControls();
     this.materialVisible = true;
     this.updateMaterialControl();
     if (!this.scene) return;
@@ -1321,6 +1660,7 @@ export class NCToolpathPlot extends HTMLElement {
     });
     toRemove.forEach((obj) => this.removeOwnedPlotObject(obj));
     this.materialObject = null;
+    this.stockMeshes.clear();
 
     // Update status
     const statusElement = this.shadowRoot?.getElementById('plot-status');

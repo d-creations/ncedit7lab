@@ -436,10 +436,66 @@ insert milling, threading and compound special operations stop the preview.
 Only ordinary G0/G1/G2/G3 motion source codes are admitted when supplied.
 
 One 3D stock is retained across turning -> milling -> turning. Milling pockets
-cannot be refilled by restoring an axisymmetric profile. This first implementation
-displays final stock or the valid stopped prefix, not cursor-dependent historical
-stock. Timed playback, checkpoints, part transfer, synchronized
-channels and collision checking remain deferred.
+cannot be refilled by restoring an axisymmetric profile. Coaxial cylindrical stock
+now uses a hybrid rotational base with local 3D removal detail, not two independent
+stock models. Final stock remains the default. Optional line replay now displays
+historical stock using a persistent worker and bounded checkpoints. NC-time-based
+playback, part transfer, synchronized channels and collision checking remain
+deferred.
+
+#### Line-by-line stock replay
+
+After a Simulation plot has a confirmed Removal setup, open **Line-by-line stock
+replay** and select **Start Replay**. **Previous**, **Next**, **Play/Pause** and the
+executed-timeline slider navigate the captured run without asking the backend to
+execute the program again. Position zero is raw stock. A position completes all
+pose pairs/submoves belonging to the selected execution occurrence. Repeated
+source lines remain distinct occurrences; source line numbers alone are not a
+history key. The label displays the execution step and source line.
+
+**Follow editor cursor / selected occurrence** is opt-in. Without it, normal
+cursor navigation does not seek stock. With it, the existing occurrence selector
+chooses which execution of a repeated source line to restore. Rapids move the
+verified tool preview without cutting; non-motion commands change the selection
+without subtraction and hide the tool when no pose was emitted for that command.
+Playback waits for each stock update and adds a short display interval; it is
+not feed-rate-accurate or a guarantee of real-time 0.05 mm playback.
+
+The adapter publishes the engine's actual execution trace, including non-motion
+commands. The currently installed engine's public `get_exected_nodes` is
+motion-aligned, so the adapter reads its retained `_exec_sequence` through a
+small compatibility helper and validates every published motion step/line against
+that trace. Missing trace capability logs a warning and exposes an explicitly
+**motion-only** timeline; it never invents skipped commands from source text.
+Mismatched trace metadata is an explicit conversion error.
+
+Forward seeks apply only the newly requested cutting prefix. Geometric/indexed
+batches end at the requested occurrence, never at a later line. Only dirty surface
+chunks and their seam context are remeshed and transferred; empty chunk updates
+delete stale surfaces. A rapid or state-only step with unchanged stock sends no
+surface buffers. Transfer buffers are copies, so the worker's cached mesh is not
+detached.
+
+Checkpoints copy the hybrid profile, adaptive nodes and lossless shared field/normal
+pools independently. They do not keep a full mesh per line. Default history is at
+most **four checkpoints and 64 MiB**, within the existing **256 MiB estimated
+stock/workspace limit**, not an additional allowance. Checkpoints are attempted
+periodically after new cuts; memory pressure releases history before reducing
+available core workspace. Replay indexes, temporary batches, retained mesh diagnostics
+and transfer copies are also charged. Backward seeks consume the nearest retained checkpoint
+and calculate only the required suffix; a retained future checkpoint can also
+serve a subsequent forward jump. If an older state has been evicted or cannot fit,
+that seek starts from raw stock, with unchanged boundary spacing. The status reports
+retained history, evictions and skipped checkpoint creation, with actual subtraction,
+meshing and checkpoint timings.
+
+Seeks are serialized and coalesced to the latest queued request. If an intermediate
+delta can be discarded, the next response replaces the entire displayed surface.
+Cancellation, Clear Plot, disconnect and stale source/setup inputs invalidate pending
+responses and terminate the worker. An unsupported occurrence stops before its
+cuts, displays the valid prefix and names the blocker; no future cut is shown.
+**Final Stock** leaves replay and calculates the final result again using the
+captured run, without backend reexecution.
 
 Algorithm version 2 replaces the occupied voxel arrays and exposed-cube mesher.
 An octree keeps fully solid/empty regions coarse, rejects disjoint cutter regions,
@@ -449,6 +505,68 @@ fine corner fields and stored intersections. Negative-inside, 1-Lipschitz fields
 provide conservative centre/radius region classification for all supported shapes.
 Convex turning envelopes precompute normalized supporting planes rather than
 repeatedly calculating segment distances and polygon containment at every sample.
+
+#### Hybrid rotational base and machined panels
+
+`WorkpieceFactory` enables `RotationalProfile` only for cylinder stock whose bound
+spindle is coaxial with the cylinder in stock coordinates (roundoff-scale
+alignment tolerance). Arbitrary spindle offsets/tilts and box stock retain the
+ordinary 3D algorithm. `SimulationInput.rotationalProfile: false` disables the
+hybrid path for controlled reference comparisons; no backend machining mode,
+pose/reference, insert orientation or capability rule is inferred or relaxed.
+
+The base profile is an axial arrangement of occupied radial intervals with linear
+boundaries. Convex conventional-turning sections subtract from that arrangement,
+including reflected signed-radius sections, bores, shoulders and conical segments.
+Line intersections split intervals where their ordering changes; adjacent equal
+slabs merge. The negative-inside base field remains the continuous difference of
+the original cylinder and accepted turning sweeps. Certified supporting-plane
+dominance avoids evaluating irrelevant convex branches without changing field
+values or analytical normals. Profile slabs, retained sweep data, temporary
+arrangements and bounded count caching participate in memory/work limits.
+
+Turning updates unrefined regions at chunk scale instead of allocating fine
+3D cells around the entire turned circumference. Milling still refines affected
+regions into the existing Hermite stock cells. When turning resumes, those cells
+receive the ordinary difference update; earlier milling holes and pockets remain
+removed. The profile is never substituted for these local 3D removals.
+Cell-centre counts use radial interval row counts with direct signed-field checks
+at numerical contacts and canonical stock-lattice coordinates. Exact-contact
+counts can differ from legacy partition-dependent floating-point counting; they
+are checked against direct fields, not rounded or silently defaulted.
+
+Constant-radius profile slabs produce certified cylindrical extrusion panels;
+radially uniform slab regions produce planar shoulder/end-face panels. These
+retain the fine transverse contour and add no axial chord error. Existing seam
+breakpoints stitch them to detailed milling intersections. Sloped, rounded,
+thin or uncertified regions retain fine reconstruction; this is not yet a general
+parametric cone/torus mesher and does not add a physical machining tolerance claim.
+The seam-discovery passes now extract only typed edge-crossing topology, not
+Hermite roots/normals that would be recomputed before final meshing. Removed
+surface chunks are explicitly evicted from the mesh cache.
+Final extraction also reuses canonical pristine corner fields and Hermite
+roots/normals within a chunk: at most 16,384 corners and 4096 edge records,
+capacity-checked before caching and cleared after extraction. Disabling
+`StockStorageOptions.cachePristineHermite` provides a fresh-evaluation reference;
+stored Float64 roots and Float32 normals remain bit-identical.
+
+#### Operation and final-mesh measurements
+
+`operationDiagnostics` groups contiguous cutting occurrences by machining mode,
+full tool/Q, start/end frame and reference. It retains motion indices, execution
+steps and available source lines; repeated execution of a source line remains
+distinct. Records include measured subtraction time, cutter distance/normal and
+material-field work, region tests, removed samples, node/refined-cell deltas,
+memory snapshots and the actual rotational/indexed/adaptive path used. History
+storage is reserved before allocation against the stock/workspace budget.
+
+`meshingAttribution` is explicitly `final-only`: a final mixed surface cannot
+honestly be assigned separate turning/milling meshing durations. The result
+instead contains per-chunk cells/panels, fine/output triangles and measured
+triangulation/adaptation times, plus all-pass extraction time and separate
+material distance/primitive/normal counters. The plot displays compact operation
+and mesh-phase summaries. Input validation, initialization and other overhead
+are not fabricated as per-operation cutting time.
 The resulting field is sign-correct and 1-Lipschitz, though not an exact Euclidean
 distance outside polygon corners. Only the necessary radial/reflected branch is
 evaluated for sections entirely on one side of the axis. Non-convex unswept sections
@@ -526,7 +644,8 @@ At 0.05 mm this allows at most 0.005 mm additional geometric deviation relative 
 the existing fine reconstructed mesh, not relative to the exact cutter or physical
 workpiece. Only certified interior manifold patches are reduced; seams, creases,
 thin/folded and unproven patches keep fine geometry. Computational stock cells
-remain fine. Adaptation can reduce surface buffers but is not itself a reduction
+remain fine where local 3D cuts require them; the rotational base remains coarse.
+Adaptation can reduce surface buffers but is not itself a reduction
 of retained subtraction nodes or stock fields. The reference mesher can disable it
 with `new StockMeshBuilder(faceLimit, { surfaceToleranceRatio: 0 })`.
 The current adaptation is a single-pass reduction of convex manifold stars, not
@@ -557,6 +676,42 @@ These are one-run local timings, not a controlled speedup or real-time guarantee
 The supplied fixture has flat mills, not a ball mill, and the binding does not
 establish physical machine calibration.
 
+The subsequent hybrid comparison executes the same prepared input with the
+hybrid disabled, then enabled, in one opt-in test process. On 2026-10-08:
+
+| Metric | 3D reference | Hybrid rotational base |
+|---|---:|---:|
+| Total | 87.4 s | 29.5 s |
+| Subtraction | 52.9 s | 6.9 s |
+| Final meshing | 34.5 s | 22.5 s |
+| Refined cells | 400,339 | 62,026 |
+| Nodes | 1,066,953 | 174,889 |
+| Surface buffers | 52,699,824 bytes | 40,701,888 bytes |
+| Peak estimated memory | 263,409,056 bytes | 77,328,164 bytes |
+
+Both completed 162 motions / 16 sweeps and removed exactly 15,891,836 samples.
+The hybrid generated 36,168 analytical panels. Its two turning operations took
+1.37 s and 0.27 s, compared with 42.11 s and 5.95 s in the 3D reference; the two
+milling operations still used local adaptive 3D removal. All-pass extraction was
+13.17 s, triangulation 4.93 s and optional adaptation 3.59 s, identifying final
+surface construction as the remaining major cost. This is one ordered local
+comparison, subject to JIT, garbage collection and shared-machine load, not a
+universal speedup. Small later diagnostic-accounting reservations can slightly
+increase the recorded memory values.
+
+The final isolated run after bounded shared-root caching and diagnostic-history
+reservations completed in 33.8 s (3.6 s subtraction, 30.2 s meshing), with
+77,360,790 bytes peak and the same counts/surface buffers. Turning operations
+totalled 0.89 s; milling operations totalled 2.68 s. Extraction remained the main
+cost at 20.67 s. Material primitive evaluations during meshing fell from
+160,829,306 to 121,759,154 with identical cached/fresh roots and normals; runtime
+variation prevents treating these separate runs as a controlled timing speedup.
+
+Set `COMPARE_STAR_REMOVAL_BENCHMARK=1` in addition to the live-benchmark environment
+variables below to run both paths. The test asserts identical removed samples,
+completion, memory capacity, more than threefold reduction in nodes/refined
+cells, and smaller surface buffers; it does not assert a fragile runtime ratio.
+
 Validation: `npm run build` passed; `npx vitest run src/services/simulation
 src/services/tools/__tests__/MaterialRemovalPreparation.test.ts
 src/services/__tests__/ExecutedProgramService.test.ts --no-file-parallelism
@@ -569,6 +724,17 @@ A subsequent repeat after adding explicit status/motion-count assertions could
 not connect to the backend (`ECONNREFUSED`); the successful run above already
 reported completed status, 162 motions and 16 volumes. No simulation code changed
 between those attempts.
+
+Final hybrid validation: the same affected-suite command above passed **180
+tests** (live benchmark skipped by default); `npm run build`, changed-file
+TypeScript/test ESLint and `git diff --check` passed. The opt-in live benchmark
+also passed completion, four operation modes/fast paths, provenance counts,
+final-mesh totals, the 256 MiB cap and the original removed-sample count.
+Tests cover exact production field/normal equality for reversed/offset spindle
+axes, direct canonical centre counts, mixed-cut preservation, exact Float32
+closed seams, cached/fresh equality, reference geometric-deviation preservation,
+fallbacks and explicit profile/history/memory work-limit failures. The existing
+fine mesher's geometric error is not recast as a 0.005 mm physical tolerance.
 
 Separately, up to 32 exact complete-field identity keys avoid recomputing identical
 posed milling cutters, analytical milling sweeps and turning envelopes. Keys encode

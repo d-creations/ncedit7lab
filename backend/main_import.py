@@ -478,6 +478,37 @@ async def api_machines():
     return list_machines()
 
 
+def build_execution_occurrences(control: Any, canal_number: int, segments: List[Dict[str, Any]]):
+    # The engine's public get_exected_nodes returns motion-aligned nodes, not all commands.
+    # Read its actual execution trace and verify the occurrence contract before publishing it.
+    canals = getattr(control, "_canals", None)
+    canal = canals.get(canal_number) if isinstance(canals, dict) else None
+    nodes = getattr(canal, "_exec_sequence", None)
+    if not isinstance(nodes, list):
+        logging.warning("Engine command history is unavailable for canal %s; replay is motion-only", canal_number)
+        return None
+    occurrences = []
+    for step, node in enumerate(nodes):
+        occurrence = {"executionStep": step}
+        line = getattr(node, "nc_code_line_nr", None)
+        if line is not None:
+            occurrence["lineNumber"] = line
+        occurrences.append(occurrence)
+    for segment in segments:
+        step = segment.get("executionStep")
+        if step is None:
+            continue
+        if (
+            isinstance(step, bool)
+            or not isinstance(step, int)
+            or step < 0
+            or step >= len(occurrences)
+            or occurrences[step].get("lineNumber") != segment.get("lineNumber")
+        ):
+            raise ValueError("Engine command history does not match motion execution occurrences")
+    return occurrences
+
+
 def build_segments_from_engine_output(canal_output: Dict[str, Any]) -> Dict[str, Any]:
     """Convert NCExecutionEngine canal output to the frontend response shape."""
     segments = []
@@ -967,6 +998,9 @@ async def cgiserver_import(request: Request):
                 canal = {"plot": canal, "programExec": []}
 
             converted = build_segments_from_engine_output(canal)
+            occurrences = build_execution_occurrences(control, idx + 1, converted["segments"])
+            if occurrences is not None:
+                converted["executionOccurrences"] = occurrences
             canal_results[canal_nr] = converted
             messages.append(f"Successfully processed canal {canal_nr}")
         except Exception as e:
@@ -1032,5 +1066,3 @@ async def get_features():
         "transfer_protocols": ["focas", "usb"] if ENABLE_TRANSFER and TRANSFER_IMPORT_OK else [],
         "cgi_path": ""  # Only relevant for main.py subprocess
     }
-
-

@@ -16,6 +16,8 @@ import { PlotService } from '@services/PlotService';
 import type { PlotMetadata, PlotResponse } from '@core/types';
 import { MaterialSimulationSession, type SimulationWorker } from '@services/simulation/MaterialSimulationSession';
 import { simulateMaterialRemoval } from '@services/simulation/MaterialRemovalEngine';
+import { MaterialReplayEngine, type ReplayFrame } from '@services/simulation/MaterialReplayEngine';
+import { MaterialReplaySession, type ReplayWorker } from '@services/simulation/MaterialReplaySession';
 
 // Exercise actual event/action wiring without constructing a browser WebGL renderer.
 interface PlotHarness extends HTMLElement {
@@ -30,6 +32,7 @@ interface PlotHarness extends HTMLElement {
   toggleMaterial(): void;
   toggleAxes(): void;
   createMaterialSimulationSession(runId: string): MaterialSimulationSession;
+  createMaterialReplaySession(runId: string): MaterialReplaySession;
 }
 
 describe('editor Plot actions', () => {
@@ -84,9 +87,189 @@ describe('editor Plot actions', () => {
   });
 
   afterEach(async () => {
+    vi.useRealTimers();
     document.body.replaceChildren();
     vi.restoreAllMocks();
     await registry.disposeAll();
+  });
+
+  async function readyReplay(): Promise<{ worker: ReplayWorker; frames: ReplayFrame[] }> {
+    const codec = new SimulationCommentCodec();
+    source.text = codec.encodeSetup({
+      machineName: 'test', material: { type: 'box', width: 4, height: 4, depth: 4 },
+    }, syntax) + '\n' + codec.encodeTool({
+      toolNumber: 1, description: 'replay mill',
+      cutting: [{ type: 'endMill', diameter: 0.8, length: 2 }],
+    }, syntax);
+    const pose = (position: [number, number, number]) => ({
+      position, orientation: [0, 0, 0, 1] as const,
+      reference: 'millingTip' as const, frameId: 'workpiece:replay',
+    });
+    const move = (executionStep: number, lineNumber: number, start: [number, number, number],
+      end: [number, number, number], traversal = 'FEED') => ({
+      geometry: 'LINEAR', traversal, sourceCode: traversal === 'RAPID' ? 'G0' : 'G1',
+      machiningMode: 'milling' as const, toolNumber: 1, lineNumber, executionStep,
+      points: [start, end].map(([x, y, z]) => ({ x, y, z })), poses: [pose(start), pose(end)],
+    });
+    requestPlot.mockResolvedValue({ canal: { '1': {
+      executionOccurrences: [
+        { executionStep: 0, lineNumber: 1 }, { executionStep: 1, lineNumber: 2 },
+        { executionStep: 2, lineNumber: 3 }, { executionStep: 3, lineNumber: 2 },
+      ],
+      segments: [
+        move(1, 2, [-1, 0, -1], [1, 0, -1]),
+        move(2, 3, [1, 0, -1], [3, 0, -1], 'RAPID'),
+        move(3, 2, [1, -1, -1], [-1, -1, -1]),
+      ],
+    } } });
+    const finalWorker: SimulationWorker = {
+      onmessage: null, onerror: null, onmessageerror: null, terminate: vi.fn(),
+      postMessage: vi.fn((input) => queueMicrotask(() =>
+        finalWorker.onmessage?.(new MessageEvent('message', {
+          data: { type: 'result', result: simulateMaterialRemoval(input) },
+        })))),
+    };
+    vi.spyOn(plot, 'createMaterialSimulationSession').mockImplementation((runId) =>
+      new MaterialSimulationSession(runId, () => finalWorker));
+    const frames: ReplayFrame[] = [];
+    let replay: MaterialReplayEngine;
+    const worker: ReplayWorker = {
+      onmessage: null, onerror: null, onmessageerror: null, terminate: vi.fn(),
+      postMessage: vi.fn((request) => queueMicrotask(() => {
+        if (request.type === 'initialize') replay = new MaterialReplayEngine(request.input, request.steps);
+        const frame = replay.seek(request.type === 'initialize' ? 0 : request.position,
+          request.type === 'initialize' || request.forceReplace);
+        frames.push(frame);
+        worker.onmessage?.(new MessageEvent('message', {
+          data: { type: 'frame', requestId: request.requestId, frame },
+        }));
+      })),
+    };
+    vi.spyOn(plot, 'createMaterialReplaySession').mockImplementation((runId) =>
+      new MaterialReplaySession(runId, () => worker));
+    selectedMode = 'simulation';
+    plot.scene = new THREE.Scene();
+    plot.plotService = new PlotService(bus);
+    render.mockRestore();
+    await plot.plotNCCode('1');
+    const button = plot.shadowRoot!.querySelector<HTMLButtonElement>('#replay-start')!;
+    expect(button.disabled).toBe(true);
+    plot.shadowRoot!.querySelector<HTMLSelectElement>('#removal-frame')!.value = 'workpiece:replay';
+    plot.shadowRoot!.querySelector<HTMLButtonElement>('#run-removal')!.click();
+    await vi.waitFor(() => expect(plot.shadowRoot!.getElementById('material-removal-status')!.textContent).toContain('Completed.'));
+    expect(button.disabled).toBe(false);
+    button.click();
+    await vi.waitFor(() => expect(plot.shadowRoot!.getElementById('replay-status')!.textContent).toContain('Initial stock'));
+    return { worker, frames };
+  }
+
+  async function expectReplayPosition(position: number): Promise<void> {
+    await vi.waitFor(() => {
+      expect(plot.shadowRoot!.querySelector<HTMLInputElement>('#replay-position')!.value).toBe(String(position));
+      expect(plot.shadowRoot!.getElementById('stock-replay')!.getAttribute('aria-busy')).toBe('false');
+    });
+  }
+
+  it('steps non-motion, cutting and rapid occurrences, keeps unchanged meshes and supports backward seeking', async () => {
+    const { worker, frames } = await readyReplay();
+    const next = plot.shadowRoot!.querySelector<HTMLButtonElement>('#replay-next')!;
+    const previous = plot.shadowRoot!.querySelector<HTMLButtonElement>('#replay-previous')!;
+    const initial = plot.scene!.children.find((child) => child.name === 'machined-stock')!;
+    next.click();
+    await expectReplayPosition(1);
+    expect(plot.shadowRoot!.getElementById('plot-status')!.textContent).toContain('non-motion command');
+    expect(plot.scene!.children.find((child) => child.name === 'machined-stock')).toBe(initial);
+    expect(frames[1].chunks).toEqual([]);
+    next.click();
+    await expectReplayPosition(2);
+    const cutMeshes = [...initial.children];
+    const removed = frames[2].removedCells;
+    next.click();
+    await expectReplayPosition(3);
+    expect(plot.shadowRoot!.getElementById('plot-status')!.textContent).toContain('rapid');
+    expect(initial.children).toEqual(cutMeshes);
+    expect(frames[3].removedCells).toBe(removed);
+    previous.click();
+    await expectReplayPosition(2);
+    expect(frames[4].replace).toBe(true);
+    expect(frames[4].removedCells).toBe(removed);
+    expect(worker.terminate).not.toHaveBeenCalled();
+    expect(requestPlot).toHaveBeenCalledOnce();
+  });
+
+  it('keeps cursor following opt-in and seeks the chosen repeated-line occurrence including state-only commands', async () => {
+    const { worker } = await readyReplay();
+    const timeline = plot.shadowRoot!.querySelector<HTMLInputElement>('#replay-position')!;
+    bus.publish(EVENT_NAMES.EDITOR_CURSOR_MOVED, { channelId: '1', lineNumber: 2, source });
+    expect(worker.postMessage).toHaveBeenCalledOnce();
+    expect(timeline.value).toBe('0');
+    const follow = plot.shadowRoot!.querySelector<HTMLInputElement>('#replay-follow')!;
+    follow.checked = true;
+    follow.dispatchEvent(new Event('change'));
+    await expectReplayPosition(2);
+    const occurrence = plot.shadowRoot!.querySelector<HTMLSelectElement>('#plot-occurrence')!;
+    expect(Array.from(occurrence.options, (option) => option.value)).toEqual(['1', '3']);
+    occurrence.value = '3';
+    occurrence.dispatchEvent(new Event('change'));
+    await expectReplayPosition(4);
+    bus.publish(EVENT_NAMES.EDITOR_CURSOR_MOVED, { channelId: '1', lineNumber: 1, source });
+    await expectReplayPosition(1);
+    expect(plot.toolObject).toBeNull();
+    expect(plot.shadowRoot!.getElementById('plot-status')!.textContent).toContain('step 0');
+    expect(requestPlot).toHaveBeenCalledOnce();
+  });
+
+  it('plays only after each stock update completes and pauses without applying later occurrences', async () => {
+    const { worker } = await readyReplay();
+    vi.useFakeTimers();
+    const play = plot.shadowRoot!.querySelector<HTMLButtonElement>('#replay-play')!;
+    play.click();
+    expect(play.textContent).toBe('Pause');
+    await vi.advanceTimersByTimeAsync(150);
+    expect(plot.shadowRoot!.querySelector<HTMLInputElement>('#replay-position')!.value).toBe('1');
+    play.click();
+    expect(play.textContent).toBe('Play');
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(worker.postMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['edit', 'clear', 'disconnect'])('cancels replay and ignores late responses after %s', async (reason) => {
+    const { worker, frames } = await readyReplay();
+    worker.postMessage = vi.fn();
+    plot.shadowRoot!.querySelector<HTMLButtonElement>('#replay-next')!.click();
+    if (reason === 'edit') {
+      source = { ...source, revision: 1, text: source.text + '\nG1 X2' };
+      bus.publish('program:content_changed', {});
+    } else if (reason === 'clear') plot.clearPlot();
+    else plot.remove();
+    expect(worker.terminate).toHaveBeenCalledOnce();
+    worker.onmessage?.(new MessageEvent('message', {
+      data: { type: 'frame', requestId: 2, frame: frames[0] },
+    }));
+    expect(plot.shadowRoot!.querySelector<HTMLInputElement>('#replay-position')!.disabled).toBe(true);
+    expect(plot.highlightObject).toBeNull();
+  });
+
+  it('reports replay worker failure and retains only the last successfully displayed stock', async () => {
+    const { worker } = await readyReplay();
+    const stock = plot.scene!.children.find((child) => child.name === 'machined-stock')!;
+    worker.postMessage = vi.fn();
+    plot.shadowRoot!.querySelector<HTMLButtonElement>('#replay-next')!.click();
+    worker.onerror?.(new ErrorEvent('error', { message: 'Replay budget exceeded' }));
+    await vi.waitFor(() => expect(plot.shadowRoot!.getElementById('replay-status')!.textContent)
+      .toContain('Replay budget exceeded'));
+    expect(plot.scene!.children.find((child) => child.name === 'machined-stock')).toBe(stock);
+    expect(worker.terminate).toHaveBeenCalledOnce();
+    expect(plot.shadowRoot!.querySelector<HTMLInputElement>('#replay-position')!.disabled).toBe(true);
+  });
+
+  it('leaves replay explicitly and computes final stock without reexecuting the program', async () => {
+    const { worker } = await readyReplay();
+    plot.shadowRoot!.querySelector<HTMLButtonElement>('#replay-final')!.click();
+    await vi.waitFor(() => expect(plot.shadowRoot!.getElementById('material-removal-status')!.textContent).toContain('Completed.'));
+    expect(worker.terminate).toHaveBeenCalledOnce();
+    expect(plot.shadowRoot!.querySelector<HTMLInputElement>('#replay-position')!.disabled).toBe(true);
+    expect(requestPlot).toHaveBeenCalledOnce();
   });
 
   it('plots with default end-mill geometry for undefined tools', async () => {

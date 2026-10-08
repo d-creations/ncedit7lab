@@ -1,4 +1,5 @@
 import type { PoseSample } from '@core/types';
+import type { StockChunkMeshDiagnostics } from './StockMeshBuilder';
 import type {
   DeepReadonly,
   ProgramMaterialDefinition,
@@ -38,6 +39,8 @@ export interface SimulationInput {
   resolutionMm: number;
   motions: RemovalMotion[];
   stop?: RemovalStop;
+  /** Defaults to true; false forces the regular 3D stock for controlled comparisons. */
+  rotationalProfile?: boolean;
 }
 
 export const SIMULATION_LIMITS = Object.freeze({
@@ -60,6 +63,59 @@ export interface StockSurfaceChunk {
   id: number;
   positions: Float32Array;
   normals: Float32Array;
+}
+
+export interface RemovalOperationMotion {
+  motionIndex: number;
+  executionStep: number;
+  lineNumber?: number;
+}
+
+/** One contiguous executed cutting operation, independent of geometric batching. */
+export interface RemovalOperationDiagnostic {
+  operationIndex: number;
+  mode: RemovalMotion['mode'];
+  tool: DeepReadonly<ProgramToolDefinition>;
+  executedQ?: number;
+  frameId: PoseSample['frameId'];
+  reference: PoseSample['reference'];
+  endFrameId: PoseSample['frameId'];
+  endReference: PoseSample['reference'];
+  firstMotionIndex: number;
+  lastMotionIndex: number;
+  motionCount: number;
+  motions: RemovalOperationMotion[];
+  /** Measured time inside stock subtraction only; excludes tool setup and final meshing. */
+  elapsedMs: number;
+  /** Observed cutter-volume distance calls, including retained cuts invoked during subtraction. */
+  fieldEvaluations: number;
+  /** Observed cutter-volume normal calls; excludes final meshing. */
+  normalEvaluations: number;
+  /** Budget callback invocations, including profile internal work, normals and BVH dispatch. */
+  cellTests: number;
+  /** Instrumented stock material-field calls, including initial material and retained cuts. */
+  materialDistanceTests?: number;
+  materialNormalTests?: number;
+  materialPrimitiveTests?: number;
+  regionTests: number;
+  samples: number;
+  removedCells: number;
+  boundaryCellsBefore: number;
+  boundaryCellsAfter: number;
+  boundaryCellsDelta: number;
+  allocatedNodesBefore: number;
+  allocatedNodesAfter: number;
+  allocatedNodesDelta: number;
+  /** Conservative stock-memory estimates including reserved diagnostics, not process heap. */
+  stockBytesBefore: number;
+  stockBytesAfter: number;
+  fastPath: 'adaptive' | 'rotational' | 'indexed-ball' | 'mixed';
+  rotationalFastPath: boolean;
+  rotationalFastPathSubtractions: number;
+  rotationalProfileUpdates: number;
+  indexedBatches: number;
+  indexedPrimitiveTests: number;
+  indexedBoundTests: number;
 }
 
 export interface SimulationResult {
@@ -91,6 +147,30 @@ export interface SimulationResult {
   surfaceAdaptationSkippedChunks?: number;
   peakSurfaceIntersectionCacheEntries?: number;
   peakSubtractionCornerCacheEntries?: number;
+  operationDiagnostics?: RemovalOperationDiagnostic[];
+  /** meshingMs is a single final build, never apportioned to cutting operations. */
+  meshingAttribution?: 'final-only';
+  rotationalFastPathSubtractions?: number;
+  rotationalProfileUpdates?: number;
+  /** Actual final-build chunk records; never attributed or divided among cutting operations. */
+  meshingDiagnostics?: readonly StockChunkMeshDiagnostics[];
+  extractionMs?: number;
+  triangulationMs?: number;
+  adaptationMs?: number;
+  meshedCells?: number;
+  analyticalPanels?: number;
+  fineTriangles?: number;
+  outputTriangles?: number;
+  /** Cumulative instrumented material-field calls, including initialization and final mesh. */
+  materialDistanceTests?: number;
+  materialNormalTests?: number;
+  materialPrimitiveTests?: number;
+  subtractionMaterialDistanceTests?: number;
+  subtractionMaterialNormalTests?: number;
+  subtractionMaterialPrimitiveTests?: number;
+  meshingMaterialDistanceTests?: number;
+  meshingMaterialNormalTests?: number;
+  meshingMaterialPrimitiveTests?: number;
 }
 
 export type SimulationWorkerMessage =

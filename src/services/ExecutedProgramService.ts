@@ -120,6 +120,9 @@ export class ExecutedProgramService {
     const plotMetadata = structuredClone({
       points: results.flatMap((result) => result.plotMetadata?.points ?? []),
       segments: results.flatMap((result) => result.plotMetadata?.segments ?? []),
+      ...(results.some((result) => result.plotMetadata?.executionOccurrences !== undefined) ? {
+        executionOccurrences: results.flatMap((result) => result.plotMetadata?.executionOccurrences ?? []),
+      } : {}),
       removalStops: results.flatMap((result) => result.plotMetadata?.removalStops ?? []),
     });
     const run = freezeMetadata({
@@ -378,6 +381,13 @@ export class ExecutedProgramService {
         }
 
         const canal = canalData[canalNr];
+
+        if (canal.executionOccurrences) {
+          result.plotMetadata!.executionOccurrences ??= [];
+          result.plotMetadata!.executionOccurrences.push(...canal.executionOccurrences.map(
+            (occurrence) => ({ ...occurrence, channelId: canalNr as ChannelId }),
+          ));
+        }
 
         // Parse executed lines
         if (canal.executedLines && Array.isArray(canal.executedLines)) {

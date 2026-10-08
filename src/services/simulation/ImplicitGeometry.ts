@@ -14,6 +14,12 @@ export interface IntervalCoverage {
 /** Negative inside; fields must be 1-Lipschitz for conservative region classification. */
 export interface ImplicitVolume {
   bounds: THREE.Box3;
+  rotationalSection?: {
+    spindleOrigin: THREE.Vector3;
+    spindleAxis: THREE.Vector3;
+    polygon: readonly THREE.Vector2[];
+    planes?: readonly { x: number; y: number; offset: number }[];
+  };
   /** Ball translations in a shared rotation-only cutter frame. */
   ballBounds?: {
     frame: THREE.Matrix4;

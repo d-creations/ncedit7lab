@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { SIMULATION_LIMITS } from './SimulationTypes';
+import type { RotationalProfile } from './RotationalProfile';
 import {
   CELL_CORNERS,
   CELL_EDGES,
@@ -18,6 +19,14 @@ export interface StockStorageOptions {
   internBoundaryFields?: boolean;
   sparseBoundaryNormals?: boolean;
   sparseBoundaryRoots?: boolean;
+  cachePristineHermite?: boolean;
+}
+
+interface PristineHermiteCache {
+  corners: Map<number, number>;
+  edges: Map<string, { root: number; normal: readonly [number, number, number] }>;
+  bytes: number;
+  canGrow(bytes: number): boolean;
 }
 
 interface StockNode {
@@ -53,13 +62,20 @@ interface SharedBoundaryData {
   edgeMask?: number;
 }
 
-export interface BoundaryCell {
+export interface BoundaryCoordinates {
   x: number;
   y: number;
   z: number;
+  span?: readonly [number, number, number];
+}
+
+export interface BoundaryTopology extends BoundaryCoordinates {
+  crossedEdges: number;
+}
+
+export interface BoundaryCell extends BoundaryCoordinates {
   data: Float64Array;
   normals: Float32Array;
-  span?: readonly [number, number, number];
   /** Packed normals contain only crossed edges, in ascending edge order. */
   normalMask?: number;
   /** Packed data: eight corners, centre, then finite roots in edge order. */
@@ -126,6 +142,10 @@ export class StockModel {
   private peakBytes = 0;
   private surfaceDataBytes = 0;
   private subtractionWorkspaceBytes = 0;
+  private diagnosticBytes = 0;
+  private replayWorkspaceBytes = 0;
+  private readonly sourceMaterial: ImplicitVolume;
+  private profileCountTest: () => void = () => {};
   private readonly coverage: NonNullable<ImplicitVolume['axialCoverage']>[] = [];
   private readonly completedVolumes: string[] = [];
   private readonly sharedFields = new Map<number, SharedBoundaryData[]>();
@@ -137,6 +157,15 @@ export class StockModel {
   coveredRegions = 0;
   pristineSurfaceCells = 0;
   peakCornerCacheEntries = 0;
+  materialDistanceTests = 0;
+  materialNormalTests = 0;
+  boundaryExtractionMs = 0;
+  peakPristineHermiteCacheEntries = 0;
+  releaseReplayHistory?: (requiredBytes: number) => number;
+
+  get materialPrimitiveTests(): number {
+    return this.profile?.distancePrimitiveTests ?? this.materialDistanceTests;
+  }
 
   constructor(
     readonly size: readonly [number, number, number],
@@ -144,7 +173,10 @@ export class StockModel {
     material: ImplicitVolume,
     private readonly limits: StockLimits = SIMULATION_LIMITS,
     private readonly storage: StockStorageOptions = {},
+    private profile?: RotationalProfile,
+    snapshot?: StockModel,
   ) {
+    this.sourceMaterial = material;
     if (!Number.isFinite(resolutionMm) || resolutionMm < 0.05 || resolutionMm > 5)
       throw new Error('Voxel resolution must be between 0.05 and 5 mm');
     if (size.some((value) => !Number.isFinite(value) || value <= 0))
@@ -163,10 +195,133 @@ export class StockModel {
     this.chunkDimensions = this.dimensions.map((value) =>
       Math.ceil((value + 2) / this.chunkSize),
     ) as [number, number, number];
-    this.material = material;
+    this.material = {
+      ...material,
+      get extrusion() {
+        return material.extrusion;
+      },
+      distance: (point) => {
+        this.materialDistanceTests++;
+        const distance = material.distance(point);
+        if (this.materialPrimitiveTests > SIMULATION_LIMITS.cellTests)
+          throw new Error('Stock field evaluation budget exceeded; use coarser boundary spacing');
+        if (!Number.isFinite(distance)) throw new Error('Non-finite stock distance field');
+        return distance;
+      },
+      normal: material.normal
+        ? (point, target) => {
+            this.materialNormalTests++;
+            const result = material.normal!(point, target);
+            if (this.materialPrimitiveTests > SIMULATION_LIMITS.cellTests)
+              throw new Error(
+                'Stock field evaluation budget exceeded; use coarser boundary spacing',
+              );
+            return result;
+          }
+        : undefined,
+    };
     this.intersectionTolerance = Math.min(resolutionMm * 2 ** -24, 1e-7);
-    this.root = this.createNode(0, 0, 0, this.latticeSide);
-    this.initialCells = this.root.occupied;
+    this.root = snapshot
+      ? this.copyNodes(snapshot)
+      : this.createNode(0, 0, 0, this.latticeSide);
+    this.initialCells = snapshot?.initialCells ?? this.root.occupied;
+    this.budget();
+  }
+
+  get checkpointWorkspaceBytes(): number {
+    return this.allocatedBytes + this.nodeCount * 96 + this.boundary.size * 128;
+  }
+
+  fork(): StockModel {
+    const profile = this.profile?.fork();
+    return new StockModel(
+      this.size, this.resolutionMm, profile?.volume ?? this.sourceMaterial,
+      this.limits, this.storage, profile, this,
+    );
+  }
+
+  private copyNodes(snapshot: StockModel): StockNode {
+    const nodes = new Map<StockNode, StockNode>();
+    const fields = new Map<Float64Array, Float64Array>();
+    const normals = new Map<Float32Array, Float32Array>();
+    const copyNode = (node: StockNode): StockNode => {
+      const copy: StockNode = {
+        x: node.x, y: node.y, z: node.z, span: node.span,
+        state: node.state, occupied: node.occupied,
+        normalMask: node.normalMask, edgeMask: node.edgeMask,
+      };
+      nodes.set(node, copy);
+      if (node.data) {
+        let data = fields.get(node.data);
+        if (!data) fields.set(node.data, data = node.data.slice());
+        copy.data = data;
+      }
+      if (node.normals) {
+        let data = normals.get(node.normals);
+        if (!data) normals.set(node.normals, data = node.normals.slice());
+        copy.normals = data;
+      }
+      copy.children = node.children?.map(copyNode);
+      if (copy.state === 'boundary') this.boundary.set(this.id(copy.x, copy.y, copy.z), copy);
+      if (copy.state === 'pristine') this.pristine.add(copy);
+      if (copy.state === 'boundary' || copy.state === 'pristine')
+        this.dirtyChunks.add(this.chunkId(copy.x, copy.y, copy.z));
+      return copy;
+    };
+    const root = copyNode(snapshot.root);
+    const sharedFields = new Map<SharedBoundaryData, SharedBoundaryData>();
+    const sharedNormals = new Map<SharedNormals, SharedNormals>();
+    for (const [hash, bucket] of snapshot.sharedFields) {
+      this.sharedFields.set(hash, bucket.map((entry) => {
+        const copy: SharedBoundaryData = {
+          ...entry, data: fields.get(entry.data)!,
+          normals: entry.normals ? normals.get(entry.normals) : undefined,
+          owner: entry.owner ? nodes.get(entry.owner) : undefined,
+        };
+        sharedFields.set(entry, copy);
+        return copy;
+      }));
+    }
+    for (const [hash, bucket] of snapshot.normalFields) {
+      this.normalFields.set(hash, bucket.map((entry) => {
+        const copy: SharedNormals = {
+          ...entry, normals: normals.get(entry.normals)!,
+          owner: entry.owner ? nodes.get(entry.owner) : undefined,
+        };
+        sharedNormals.set(entry, copy);
+        return copy;
+      }));
+    }
+    for (const [node, copy] of nodes) {
+      copy.shared = node.shared ? sharedFields.get(node.shared) : undefined;
+      copy.sharedNormals = node.sharedNormals ? sharedNormals.get(node.sharedNormals) : undefined;
+    }
+    for (const [entry, owner] of snapshot.fieldCandidates)
+      this.fieldCandidates.set(sharedFields.get(entry)!, nodes.get(owner)!);
+    for (const [entry, owner] of snapshot.normalCandidates)
+      this.normalCandidates.set(sharedNormals.get(entry)!, nodes.get(owner)!);
+    this.coverage.push(...snapshot.coverage.map((entry) => ({ ...entry, axis: entry.axis.clone() })));
+    this.completedVolumes.push(...snapshot.completedVolumes);
+    this.nodeCount = snapshot.nodeCount;
+    this.dataBytes = snapshot.dataBytes;
+    this.diagnosticBytes = snapshot.diagnosticBytes;
+    this.regionTests = snapshot.regionTests;
+    this.bulkRemovedRegions = snapshot.bulkRemovedRegions;
+    this.coveredRegions = snapshot.coveredRegions;
+    return root;
+  }
+
+  setReplayWorkspaceBytes(bytes: number): void {
+    if (!Number.isSafeInteger(bytes) || bytes < 0)
+      throw new Error('Invalid replay workspace estimate');
+    this.replayWorkspaceBytes = bytes;
+    this.budget();
+  }
+
+  resetQueryCounters(): void {
+    this.materialDistanceTests = 0;
+    this.materialNormalTests = 0;
+    this.profile?.resetQueryCounters();
   }
 
   get remainingCells(): number {
@@ -181,7 +336,9 @@ export class StockModel {
       this.nodeCount * NODE_BYTES +
       this.dataBytes +
       this.coverage.length * 2304 +
-      this.completedVolumes.length * 2176
+      this.completedVolumes.length * 2176 +
+      (this.profile?.allocatedBytes ?? 0) +
+      this.diagnosticBytes
     );
   }
   get boundaryCells(): number {
@@ -195,7 +352,14 @@ export class StockModel {
   }
 
   private budget(extraBytes = 0): void {
-    const bytes = this.allocatedBytes + this.subtractionWorkspaceBytes + extraBytes;
+    let bytes = this.allocatedBytes + this.subtractionWorkspaceBytes + this.replayWorkspaceBytes + extraBytes;
+    if (bytes > this.limits.stockBytes && this.releaseReplayHistory) {
+      const released = this.releaseReplayHistory(bytes - this.limits.stockBytes);
+      if (!Number.isSafeInteger(released) || released < 0 || released > this.replayWorkspaceBytes)
+        throw new Error('Invalid released replay history estimate');
+      this.replayWorkspaceBytes -= released;
+      bytes -= released;
+    }
     this.peakBytes = Math.max(this.peakBytes, bytes);
     if (this.nodeCount > this.limits.cells) throw new Error('Adaptive stock cell budget exceeded');
     if (bytes > this.limits.stockBytes)
@@ -209,12 +373,23 @@ export class StockModel {
     this.budget(this.surfaceDataBytes + bytes);
   }
 
+  reserveDiagnosticBytes(bytes: number): void {
+    if (
+      !Number.isSafeInteger(bytes) ||
+      bytes < 0 ||
+      !Number.isSafeInteger(this.diagnosticBytes + bytes)
+    )
+      throw new Error('Invalid operation diagnostic workspace estimate');
+    this.budget(this.surfaceDataBytes + bytes);
+    this.diagnosticBytes += bytes;
+  }
+
   canAccountSurfaceWorkspace(bytes: number): boolean {
     if (!Number.isSafeInteger(bytes) || bytes < 0)
       throw new Error('Invalid surface workspace estimate');
     return (
       this.nodeCount <= this.limits.cells &&
-      this.allocatedBytes + this.subtractionWorkspaceBytes + this.surfaceDataBytes + bytes <=
+      this.allocatedBytes + this.subtractionWorkspaceBytes + this.replayWorkspaceBytes + this.surfaceDataBytes + bytes <=
         this.limits.stockBytes
     );
   }
@@ -255,7 +430,17 @@ export class StockModel {
       const first = this.point(x + 0.5, y + 0.5, z + 0.5);
       if (!this.material.countCentres)
         throw new Error('Initial stock requires an analytical cell-centre counter');
-      node.occupied = this.material.countCentres(first, span, this.resolutionMm);
+      node.occupied = this.profile?.updates
+        ? this.profile.countRegion(
+            x,
+            y,
+            z,
+            span,
+            this.resolutionMm,
+            this.latticeMinimum,
+            this.profileCountTest,
+          )
+        : this.material.countCentres(first, span, this.resolutionMm);
       this.pristine.add(node);
       this.dirtyChunks.add(this.chunkId(x, y, z));
     } else {
@@ -432,6 +617,7 @@ export class StockModel {
     y: number,
     z: number,
     span: readonly [number, number, number] = [1, 1, 1],
+    cache?: PristineHermiteCache,
   ): BoundaryCell {
     const data = new Float64Array(CENTRE + 1);
     const normals = new Float32Array(CELL_EDGES.length * 3);
@@ -440,10 +626,33 @@ export class StockModel {
       this.point(x + dx * span[0], y + dy * span[1], z + dz * span[2]),
     );
     corners.forEach((point, index) => {
-      data[index] = this.material.distance(point);
+      const [dx, dy, dz] = CELL_CORNERS[index];
+      const side = this.latticeSide + 1;
+      const key = x + dx * span[0] + side * (y + dy * span[1] + side * (z + dz * span[2]));
+      const cached = cache?.corners.get(key);
+      data[index] = cached ?? this.material.distance(point);
+      if (
+        cached === undefined &&
+        cache &&
+        cache.corners.size < MAX_CACHED_CORNERS &&
+        cache.canGrow(64)
+      ) {
+        cache.corners.set(key, data[index]);
+        cache.bytes += 64;
+      }
     });
     for (const [index, [a, b]] of CELL_EDGES.entries()) {
       if (data[a] < 0 === data[b] < 0) continue;
+      const first = CELL_CORNERS[a],
+        last = CELL_CORNERS[b];
+      const axis = first.findIndex((coordinate, i) => coordinate !== last[i]);
+      const key = `${x + first[0] * span[0]},${y + first[1] * span[1]},${z + first[2] * span[2]}:${axis}:${span[axis]}`;
+      const cached = cache?.edges.get(key);
+      if (cached) {
+        data[8 + index] = cached.root;
+        normals.set(cached.normal, index * 3);
+        continue;
+      }
       const point = new THREE.Vector3();
       data[8 + index] = edgeRoot(
         data[a],
@@ -453,6 +662,17 @@ export class StockModel {
       );
       point.copy(corners[a]).lerp(corners[b], data[8 + index]);
       surfaceNormal(this.material, point, this.resolutionMm * 1e-4).toArray(normals, index * 3);
+      if (cache && cache.edges.size < 4096 && cache.canGrow(256)) {
+        cache.edges.set(key, {
+          root: data[8 + index],
+          normal: [normals[index * 3], normals[index * 3 + 1], normals[index * 3 + 2]],
+        });
+        cache.bytes += 256;
+        this.peakPristineHermiteCacheEntries = Math.max(
+          this.peakPristineHermiteCacheEntries,
+          cache.edges.size,
+        );
+      }
     }
     data[CENTRE] = this.material.distance(
       this.point(x + span[0] / 2, y + span[1] / 2, z + span[2] / 2),
@@ -548,6 +768,24 @@ export class StockModel {
   }
 
   subtract(volume: ImplicitVolume, test: () => void): void {
+    this.subtractVolume(volume, test, false);
+  }
+
+  get rotationalProfileUpdates(): number {
+    return this.profile?.updates ?? 0;
+  }
+
+  subtractTurning(volume: ImplicitVolume, test: () => void): boolean {
+    if (!this.profile || !this.profile.canApply(volume)) {
+      this.subtract(volume, test);
+      return false;
+    }
+    this.profile.apply(volume, (bytes) => this.budget(bytes));
+    this.subtractVolume(volume, test, true);
+    return true;
+  }
+
+  private subtractVolume(volume: ImplicitVolume, test: () => void, rotational: boolean): void {
     if (volume.identity && this.completedVolumes.includes(volume.identity)) {
       this.coveredRegions++;
       return;
@@ -635,6 +873,22 @@ export class StockModel {
       if (distance < -radius) {
         this.release(node, true);
         this.bulkRemovedRegions++;
+        return;
+      }
+      if (rotational && !node.children && !node.data && node.span <= this.chunkSize) {
+        node.state = 'pristine';
+        node.occupied = this.profile!.countRegion(
+          node.x,
+          node.y,
+          node.z,
+          node.span,
+          this.resolutionMm,
+          this.latticeMinimum,
+          test,
+        );
+        this.pristine.add(node);
+        this.dirtyChunks.add(this.chunkId(node.x, node.y, node.z));
+        this.budget();
         return;
       }
       if (node.span > 1) {
@@ -748,6 +1002,7 @@ export class StockModel {
       this.shareFields(node);
     };
     try {
+      this.profileCountTest = test;
       update(this.root);
       const certificate = volume.axialCoverage ?? volume.sweepCoverage;
       if (certificate && certificate.key.length <= 1024) {
@@ -762,6 +1017,7 @@ export class StockModel {
       }
     } finally {
       this.subtractionWorkspaceBytes = 0;
+      this.profileCountTest = () => {};
     }
   }
 
@@ -835,6 +1091,57 @@ export class StockModel {
     onlyChunks?: ReadonlySet<number>,
     retainedWorkspace: () => number = () => 0,
   ): IterableIterator<readonly [number, BoundaryCell[]]> {
+    yield* this.iterateSurfaceChunks(onlyChunks, retainedWorkspace, (boundary, pristine, bytes) =>
+      this.collectBoundaryChunks(boundary, pristine, undefined, bytes, retainedWorkspace, true),
+    );
+  }
+
+  *iterateBoundaryTopology(
+    onlyChunks?: ReadonlySet<number>,
+    retainedWorkspace: () => number = () => 0,
+  ): IterableIterator<readonly [number, BoundaryTopology[]]> {
+    yield* this.iterateSurfaceChunks(onlyChunks, retainedWorkspace, (boundary, pristine, bytes) =>
+      this.collectSurfaceChunks<BoundaryTopology>(
+        boundary,
+        pristine,
+        {
+          fromNode: (node) => {
+            let crossedEdges = node.edgeMask ?? 0;
+            if (node.edgeMask === undefined)
+              CELL_EDGES.forEach((_, edge) => {
+                if (Number.isFinite(node.data![8 + edge])) crossedEdges |= 1 << edge;
+              });
+            return { x: node.x, y: node.y, z: node.z, crossedEdges };
+          },
+          at: (x, y, z, span = [1, 1, 1]) => {
+            const fields = CELL_CORNERS.map(([dx, dy, dz]) =>
+              this.material.distance(
+                this.point(x + dx * span[0], y + dy * span[1], z + dz * span[2]),
+              ),
+            );
+            let crossedEdges = 0;
+            CELL_EDGES.forEach(([a, b], edge) => {
+              if (fields[a] < 0 !== fields[b] < 0) crossedEdges |= 1 << edge;
+            });
+            return { x, y, z, span, crossedEdges };
+          },
+          hasEdges: (cell) => cell.crossedEdges !== 0,
+          bytes: () => 160,
+        },
+        undefined,
+        bytes,
+        retainedWorkspace,
+        true,
+      ),
+    );
+  }
+
+  private *iterateSurfaceChunks<T extends BoundaryCoordinates>(
+    onlyChunks: ReadonlySet<number> | undefined,
+    retainedWorkspace: () => number,
+    collect: (boundary: StockNode[], pristine: StockNode[], bytes: number) => Map<number, T[]>,
+  ): IterableIterator<readonly [number, T[]]> {
+    const groupingStarted = performance.now();
     const groups = new Map<number, { boundary: StockNode[]; pristine: StockNode[] }>();
     let groupBytes = 0;
     this.pristineSurfaceCells = 0;
@@ -854,16 +1161,12 @@ export class StockModel {
       };
       for (const node of this.boundary.values()) if (node.data!.length !== 9) add(node, 'boundary');
       for (const node of this.pristine) add(node, 'pristine');
+      this.boundaryExtractionMs += performance.now() - groupingStarted;
       for (const [id, group] of groups) {
         this.surfaceDataBytes = groupBytes;
-        const cells = this.collectBoundaryChunks(
-          group.boundary,
-          group.pristine,
-          undefined,
-          groupBytes,
-          retainedWorkspace,
-          true,
-        ).get(id);
+        const extractionStarted = performance.now();
+        const cells = collect(group.boundary, group.pristine, groupBytes).get(id);
+        this.boundaryExtractionMs += performance.now() - extractionStarted;
         if (cells?.length) yield [id, cells];
         groups.delete(id);
         groupBytes -= 320 + 16 * (group.boundary.length + group.pristine.length);
@@ -882,9 +1185,68 @@ export class StockModel {
     externalWorkspace: () => number = () => 0,
     accountWrappers = false,
   ): Map<number, BoundaryCell[]> {
-    const chunks = new Map<number, BoundaryCell[]>();
+    const cache: PristineHermiteCache | undefined =
+      this.storage.cachePristineHermite === false
+        ? undefined
+        : {
+            corners: new Map(),
+            edges: new Map(),
+            bytes: 0,
+            canGrow: (bytes) => {
+              const workspace = externalWorkspace() + (cache?.bytes ?? 0) + bytes + 8192;
+              if (!this.canAccountSurfaceWorkspace(workspace)) return false;
+              this.accountSurfaceWorkspace(workspace);
+              return true;
+            },
+          };
+    try {
+      return this.collectSurfaceChunks<BoundaryCell>(
+        boundary,
+        pristine,
+        {
+          fromNode: (node) => ({
+            x: node.x,
+            y: node.y,
+            z: node.z,
+            data: node.data!,
+            normals: node.normals!,
+            normalMask: node.normalMask,
+            edgeMask: node.edgeMask,
+          }),
+          at: (x, y, z, span) => this.boundaryData(x, y, z, span, cache),
+          hasEdges: (cell) =>
+            CELL_EDGES.some((_, edge) => Number.isFinite(boundaryEdgeRoot(cell, edge))),
+          bytes: (cell) => cell.data.byteLength + cell.normals.byteLength + 160,
+        },
+        onlyChunks,
+        retainedWorkspace,
+        () => externalWorkspace() + (cache?.bytes ?? 0),
+        accountWrappers,
+      );
+    } finally {
+      cache?.corners.clear();
+      cache?.edges.clear();
+    }
+  }
+
+  private collectSurfaceChunks<T extends BoundaryCoordinates>(
+    boundary: Iterable<StockNode>,
+    pristine: Iterable<StockNode>,
+    factory: {
+      fromNode(node: StockNode): T;
+      at(x: number, y: number, z: number, span?: readonly [number, number, number]): T;
+      hasEdges(cell: T): boolean;
+      bytes(cell: T): number;
+    },
+    onlyChunks?: ReadonlySet<number>,
+    retainedWorkspace = 0,
+    externalWorkspace: () => number = () => 0,
+    accountWrappers = false,
+  ): Map<number, T[]> {
+    const chunks = new Map<number, T[]>();
     let temporaryBytes = 0;
-    const add = (cell: BoundaryCell): void => {
+    this.surfaceDataBytes = retainedWorkspace;
+    const add = (cell: T): void => {
       const id = this.chunkId(cell.x, cell.y, cell.z);
       const cells = chunks.get(id) ?? [];
       cells.push(cell);
@@ -895,17 +1257,10 @@ export class StockModel {
       if (node.data!.length === 9) continue;
       if (accountWrappers) {
         temporaryBytes += 160;
+        this.surfaceDataBytes = retainedWorkspace + temporaryBytes;
         this.budget(retainedWorkspace + temporaryBytes + externalWorkspace());
       }
-      add({
-        x: node.x,
-        y: node.y,
-        z: node.z,
-        data: node.data!,
-        normals: node.normals!,
-        normalMask: node.normalMask,
-        edgeMask: node.edgeMask,
-      });
+      add(factory.fromNode(node));
     }
     const visitPristine = (x: number, y: number, z: number, span: number): void => {
       const half = span / 2;
@@ -916,9 +1271,10 @@ export class StockModel {
           visitPristine(x + dx * half, y + dy * half, z + dz * half, half);
         return;
       }
-      const cell = this.boundaryData(x, y, z);
-      if (CELL_EDGES.every((_, index) => !Number.isFinite(cell.data[8 + index]))) return;
-      temporaryBytes += cell.data.byteLength + cell.normals.byteLength + 160;
+      const cell = factory.at(x, y, z);
+      if (!factory.hasEdges(cell)) return;
+      temporaryBytes += factory.bytes(cell);
+      this.surfaceDataBytes = retainedWorkspace + temporaryBytes;
       this.budget(retainedWorkspace + temporaryBytes + externalWorkspace());
       add(cell);
       this.pristineSurfaceCells++;
@@ -943,9 +1299,10 @@ export class StockModel {
               const centre = this.point(x + span[0] / 2, y + span[1] / 2, z + span[2] / 2);
               if (Math.abs(this.material.distance(centre)) > Math.SQRT1_2 * this.resolutionMm)
                 continue;
-              const cell = this.boundaryData(x, y, z, span);
-              if (CELL_EDGES.every((_, index) => !Number.isFinite(cell.data[8 + index]))) continue;
-              temporaryBytes += cell.data.byteLength + cell.normals.byteLength + 160;
+              const cell = factory.at(x, y, z, span);
+              if (!factory.hasEdges(cell)) continue;
+              temporaryBytes += factory.bytes(cell);
+              this.surfaceDataBytes = retainedWorkspace + temporaryBytes;
               this.budget(retainedWorkspace + temporaryBytes + externalWorkspace());
               this.pristineSurfaceCells++;
               add(cell);

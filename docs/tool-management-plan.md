@@ -534,9 +534,41 @@ coarse computational-octree refinement. Its projected-overlay certificate contro
 the full reference patch, not just a QEF residual or a few sampled vertices.
 Canonical intersection caching is local to the current output chunk, retaining
 the same lattice arithmetic and Float32 rounding on both sides of each seam.
+Boundary extraction groups node references once per pass and materializes only
+one chunk's boundary wrappers and pristine panels at a time. Separate bounded
+passes discover coarse seam keys, collect fine breakpoints and build changed
+chunks. Completed groups release their references; extraction includes retained
+surface/seam memory in capacity checks and resets workspace on completion or
+early termination. This avoids retaining every fine boundary wrapper during
+meshing without changing subtraction or boundary spacing.
 If optional reduction cannot fit its workspace, that chunk retains the original
 fine mesh instead; the result and plot status report how many chunks were kept
 fine. Core stock, staging, output and triangle budget failures remain explicit.
+
+The supplied mixed turning/flat-end-milling regression was executed through the
+local backend with `FANUC_STAR_SR20R_IV_B`, identity stock binding in
+`workpiece:mainSpindle`, and 0.05 mm boundary spacing. It completed all 162 prepared
+motion pairs using 16 swept volumes, removing the same 15,891,836 centre samples
+as the earlier high-memory reference. On the 2026-10-08 run, peak estimated
+stock/workspace/output memory was 262,607,008 bytes (250.4 MiB), below the unchanged
+256 MiB cap; retained stock was 207,045,964 bytes and surface buffers were
+52,699,824 bytes. Removal took 38.9 s (26.6 s subtraction, 12.3 s meshing).
+These are one-run local timings, not a controlled speedup or real-time guarantee.
+The supplied fixture has flat mills, not a ball mill, and the binding does not
+establish physical machine calibration.
+
+Validation: `npm run build` passed; `npx vitest run src/services/simulation
+src/services/tools/__tests__/MaterialRemovalPreparation.test.ts
+src/services/__tests__/ExecutedProgramService.test.ts --no-file-parallelism
+--testTimeout=30000` passed 160 tests, with the live benchmark skipped by default.
+With `RUN_STAR_REMOVAL_BENCHMARK=1` and the existing local backend credential in
+`NC_EDIT_BENCHMARK_API_KEY`, `npx vitest run
+src/services/simulation/__tests__/StarMixedRemoval.benchmark.test.ts --silent=false
+--reporter=verbose` passed the actual-program memory and removed-sample checks.
+A subsequent repeat after adding explicit status/motion-count assertions could
+not connect to the backend (`ECONNREFUSED`); the successful run above already
+reported completed status, 162 motions and 16 volumes. No simulation code changed
+between those attempts.
 
 Separately, up to 32 exact complete-field identity keys avoid recomputing identical
 posed milling cutters, analytical milling sweeps and turning envelopes. Keys encode

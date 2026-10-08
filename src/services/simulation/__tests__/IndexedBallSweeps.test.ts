@@ -186,6 +186,16 @@ describe('spatially indexed ball-sweep batches', () => {
     expect(stock.canAccountSurfaceWorkspace(0)).toBe(true);
   });
 
+  it('includes retained mesh memory while extracting streamed chunks', () => {
+    const limits = { ...SIMULATION_LIMITS };
+    const stock = new StockModel([3, 3, 3], 0.1, boxVolume([3, 3, 3]), limits);
+    const retained = limits.stockBytes - stock.allocatedBytes;
+    expect(() => [...stock.iterateBoundaryChunks(undefined, () => retained)]).toThrow(
+      'memory budget',
+    );
+    expect(stock.canAccountSurfaceWorkspace(0)).toBe(true);
+  });
+
   it('preserves reversals, tool changes, rotary fallback, stops and original occurrence progress', () => {
     const paths = raster(2, 4);
     paths.push(motion(new THREE.Vector3(-1, 0, 0.3), new THREE.Vector3(1, 0, 0.3)));

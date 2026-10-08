@@ -833,6 +833,7 @@ export class StockModel {
 
   *iterateBoundaryChunks(
     onlyChunks?: ReadonlySet<number>,
+    retainedWorkspace: () => number = () => 0,
   ): IterableIterator<readonly [number, BoundaryCell[]]> {
     const groups = new Map<number, { boundary: StockNode[]; pristine: StockNode[] }>();
     let groupBytes = 0;
@@ -844,7 +845,7 @@ export class StockModel {
         if (onlyChunks && !onlyChunks.has(id)) return;
         let group = groups.get(id);
         groupBytes += 16 + (group ? 0 : 320);
-        this.budget(groupBytes);
+        this.budget(groupBytes + retainedWorkspace());
         if (!group) {
           group = { boundary: [], pristine: [] };
           groups.set(id, group);
@@ -860,6 +861,8 @@ export class StockModel {
           group.pristine,
           undefined,
           groupBytes,
+          retainedWorkspace,
+          true,
         ).get(id);
         if (cells?.length) yield [id, cells];
         groups.delete(id);
@@ -876,6 +879,8 @@ export class StockModel {
     pristine: Iterable<StockNode>,
     onlyChunks?: ReadonlySet<number>,
     retainedWorkspace = 0,
+    externalWorkspace: () => number = () => 0,
+    accountWrappers = false,
   ): Map<number, BoundaryCell[]> {
     const chunks = new Map<number, BoundaryCell[]>();
     let temporaryBytes = 0;
@@ -888,6 +893,10 @@ export class StockModel {
     for (const node of boundary) {
       if (onlyChunks && !onlyChunks.has(this.chunkId(node.x, node.y, node.z))) continue;
       if (node.data!.length === 9) continue;
+      if (accountWrappers) {
+        temporaryBytes += 160;
+        this.budget(retainedWorkspace + temporaryBytes + externalWorkspace());
+      }
       add({
         x: node.x,
         y: node.y,
@@ -910,7 +919,7 @@ export class StockModel {
       const cell = this.boundaryData(x, y, z);
       if (CELL_EDGES.every((_, index) => !Number.isFinite(cell.data[8 + index]))) return;
       temporaryBytes += cell.data.byteLength + cell.normals.byteLength + 160;
-      this.budget(retainedWorkspace + temporaryBytes);
+      this.budget(retainedWorkspace + temporaryBytes + externalWorkspace());
       add(cell);
       this.pristineSurfaceCells++;
     };
@@ -937,7 +946,7 @@ export class StockModel {
               const cell = this.boundaryData(x, y, z, span);
               if (CELL_EDGES.every((_, index) => !Number.isFinite(cell.data[8 + index]))) continue;
               temporaryBytes += cell.data.byteLength + cell.normals.byteLength + 160;
-              this.budget(retainedWorkspace + temporaryBytes);
+              this.budget(retainedWorkspace + temporaryBytes + externalWorkspace());
               this.pristineSurfaceCells++;
               add(cell);
             }

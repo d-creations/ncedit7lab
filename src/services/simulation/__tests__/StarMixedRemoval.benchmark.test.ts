@@ -77,7 +77,11 @@ describe.skipIf(import.meta.env.RUN_STAR_REMOVAL_BENCHMARK !== '1')(
           `Removal preparation failed: ${JSON.stringify(run.materialRemoval?.diagnostics)}`,
         );
       const result = simulateMaterialRemoval(simulation);
+      expect(result.status).toBe('completed');
+      expect(result.stop).toBeUndefined();
+      expect(simulation.motions.length).toBe(162);
       expect(result.processedMotions).toBe(simulation.motions.length);
+      expect(result.samples).toBe(16);
       expect(result.chunks.length).toBeGreaterThan(0);
       expect(SIMULATION_LIMITS.stockBytes).toBe(256 * 1024 * 1024);
       expect(result.peakStockBytes).toBeLessThanOrEqual(SIMULATION_LIMITS.stockBytes);
@@ -100,6 +104,9 @@ describe.skipIf(import.meta.env.RUN_STAR_REMOVAL_BENCHMARK !== '1')(
           refinedCells: result.boundaryCells,
           allocatedNodes: result.allocatedNodes,
           removedCells: result.removedCells,
+          adaptationSkippedChunks: result.surfaceAdaptationSkippedChunks,
+          peakIntersectionCacheEntries: result.peakSurfaceIntersectionCacheEntries,
+          peakCornerCacheEntries: result.peakSubtractionCornerCacheEntries,
         }),
       );
     }, 300000);

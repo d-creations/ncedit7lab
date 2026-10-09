@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { SIMULATION_LIMITS } from './SimulationTypes';
 import type { RotationalProfile } from './RotationalProfile';
+import { encodeStockRegion, decodeStockRegion, type TraceNode } from './StockTraceCodec';
 import {
   CELL_CORNERS,
   CELL_EDGES,
@@ -121,6 +122,12 @@ export function boundaryNormalComponent(
 const NODE_BYTES = 128;
 const CENTRE = 8 + CELL_EDGES.length;
 export const MAX_CACHED_CORNERS = 16_384;
+export const STOCK_TRACE_BYTES = 64 * 1024 * 1024;
+export interface StockTraceUpdate {
+  key: number;
+  before: Uint8Array;
+  after: Uint8Array;
+}
 
 /** Homogeneous regions stay coarse; only boundary leaves reach the requested spacing. */
 export class StockModel {
@@ -144,6 +151,12 @@ export class StockModel {
   private subtractionWorkspaceBytes = 0;
   private diagnosticBytes = 0;
   private replayWorkspaceBytes = 0;
+  private traceWorkspaceBytes = 0;
+  private tracePartitioned = false;
+  private tracing = false;
+  private readonly tracedRegions = new Map<number, { node: StockNode; before: Uint8Array }>();
+  private traceProfileBefore?: Uint8Array;
+  traceWarning?: string;
   private readonly sourceMaterial: ImplicitVolume;
   private profileCountTest: () => void = () => {};
   private readonly coverage: NonNullable<ImplicitVolume['axialCoverage']>[] = [];
@@ -324,6 +337,171 @@ export class StockModel {
     this.profile?.resetQueryCounters();
   }
 
+  beginTrace(): void {
+    if (this.tracing) throw new Error('A stock trace is already being recorded');
+    this.tracePartitioned = true;
+    this.tracing = true;
+    this.traceWarning = undefined;
+    this.traceWorkspaceBytes = 0;
+  }
+
+  private abandonTrace(message: string): void {
+    this.traceWarning = message;
+    this.tracing = false;
+    this.tracedRegions.clear();
+    this.traceProfileBefore = undefined;
+    this.traceWorkspaceBytes = 0;
+    console.warn(message);
+  }
+
+  private reserveTrace(bytes: number): boolean {
+    const extra = Math.max(0, bytes - this.traceWorkspaceBytes);
+    if (bytes > STOCK_TRACE_BYTES || !this.canAccountSurfaceWorkspace(extra)) {
+      this.abandonTrace('Partial stock history exceeded available workspace; replay will recompute this uncached range without reducing detail.');
+      return false;
+    }
+    this.traceWorkspaceBytes = Math.max(this.traceWorkspaceBytes, bytes);
+    this.budget();
+    return true;
+  }
+
+  private encodeTraceRegion(node: StockNode): Uint8Array | undefined {
+    const before = this.traceWorkspaceBytes;
+    let unavailable = false;
+    // The encoder still needs to stop before allocating when optional history cannot fit.
+    class TraceCapacityError extends Error {}
+    try {
+      const encoded = encodeStockRegion(node, (bytes) => {
+        if (!this.reserveTrace(before + bytes)) {
+          unavailable = true;
+          throw new TraceCapacityError();
+        }
+      });
+      this.traceWorkspaceBytes = before + encoded.byteLength + 256;
+      return encoded;
+    } catch (error) {
+      if (!(error instanceof TraceCapacityError) || !unavailable) throw error;
+      return undefined;
+    }
+  }
+
+  private prepareTrace(bounds: THREE.Box3): void {
+    if (!this.tracePartitioned) return;
+    const region = new THREE.Box3();
+    const visit = (node: StockNode): void => {
+      if (node.state === 'empty') return;
+      region.min.copy(this.point(node.x, node.y, node.z));
+      region.max.copy(this.point(node.x + node.span, node.y + node.span, node.z + node.span));
+      if (!region.intersectsBox(bounds)) return;
+      if (node.span > this.chunkSize) {
+        if (!node.children) this.split(node);
+        node.children!.forEach(visit);
+        node.occupied = node.children!.reduce((sum, child) => sum + child.occupied, 0);
+      } else if (this.tracing) {
+        const key = this.chunkId(node.x, node.y, node.z);
+        if (this.tracedRegions.has(key)) return;
+        const before = this.encodeTraceRegion(node);
+        if (before && this.tracing) this.tracedRegions.set(key, { node, before });
+      }
+    };
+    visit(this.root);
+  }
+
+  private captureTraceProfile(): void {
+    if (!this.tracing || !this.profile || this.traceProfileBefore) return;
+    if (!this.profile.historySerializable) {
+      this.abandonTrace('This custom turning field cannot be serialized for partial stock history; replay will use exact recomputation.');
+      return;
+    }
+    const before = this.traceWorkspaceBytes;
+    if (!this.reserveTrace(before + this.profile.allocatedBytes * 4 + 4096)) return;
+    this.traceProfileBefore = this.profile.encodeHistory();
+    this.traceWorkspaceBytes = before + this.traceProfileBefore.byteLength + 256;
+  }
+
+  finishTrace(): StockTraceUpdate[] | undefined {
+    if (!this.tracing) return undefined;
+    const updates: StockTraceUpdate[] = [];
+    if (this.traceProfileBefore && this.profile) {
+      const before = this.traceWorkspaceBytes;
+      if (!this.reserveTrace(before + this.profile.allocatedBytes * 4 + 4096)) return undefined;
+      const after = this.profile.encodeHistory();
+      updates.push({ key: -1, before: this.traceProfileBefore, after });
+      this.traceWorkspaceBytes = before + after.byteLength + 256;
+    }
+    for (const [key, region] of this.tracedRegions) {
+      const after = this.encodeTraceRegion(region.node);
+      if (!after) return undefined;
+      if (this.traceProfileBefore || after.length !== region.before.length ||
+        after.some((byte, i) => byte !== region.before[i]))
+        updates.push({ key, before: region.before, after });
+    }
+    this.tracing = false;
+    this.tracedRegions.clear();
+    this.traceProfileBefore = undefined;
+    this.traceWorkspaceBytes = 0;
+    return updates;
+  }
+
+  restoreTraceRegion(key: number, data: Uint8Array): void {
+    if (this.tracing) throw new Error('Cannot restore stock during trace recording');
+    this.coverage.length = 0;
+    this.completedVolumes.length = 0;
+    if (key === -1) {
+      if (!this.profile) throw new Error('Rotational trace does not match stock');
+      this.profile.restoreHistory(data);
+      this.budget();
+      return;
+    }
+    const decoded = decodeStockRegion(data);
+    if (decoded.span > this.chunkSize || decoded.x < 0 || decoded.y < 0 || decoded.z < 0 ||
+      decoded.x + decoded.span > this.latticeSide || decoded.y + decoded.span > this.latticeSide ||
+      decoded.z + decoded.span > this.latticeSide || this.chunkId(decoded.x, decoded.y, decoded.z) !== key)
+      throw new Error('Stock history region does not match its spatial index');
+    let node = this.root;
+    const ancestors: StockNode[] = [];
+    while (node.span > decoded.span) {
+      ancestors.push(node);
+      if (!node.children) this.split(node);
+      const half = node.span / 2;
+      const child = (decoded.x >= node.x + half ? 1 : 0) +
+        (decoded.y >= node.y + half ? 2 : 0) + (decoded.z >= node.z + half ? 4 : 0);
+      node = node.children![child];
+    }
+    if (node.x !== decoded.x || node.y !== decoded.y || node.z !== decoded.z)
+      throw new Error('Misaligned stock history region');
+    this.release(node, true);
+    const install = (target: StockNode, source: TraceNode): void => {
+      target.state = source.state;
+      target.occupied = source.occupied;
+      target.data = source.data;
+      target.normals = source.normals;
+      target.normalMask = source.normalMask;
+      target.edgeMask = source.edgeMask;
+      if (target.data) {
+        this.dataBytes += target.data.byteLength + (target.normals?.byteLength ?? 0) + 96;
+        this.boundary.set(this.id(target.x, target.y, target.z), target);
+        this.shareNormals(target);
+        this.shareFields(target);
+      }
+      if (target.state === 'pristine') this.pristine.add(target);
+      target.children = source.children?.map((child) => {
+        const next: StockNode = {
+          x: child.x, y: child.y, z: child.z, span: child.span, occupied: 0, state: 'empty',
+        };
+        this.nodeCount++;
+        install(next, child);
+        return next;
+      });
+    };
+    install(node, decoded);
+    for (let i = ancestors.length - 1; i >= 0; i--)
+      ancestors[i].occupied = ancestors[i].children!.reduce((sum, child) => sum + child.occupied, 0);
+    this.dirtyChunks.add(key);
+    this.tracePartitioned = true;
+    this.budget();
+  }
+
   get remainingCells(): number {
     return this.root.occupied;
   }
@@ -351,14 +529,28 @@ export class StockModel {
     return this.peakBytes;
   }
 
+  /** Release optional extraction workspace before sacrificing retained replay states. */
+  releaseSurfaceWorkspace?: (required: number) => number;
+
   private budget(extraBytes = 0): void {
-    let bytes = this.allocatedBytes + this.subtractionWorkspaceBytes + this.replayWorkspaceBytes + extraBytes;
+    let bytes = this.allocatedBytes + this.subtractionWorkspaceBytes + this.replayWorkspaceBytes + this.traceWorkspaceBytes + extraBytes;
+    if (bytes > this.limits.stockBytes && this.releaseSurfaceWorkspace) {
+      const released = this.releaseSurfaceWorkspace(bytes - this.limits.stockBytes);
+      if (!Number.isSafeInteger(released) || released < 0 || released > extraBytes)
+        throw new Error('Invalid released extraction workspace estimate');
+      extraBytes -= released;
+      bytes -= released;
+    }
     if (bytes > this.limits.stockBytes && this.releaseReplayHistory) {
       const released = this.releaseReplayHistory(bytes - this.limits.stockBytes);
       if (!Number.isSafeInteger(released) || released < 0 || released > this.replayWorkspaceBytes)
         throw new Error('Invalid released replay history estimate');
       this.replayWorkspaceBytes -= released;
       bytes -= released;
+    }
+    if (bytes > this.limits.stockBytes && this.traceWorkspaceBytes) {
+      bytes -= this.traceWorkspaceBytes;
+      this.abandonTrace('Partial stock history was released under stock memory pressure; replay will recompute this uncached range without reducing detail.');
     }
     this.peakBytes = Math.max(this.peakBytes, bytes);
     if (this.nodeCount > this.limits.cells) throw new Error('Adaptive stock cell budget exceeded');
@@ -389,7 +581,7 @@ export class StockModel {
       throw new Error('Invalid surface workspace estimate');
     return (
       this.nodeCount <= this.limits.cells &&
-      this.allocatedBytes + this.subtractionWorkspaceBytes + this.replayWorkspaceBytes + this.surfaceDataBytes + bytes <=
+      this.allocatedBytes + this.subtractionWorkspaceBytes + this.replayWorkspaceBytes + this.traceWorkspaceBytes + this.surfaceDataBytes + bytes <=
         this.limits.stockBytes
     );
   }
@@ -780,6 +972,10 @@ export class StockModel {
       this.subtract(volume, test);
       return false;
     }
+    if (this.tracing && (!volume.rotationalSection?.planes || !volume.rotationalSection.radialDirection))
+      this.abandonTrace('This custom turning field cannot be serialized for partial stock history; replay will use exact recomputation.');
+    this.prepareTrace(volume.bounds);
+    this.captureTraceProfile();
     this.profile.apply(volume, (bytes) => this.budget(bytes));
     this.subtractVolume(volume, test, true);
     return true;
@@ -790,6 +986,7 @@ export class StockModel {
       this.coveredRegions++;
       return;
     }
+    if (!rotational) this.prepareTrace(volume.bounds);
     const workspace = volume.workspaceBytes ?? 0;
     if (!Number.isSafeInteger(workspace) || workspace < 0)
       throw new Error('Invalid cutter workspace estimate');
@@ -870,7 +1067,7 @@ export class StockModel {
       const distance = checked.distance(this.centreOf(node));
       const radius = (Math.sqrt(3) * node.span * this.resolutionMm) / 2;
       if (distance > radius) return;
-      if (distance < -radius) {
+      if (distance < -radius && (!this.tracePartitioned || node.span <= this.chunkSize)) {
         this.release(node, true);
         this.bulkRemovedRegions++;
         return;
@@ -895,7 +1092,8 @@ export class StockModel {
         if (!node.children) this.split(node);
         for (const child of node.children!) update(child);
         node.occupied = node.children!.reduce((count, child) => count + child.occupied, 0);
-        if (node.children!.every((child) => child.state === 'empty')) this.release(node, true);
+        if (node.children!.every((child) => child.state === 'empty') &&
+          (!this.tracePartitioned || node.span <= this.chunkSize)) this.release(node, true);
         return;
       }
       if (!node.data) this.makeBoundary(node);

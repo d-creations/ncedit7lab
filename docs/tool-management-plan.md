@@ -355,18 +355,42 @@ Channel-local steps cannot establish a shared removal order.
 
 #### Implemented geometric removal preview
 
-In a single-channel Simulation plot, open **Removal setup**, select the backend
-workpiece frame, and explicitly enter the initial program-to-workpiece translation
-(mm) and extrinsic X/Y/Z rotation (degrees). Also specify the turning spindle origin
-in that frame and its +X/+Y/+Z axis. Identity is a user-confirmed setup, not an inferred
-transform. Press **Bind stock and run removal**. Subsequent Simulation Plot actions
-reuse this setup only for the same program identity, machine and profile revision.
-The transform composes with the stock's own placement/zero point once. No setup
-comments or backend machine rules are changed by this action.
+In a single-channel Simulation plot, material removal starts automatically when
+the backend machine profile declares a matching `simulation.stockBindings` entry
+and the executed poses use exactly one workpiece frame. The backend machine
+definition is the source of these defaults; the frontend does not derive stock
+placement or spindle origin from carrier names or rotary joints.
 
-The frame selector defaults to `workpiece:tableBC` when present in the executed
-poses; an existing confirmed binding takes precedence. This selection alone does
-not confirm the stock transform or start removal.
+Each binding explicitly contains `frameId`, `position` (mm), `rotation` (extrinsic
+X/Y/Z degrees), `spindleOrigin` (mm) and unit-direction `spindleAxis`. The STAR
+SR-20R IV Type B, SV-20R and SG-42 profiles declare `workpiece:mainSpindle` and
+`workpiece:subSpindle`. FANUC_MILL, SIEMENS_840DI, FANUC_MILL_DEMO and
+SIEMENS_MILL_DEMO declare `workpiece:tableBC`. Each uses zero
+translation/rotation/origin and axis
+`[0, 0, 1]`. These are nominal geometric-preview defaults, not a guarantee that
+every physical work offset or setup is identity. The backend validates finite,
+bounded vectors, unit axes, unique frames and references to workpiece carriers.
+The configuration participates in the profile revision hash. Restart the backend
+and reload its machine profiles after updating the installed definition.
+All seven existing simulation profiles now carry explicit defaults and revision
+2; profiles without simulation kinematics remain unchanged. Milling profiles
+retain their existing demo fidelity; declaring a stock binding does not certify
+the machine model or implement new kinematics.
+
+The plot no longer exposes manual kinematic/stock-binding setup fields. Without
+a matching backend default or an explicit captured program binding, removal is
+blocked with a visible diagnostic directing the user to the backend definition.
+Explicit setup supplied through the preparation API still takes precedence over
+captured program overrides, which take precedence over machine defaults.
+Non-cardinal or negative configured axes are preserved when changing resolution,
+not silently replaced with +Z. Multiple executed workpiece frames do not auto-bind.
+No frame-name heuristic (including `tableBC`) supplies an implicit binding.
+The transform composes with the stock's own placement/zero point once. A compact
+**Resolution (mm)** input beside the bottom replay buttons defaults to 0.05 mm.
+Committing a valid change recalculates stock from the captured run at that
+resolution, without backend reexecution or changing its binding. The chosen
+resolution is reused only for the same program identity, machine and profile
+revision. Invalid values report an error without replacing the displayed stock.
 
 Supported feed motions in a known mode are explicitly assumed cutting. Missing
 spindle state is a visible warning, not an automatic blocker; rapids never remove
@@ -439,27 +463,30 @@ One 3D stock is retained across turning -> milling -> turning. Milling pockets
 cannot be refilled by restoring an axisymmetric profile. Coaxial cylindrical stock
 now uses a hybrid rotational base with local 3D removal detail, not two independent
 stock models. Final stock remains the default. Optional line replay now displays
-historical stock using a persistent worker and bounded checkpoints. NC-time-based
+historical stock using a persistent worker and bounded partial history. NC-time-based
 playback, part transfer, synchronized channels and collision checking remain
 deferred.
 
 #### Line-by-line stock replay
 
-After a Simulation plot has a confirmed Removal setup, open **Line-by-line stock
-replay** and select **Start Replay**. **Previous**, **Next**, **Play/Pause** and the
-executed-timeline slider navigate the captured run without asking the backend to
+After a Simulation plot prepares its stock, use the compact bottom controls.
+**Replay** returns to initial stock; **Previous**, **Next**, **Play/Pause** and
+**Final Stock** navigate the captured run without asking the backend to
 execute the program again. Position zero is raw stock. A position completes all
 pose pairs/submoves belonging to the selected execution occurrence. Repeated
 source lines remain distinct occurrences; source line numbers alone are not a
 history key. The label displays the execution step and source line.
 
-**Follow editor cursor / selected occurrence** is opt-in. Without it, normal
-cursor navigation does not seek stock. With it, the existing occurrence selector
-chooses which execution of a repeated source line to restore. Rapids move the
+Editor-cursor following is always enabled once replay is prepared. There is no
+follow checkbox, timeline slider or playback setup panel. The existing occurrence
+selector chooses which execution of a repeated source line to restore.
+Cursor navigation pauses playback before seeking. Rapids move the
 verified tool preview without cutting; non-motion commands change the selection
 without subtraction and hide the tool when no pose was emitted for that command.
 Playback waits for each stock update and adds a short display interval; it is
 not feed-rate-accurate or a guarantee of real-time 0.05 mm playback.
+Non-cutting occurrences with unchanged stock preserve installed surfaces rather
+than retransferring byte-identical shared cache versions.
 
 The adapter publishes the engine's actual execution trace, including non-motion
 commands. The currently installed engine's public `get_exected_nodes` is
@@ -469,33 +496,349 @@ that trace. Missing trace capability logs a warning and exposes an explicitly
 **motion-only** timeline; it never invents skipped commands from source text.
 Mismatched trace metadata is an explicit conversion error.
 
-Forward seeks apply only the newly requested cutting prefix. Geometric/indexed
+The first final-stock calculation records cutting occurrence boundaries without
+meshing every intermediate step, then retains the same worker for replay. Start
+Replay seeks that prepared history back to raw stock; Final Stock seeks its end
+without executing the program or calculating the whole stock again.
+
+Unrecorded forward seeks apply only the newly requested cutting prefix. Geometric/indexed
 batches end at the requested occurrence, never at a later line. Only dirty surface
 chunks and their seam context are remeshed and transferred; empty chunk updates
 delete stale surfaces. A rapid or state-only step with unchanged stock sends no
 surface buffers. Transfer buffers are copies, so the worker's cached mesh is not
 detached.
 
-Checkpoints copy the hybrid profile, adaptive nodes and lossless shared field/normal
-pools independently. They do not keep a full mesh per line. Default history is at
-most **four checkpoints and 64 MiB**, within the existing **256 MiB estimated
-stock/workspace limit**, not an additional allowance. Checkpoints are attempted
-periodically after new cuts; memory pressure releases history before reducing
+The implementation adapts the partial-history idea from Blasquez and Poiraudeau,
+2004, [Undo facilities for the extended z-buffer in NC machining simulation](https://doi.org/10.1016/S0166-3615(03)00147-7),
+to our rotatable 3D hybrid stock. It does not replace the stock with a view-dependent
+z-buffer or claim to reproduce the paper's interval-treap implementation.
+Stable spatial chunk roots have lossless binary before/after node, field and
+normal versions; turning profile versions retain their analytical sections,
+slabs and spindle-axis normal fallback. Queries restore only regions changed
+between the current and requested occurrence, with the profile restored first.
+Future sweep-coverage certificates are cleared. Recorded jumps require no new
+cutter subtraction; affected surfaces still need local remeshing.
+
+History uses a unique, local IndexedDB cache per worker, with gzip for records
+of at least 512 bytes when browser stream codecs are available. Smaller records
+stay raw to avoid paying stream setup overhead for tiny unchanged/empty nodes.
+Stored blobs plus record overhead are capped
+at **256 MiB of disk storage**, with **64 MiB per raw record** and **65,536
+spatial keys**. Raw storage without codecs is explicitly reported. Transient
+trace capture is capped at **64 MiB** inside the existing stock/workspace limit;
+encoding, decoding, temporal indexes, region maps and transfer buffers are also
+reserved there, including scan/decompression space before disk payload allocation.
+This is not a full stock or full mesh copy for every line. Browser quota failure,
+an unavailable API, unsupported custom fields, capacity or memory pressure
+disables the optional cache with a visible warning, preserving the requested
+boundary spacing. A read/decode failure reconstructs from known raw stock,
+never accepting a partly restored result.
+
+The exact fallback keeps at most **four independent checkpoints and 64 MiB**,
+within the existing **256 MiB estimated
+stock/workspace limit**, not an additional allowance. Initial preparation retains
+one engine for complete operation diagnostics; fallback checkpoints are attempted
+periodically after new cuts during subsequent replay. Memory pressure releases history before reducing
 available core workspace. Replay indexes, temporary batches, retained mesh diagnostics
 and transfer copies are also charged. Backward seeks consume the nearest retained checkpoint
 and calculate only the required suffix; a retained future checkpoint can also
 serve a subsequent forward jump. If an older state has been evicted or cannot fit,
 that seek starts from raw stock, with unchanged boundary spacing. The status reports
 retained history, evictions and skipped checkpoint creation, with actual subtraction,
-meshing and checkpoint timings.
+meshing, history and checkpoint timings.
+History timing covers encoding/storage/restore; before-image capture inside cutter
+subtraction is included in subtraction timing, not counted twice as history I/O.
 
 Seeks are serialized and coalesced to the latest queued request. If an intermediate
 delta can be discarded, the next response replaces the entire displayed surface.
-Cancellation, Clear Plot, disconnect and stale source/setup inputs invalidate pending
-responses and terminate the worker. An unsupported occurrence stops before its
+Editor-cursor navigation is debounced by 120 ms; explicit Previous/Next and
+occurrence selection remain immediate. Cancellation, Clear Plot, disconnect and
+stale source/setup inputs invalidate pending responses immediately and request
+worker-owned cache deletion before shutdown. A cancelled recording stops at the
+next asynchronous history boundary. Abrupt browser/process termination can leave
+an abandoned database; there is no unsafe sweep of other active sessions.
+An unsupported occurrence stops before its
 cuts, displays the valid prefix and names the blocker; no future cut is shown.
-**Final Stock** leaves replay and calculates the final result again using the
-captured run, without backend reexecution.
+**Final Stock** retains the prepared worker and history for subsequent replay.
+
+Validation on the supplied STAR main-spindle mixed program at 0.05 mm used a
+real browser worker, native IndexedDB and stream codecs: 53 command occurrences,
+162 motion pairs and 15,891,836 removed cell-centre samples. The local history
+occupied 5.03 MiB and estimated peak stock/workspace was 109.50 MiB. All five
+recorded jumps (before/into milling, final stock, raw stock, final stock again)
+applied zero cutting motions and remained in partial-history mode; normal
+shutdown deleted the owned database.
+
+In that isolated development-browser run, first preparation took 104.8 s
+(15.7 s subtraction, 66.9 s meshing, 22.0 s history encoding/storage).
+Skipping gzip for tiny records reduced measured history overhead from 88.3 s
+in the initial implementation to 22.0 s, with only 0.18 MiB more stored data.
+Recorded jumps took 18.3–66.4 s, of which 7.1–51.9 s was meshing. These are
+environment-specific measurements, not an interactive-speed guarantee:
+partial history eliminates cutter recomputation but does not eliminate
+changed-surface reconstruction. No mesh is retained for every program line;
+These numbers are the baseline before versioned surface caching and batched
+history restoration.
+The opt-in `RUN_STAR_PARTIAL_REPLAY_BENCHMARK=1` mode of the live STAR test
+additionally compares final removal and zero-cut jumps against ordinary
+simulation using the deterministic uncompressed store; it does not measure
+browser compression or IndexedDB latency.
+
+#### Experimental progressive WebGPU stock
+
+The plot can select **GPU progressive** when a WebGPU adapter is available.
+Three.js now uses its WebGPU renderer on capable hosts; WebGL and the existing
+CPU replay remain available when WebGPU initialization or cutter capabilities
+are unavailable. Unchecking GPU progressive selects CPU simulation without
+changing the machining input or replay timeline.
+
+The GPU path stores material intervals in three orthogonal projected ray grids,
+organized in 32 x 32 tiles. A bounded spatial index restricts each tile to
+intersecting cutter sweeps. Existing certified collinear batching is applied
+only within the selected prefix; a batch never contains future occurrences.
+Supported fixed-orientation milling sweeps and
+conventional rotational insert sweeps subtract from the same material state,
+so turning after milling does not reset pockets or cross-holes. Tool-part
+transforms, stock binding, insert contour and executed Q reuse the existing
+validated geometry helpers. Unsupported orientations/geometry explicitly
+select the CPU path, rather than sampling an undocumented approximation.
+
+Initial calculation and uncached line navigation build a coarse executed
+prefix at max(0.1 mm, selected fine pitch). After 350 ms without a new seek,
+the prefix is recomputed from original stock and retained cutter history at
+the configured fine pitch (default 0.02 mm). Fine results are installed only
+if the run and requested occurrence still match. Refinement does not upsample
+coarse stock or attempt to recover missed small features from a coarse mesh.
+The idle delay is not a guaranteed calculation time. A selected fine pitch
+at or above 0.1 mm needs no separate refinement.
+
+A custom Three.js node material renders GPU-resident dexel intervals directly
+inside the stock bounding box, with surface depth and estimated normals.
+Tools, toolpaths, cameras and controls stay in the same scene. Production
+calculation reads only a small GPU error header, not the stock/triangle buffers.
+Display normals use derivatives of bilinearly interpolated interval endpoints
+on matching neighbouring rays. Interval-count changes and disjoint material
+spans reject interpolation; geometry traversal and subtraction still use the
+recorded intervals, so shading does not fill holes or smooth away cuts.
+The hit shader returns the occupied point that was tested rather than the
+outside edge of that column, avoiding invalid shading samples at cell seams.
+This reduces striped normals; it does not turn ray pitch into a guaranteed
+geometric tolerance or make GPU reconstruction identical to CPU Hermite meshes.
+The CPU Hermite surface extractor is not on this GPU display path. Stable
+storage-binding names permit Three.js to reuse GPU shader programs across
+stock states instead of recompiling shaders with per-object identifiers.
+Compute and display helpers access globally bound Three.js storage structs,
+not storage-pointer function parameters. This avoids depending on optional
+WGSL unrestricted-pointer support: Firefox/Naga can otherwise reject
+`gpuSweepDistance` even on a modern NVIDIA GPU. The generated-shader unit
+regression and browser harness verify that no storage-pointer parameters
+remain, including in the stock-display shaders; cutter calculations are
+unchanged.
+A small retained stock precompiles compute/display shaders during plot
+initialization; its CPU/GPU buffers are charged to replay memory accounting.
+Shader warmup can take over a second on a cold driver and is not part of the
+reported cutter-update timing.
+
+Compute work is submitted in batches of at most 16,384 rays, with GPU queue
+completion between submissions. Cancellation and obsolete navigation are
+checked between batches; already-submitted GPU work cannot be interrupted.
+This avoids one whole-stock compute submission, but is not a guaranteed
+watchdog-time bound for every cutter workload or driver. Shader validation
+failures report WGSL compiler messages and source locations when available,
+rather than being masked by a readback from a buffer that was never created.
+Device loss stops work and disables further GPU selection until the view is
+reloaded; a lost WebGPU renderer cannot display CPU geometry either.
+
+Visited coarse states and recent fine states are retained within a 256 MiB
+combined CPU/GPU buffer estimate; storage attributes have both allocations.
+Each ray supports four disjoint material intervals. Overflow, numerical or
+intersection-work failures are errors, not truncated material. A 128 MiB
+per-storage-buffer cap is respected. Cutter compilation has a 32 MiB staging
+limit, and conservative cutter/index staging is preflighted before stock
+allocation. Fine allocation failures retain coarse
+stock and explicitly identify that the requested fine result is unavailable.
+Large stock requiring excessive uniform fine-ray storage must use a larger
+pitch or the CPU solver. Tiling currently provides spatial cutter culling,
+not out-of-core stock or independently adaptive per-tile resolutions.
+
+The display is a discretized tri-dexel reconstruction, not a certified solid,
+watertight export mesh or machining-error bound. Ray pitch does not establish
+physical accuracy; orientation, missed sub-pitch features, Float32 arithmetic,
+cutter intersection and display reconstruction also matter. Refinement does
+not improve the backend toolpath interpolation or establish machine
+calibration. Magenta pixels mark a display-traversal limit; increase pitch
+rather than treating those pixels as removed material. GPU compute is
+not provided by the renderer's WebGL fallback. No universal 0.2-second coarse
+or two-second fine performance guarantee is made.
+
+GPU regression entry point: serve the application locally, then import
+`src/services/simulation/__tests__/GpuBrowserValidation.ts` from a same-origin
+browser page and invoke `runGpuBrowserValidation()`. It checks GPU intervals
+against independent CPU field occupancy for box milling and mixed
+turning/milling/turning at 0.1/0.02 mm, validates actual offscreen rendering and
+reports first/warm compute and render timings plus shader/device failures.
+It also verifies front/behind occlusion against ordinary Three.js tool
+geometry. Full stock readback is limited
+to this validation harness. Unit tests cover layout/memory, interval splitting,
+cutters/transforms, executed-prefix stops, cache hits, coalescing, cancellation,
+stale refinement and explicit fine-capacity failure.
+
+`runGpuCylinderShadingValidation()` renders a 0.02 mm cylinder at 256 x 256,
+compares 128 red-channel samples against independently calculated perspective
+ray intersections and analytical lighting, and checks adjacent-pixel second
+differences for striping. Both red-channel RMSE and average second difference
+must be at most one 8-bit colour value. The corrected shader measured
+0.52/0.62 respectively in local Edge validation.
+
+Browser validation on 2026-10-09 passed on an Intel Gen-12LP adapter for a
+synthetic 20 mm box/cylinder fixture at both pitches. The mixed fixture has
+three sweeps (turning, through milling, turning), not the 162-motion STAR
+program. Each row checked 20,787 CPU/GPU occupancy samples; rendering and
+ordinary-mesh depth occlusion passed with no uncaptured GPU errors.
+
+| Fixture | Pitch | Compute/readiness | Warm recompute | Offscreen render/readback | Stock buffer estimate |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Box milling | 0.1 mm | 25 ms | 12 ms | 64 ms | 10.35 MiB |
+| Box milling | 0.02 mm | 347 ms | 251 ms | 65 ms | 216.11 MiB |
+| Mixed turning/milling/turning | 0.1 mm | 16 ms | 8 ms | 63 ms | 10.35 MiB |
+| Mixed turning/milling/turning | 0.02 mm | 218 ms | 153 ms | 88 ms | 216.16 MiB |
+
+These are one-run warm-driver measurements at 96 x 96 offscreen pixels;
+render/readback timing excludes CPU reference comparisons. Earlier genuinely
+cold shader creation took approximately 1.1-2.1 seconds. They are not full
+editor cursor-to-frame measurements, full-size viewport frame rates, physical
+accuracy certification, or an actual STAR-program performance result. The
+live backend was unavailable during this implementation's browser validation.
+These synthetic timings predate bounded compute submissions.
+
+Subsequent live Docker validation on 2026-10-09 executed the supplied STAR
+fixture without changing the editor document: 162 removal motions and 53
+executed-command occurrences, with 20 mm cylindrical stock. On the inspected
+Intel Gen-12LP browser adapter, backend execution plus preparation took 150 ms.
+After shader warmup (368 ms in that run), final coarse readiness took 156 ms
+(86 ms GPU calculation), with 42 ms rendering at 640 x 480. Final fine
+calculation took 1,556 ms and rendering took 99 ms; its validation render
+contained 56,709 visible pixels and no magenta traversal-limit pixels.
+A first seek to occurrence 13 took 106 ms plus 20 ms rendering; retained
+coarse/fine seeks took 0.9/0.1 ms before rendering. That prefix's fine
+calculation took 2,283 ms. Observed submissions never exceeded 16,384 rays,
+and there were no uncaptured GPU errors. These are single-run measurements,
+not an NVIDIA/Firefox validation or a reproduction of a 9,853-motion program.
+The 52 targeted GPU dispatch/replay/plot regressions, production build,
+TypeScript, scoped ESLint and diff whitespace checks passed after hardening.
+
+Implementation validation: `npm run build` passed. `node
+node_modules\vitest\vitest.mjs run simulation PlotService.test.ts
+ToolGeometryFactory.test.ts MaterialRemovalPreparation.test.ts
+ExecutedProgramService.test.ts NCToolpathPlot.test.ts --no-file-parallelism
+--testTimeout=30000 --silent` passed 486 tests, with the opt-in live benchmark
+skipped. TypeScript, scoped ESLint and `git diff --check` passed. The actual
+editor initialized `WebGPURenderer`, prewarmed stock shaders, enabled GPU
+progressive controls and retained a nonzero canvas on a hidden plot. The
+CPU/renderer regression tests include explicit GPU refinement and runtime
+fallback wiring.
+
+Historical surfaces now use a bounded **64 MiB RAM cache**, inside the unchanged
+256 MiB stock/workspace estimate. Only visited stock prefixes are cached.
+Each prefix retains a lightweight manifest of shared immutable chunk versions,
+not a separate copy of all triangles. Unchanged chunks share versions; byte-identical
+reconstructed chunks are also deduplicated, including their normal and signed-zero
+bits. Complete visited-state manifests retain the exact seam-dependent result:
+there is no speculative reuse based solely on one region's version.
+Returning to a retained prefix reinstalls its surfaces without extraction,
+triangulation or adaptation. Only changed chunk versions are sent to the renderer.
+Least-recently-used manifests are evicted on capacity or core memory pressure;
+uncached positions reconstruct surfaces at the same requested detail and report
+that reconstruction in the replay status. This does not premesh every NC line or
+promise fast cold-cache jumps.
+
+Disk restoration now resolves metadata in batches of 64 keys and fetches payloads
+in bounded batches of at most 64 records / 8 MiB reserved working space.
+Larger valid records use individually reserved singleton batches. Up to four gzip
+streams decode concurrently, but installation remains ordered with the rotational
+profile first. Reservations include all simultaneously retained batch payloads,
+decoded data and engine installation workspace before fetching; scan capacity
+grows with actual keys instead of reserving space for 65,536 keys on every jump.
+
+The real browser STAR 0.05 mm follow-up included worker transfer, Three.js geometry
+installation and a completed WebGL render, not just worker response timing.
+Repeated positions/normals matched their earlier displayed versions, all recorded
+jumps applied zero cuts, and normal cancellation deleted the owned database.
+The retained surface versions occupied **55.48 MiB**, disk history **5.03 MiB**,
+and peak estimated stock/workspace **158.02 MiB**, still below 256 MiB.
+
+| Warm jump | Worker time | Through rendered frame | Surface install/reuse |
+| --- | ---: | ---: | ---: |
+| First milling prefix → before milling | 0.224 s | 0.261 s | 0.003 s |
+| Final stock → first milling prefix | 1.418 s | 1.515 s | 0.008 s |
+| Before milling → raw stock | 2.891 s | 3.227 s | 0.004 s |
+| Raw stock → final stock | 4.676 s | 5.757 s | 0.006 s |
+
+Warm reconstruction dropped from seconds to 3–8 ms. Large raw/final jumps still
+spent about 2.9–4.6 s restoring underlying stock plus transfer/render time:
+the universal 1–2 s target is **not yet met**. First visits to uncached turning,
+milling and raw-stock surfaces took 10.7–14.0 s in this run, and preparation
+through its first rendered frame took 119.8 s. These caches do not precompute
+all intermediate surfaces. The measurements isolate a development-browser
+benchmark rather than guaranteeing performance across machines or arbitrary
+programs.
+
+Replay diagnostics distinguish first-visit surface-cache misses, previously
+retained surfaces subsequently evicted/cleared, visits that could not be retained,
+and explicitly disabled caching. A bounded one-byte flag per motion prefix tracks
+these reasons inside timeline accounting, not an unbounded visited-position set.
+The status reports cache occupancy/limit, retained-state count, cumulative LRU/
+memory-pressure evictions, explicitly cleared states and failed retention attempts.
+It also reports extraction, triangulation and adaptation time, dirty/rebuilt chunk
+counts, and fine/output triangle counts for the chunks rebuilt by that frame.
+Phase totals are not complete wall-time accounting: seam bookkeeping, allocation
+and other pipeline overhead also contribute to total meshing time. Cached or
+unchanged surfaces report zero reconstruction phases/work counts, never stale
+diagnostics from the previous build. Instrumentation does not alter mesh quality
+or cache eviction policy.
+
+Cold-build extraction now reuses compact seam topology within the same build.
+The coarse-seam discovery pass stores exact integer coordinates, spans and
+crossed-edge masks (seven Uint32 words per cell); the breakpoint pass reads that
+metadata instead of repeating material-field sampling. The temporary cache is
+capped at **32 MiB inside the unchanged stock/workspace budget**, preflighted
+before allocation, and released before Hermite extraction/triangulation/adaptation.
+Normals and edge roots are still generated by the existing fine-detail path.
+If capacity or workspace is insufficient, the cache is discarded with an explicit
+warning and the complete streamed breakpoint pass runs at unchanged quality.
+If pressure occurs while consuming cached rows, the full streamed pass restarts;
+already collected breakpoint sets remain exact and idempotent.
+Optional topology is released by the stock budget checker only when actual
+allocation pressure occurs, before retained replay states are evicted. Avoid
+repeating full memory preflight checks for every seam breakpoint: that overhead
+made the initial mixed-prefix implementation slower despite eliminating a pass.
+The temporary release hook is restored even when extraction fails.
+Replay reports sampled topology-pass count, reuse and peak temporary topology
+bytes. The controlled `RUN_STAR_TOPOLOGY_BENCHMARK=1` live test compares 30-motion
+turning and 161-motion mixed prefixes against `topologyCacheBytes: 0`, checking
+every position/normal Float32 bit and the unchanged 256 MiB estimate.
+`NC_EDIT_BENCHMARK_RESULTS_FILE` optionally writes those numeric measurements
+to a chosen local JSON file; no source program or credentials are recorded.
+
+The pressure-only implementation's live STAR cold-build comparison at 0.05 mm
+(averages of fresh builds in streamed-first and reused-first order):
+
+| Prefix | Streamed meshing | Reused meshing | Streamed extraction | Reused extraction | Temporary topology |
+| --- | --- | --- | --- | --- | --- |
+| 30 motions, turning | 21.20 s | 16.65 s | 15.48 s | 10.93 s | 6.18 MiB |
+| 161 motions, mixed | 41.62 s | 30.49 s | 30.83 s | 20.01 s | 8.23 MiB |
+
+These Node measurements show about 21%/27% less total meshing and 29%/35% less
+extraction, with bit-identical positions and normals in both build orders.
+Estimated reused-build peaks were 76.05–105.77/139.91–180.06 MiB, including peer
+stock and retained reference output when built second. The second build charges
+reference surfaces that do not yet exist during the first build; reversing
+order balances this asymmetry but does not provide identical memory headroom.
+Two orders are not a statistical distribution of repeated runs. Timings vary
+with runtime and system load.
+This is not browser cursor-to-render latency, and cold/evicted positions still
+do **not** meet the 1–2-second target. Surface-history capacity remains 64 MiB:
+this optimization neither increases it nor prevents states from being evicted.
 
 Algorithm version 2 replaces the occupied voxel arrays and exposed-cube mesher.
 An octree keeps fully solid/empty regions coarse, rejects disjoint cutter regions,
@@ -797,7 +1140,7 @@ This is a shared-face Hermite/QEF reconstruction, not a complete implementation 
 Dual Contouring or Cubical Marching Squares, and no universal topology guarantee
 for undersampled features is claimed.
 
-The **Boundary spacing (mm)** setting remains 0.05..5 mm, default 0.5 mm. It controls
+The **Boundary spacing (mm)** setting remains 0.05..5 mm, default 0.05 mm. It controls
 the finest cells and reconstructed surface sampling, not all interior regions.
 The initial surface grid has a half-cell exterior halo to close the stock boundary.
 Limits are 16,000,000 allocated tree nodes, 256 MiB conservative estimated stock memory

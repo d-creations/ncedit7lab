@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { cylinderVolume, type ImplicitVolume } from './ImplicitGeometry';
 import { SIMULATION_LIMITS } from './SimulationTypes';
+import { turningSectionVolume } from './TurningEnvelope';
 
 interface Line {
   slope: number;
@@ -20,6 +21,25 @@ interface ProfileCut {
   order: readonly number[];
   positive: boolean;
   negative: boolean;
+}
+
+interface ProfileHistoryState {
+  version: 1;
+  radius: number;
+  length: number;
+  slabs: Slab[];
+  cuts: Array<{
+    origin: [number, number, number];
+    axis: [number, number, number];
+    radial: [number, number, number];
+    polygon: [number, number][];
+    order: readonly number[];
+    positive: boolean;
+    negative: boolean;
+  }>;
+  fieldBytes: number;
+  updates: number;
+  arrangementTests: number;
 }
 
 const value = (line: Line, z: number): number => line.slope * z + line.offset;
@@ -102,6 +122,56 @@ export class RotationalProfile {
     copy.arrangementTests = this.arrangementTests;
     copy.refreshExtrusions();
     return copy;
+  }
+
+  encodeHistory(): Uint8Array {
+    const state: ProfileHistoryState = {
+      version: 1, radius: this.radius, length: this.length, slabs: this.slabs,
+      cuts: this.cuts.map((cut) => {
+        const section = cut.volume.rotationalSection!;
+        if (!section.radialDirection || !section.planes)
+          throw new Error('Rotational history requires a production convex turning section');
+        return {
+          origin: section.spindleOrigin.toArray(), axis: section.spindleAxis.toArray(),
+          radial: section.radialDirection.toArray(),
+          polygon: section.polygon.map((point) => point.toArray()),
+          order: cut.order, positive: cut.positive, negative: cut.negative,
+        };
+      }),
+      fieldBytes: this.fieldBytes, updates: this.updates, arrangementTests: this.arrangementTests,
+    };
+    return new TextEncoder().encode(JSON.stringify(state));
+  }
+
+  get historySerializable(): boolean {
+    return this.cuts.every((cut) =>
+      Boolean(cut.volume.rotationalSection?.planes && cut.volume.rotationalSection.radialDirection));
+  }
+
+  restoreHistory(data: Uint8Array): void {
+    const state: ProfileHistoryState = JSON.parse(new TextDecoder().decode(data));
+    if (state.version !== 1 || state.radius !== this.radius || state.length !== this.length ||
+      !Array.isArray(state.slabs) || !Array.isArray(state.cuts) ||
+      !Number.isSafeInteger(state.fieldBytes) || state.fieldBytes < 0 ||
+      !Number.isSafeInteger(state.updates) || state.updates < 0)
+      throw new Error('Invalid rotational stock history');
+    const cuts = state.cuts.map((cut): ProfileCut => ({
+      volume: turningSectionVolume(
+        cut.polygon.map((point) => new THREE.Vector2(...point)),
+        new THREE.Vector3(...cut.origin), new THREE.Vector3(...cut.axis), new THREE.Vector3(...cut.radial),
+      ),
+      order: cut.order, positive: cut.positive, negative: cut.negative,
+    }));
+    this.cuts.splice(0, this.cuts.length, ...cuts);
+    this.slabs = state.slabs;
+    this.fieldBytes = state.fieldBytes;
+    this.updates = state.updates;
+    this.arrangementTests = state.arrangementTests;
+    this.countCache.clear();
+    this.countCacheBytes = 0;
+    this.activeCut = undefined;
+    this.resetQueryCounters();
+    this.refreshExtrusions();
   }
 
   resetQueryCounters(): void {

@@ -62,6 +62,29 @@ function validPose(pose: DeepReadonly<PoseSample> | undefined): pose is DeepRead
   );
 }
 
+export function resolveMachineStockBinding(
+  input: DeepReadonly<PlotRunInput>,
+  frames: ReadonlySet<string>,
+): DeepReadonly<StockBinding> | undefined {
+  const config = input.machineProfile?.simulation;
+  const bindings = config?.stockBindings;
+  if (!config || bindings === undefined) return undefined;
+  if (!Array.isArray(bindings) || bindings.length > 64)
+    throw new Error('Machine stock bindings must be a list of at most 64 entries');
+  const allowed = new Set(config.carriers
+    .filter((carrier) => carrier.role === 'workpiece')
+    .map((carrier) => `workpiece:${carrier.id}`));
+  const seen = new Set<string>();
+  for (const binding of bindings) {
+    validateStockBinding(binding);
+    if (!allowed.has(binding.frameId) || seen.has(binding.frameId))
+      throw new Error('Machine stock binding references an unknown or duplicate workpiece frame');
+    seen.add(binding.frameId);
+  }
+  if (frames.size !== 1) return undefined;
+  return bindings.find((binding) => frames.has(binding.frameId));
+}
+
 export function prepareMaterialRemoval(
   inputs: DeepReadonly<PlotRunInput[]>,
   metadata: DeepReadonly<PlotMetadata>,
@@ -100,17 +123,21 @@ export function prepareMaterialRemoval(
       'Simulate one channel at a time; channel-local steps do not establish shared cutting order.',
     );
   }
-  const configured = setup ?? inputs[0]?.materialSimulation;
+  let configured = setup ?? inputs[0]?.materialSimulation;
   const frames = new Set(
     metadata.segments.flatMap(
       (segment) => segment.poses?.filter(validPose).map((pose) => pose.frameId) ?? [],
     ),
   );
   const frameId = frames.size === 1 ? [...frames][0] : undefined;
+  if (!configured && inputs.length === 1) {
+    const binding = resolveMachineStockBinding(inputs[0], frames);
+    if (binding) configured = { binding, resolutionMm: 0.05 };
+  }
   if (!configured) {
     add(
       'stock-frame-unresolved',
-      'Stock is a program-coordinate preview; explicitly bind its initial coordinates to a workpiece frame in Removal setup.',
+      'Stock is a program-coordinate preview; no matching backend stock binding is available. Configure stockBindings in the backend machine definition or supply an explicit program stock binding.',
     );
     return { status: 'blocked', stock, channelIds, frameId, diagnostics };
   }

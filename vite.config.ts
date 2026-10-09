@@ -101,6 +101,14 @@ export default defineConfig({
     port: 3000,
     open: true,
     proxy: {
+      '/api': {
+        target: 'http://127.0.0.1:8000',
+        changeOrigin: true,
+      },
+      '/cgiserver_import': {
+        target: 'http://127.0.0.1:8000',
+        changeOrigin: true,
+      },
       // Forward legacy CGI path to local FastAPI adapter during development
       // Legacy frontend calls the CGI path; during dev forward these to the
       // import-based FastAPI adapter so the frontend works without changing

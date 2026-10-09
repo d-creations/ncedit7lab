@@ -1,4 +1,7 @@
 import * as THREE from 'three';
+import { WebGPURenderer } from 'three/webgpu';
+import { GpuDexelStock } from '@services/simulation/GpuDexelStock';
+import { GpuMaterialReplaySession, type GpuReplayFrame } from '@services/simulation/GpuMaterialReplaySession';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { ServiceRegistry } from '@core/ServiceRegistry';
 import {
@@ -30,7 +33,6 @@ import type { PlotSegment } from '@core/types';
 import type { NCBottomPanel } from './NCBottomPanel';
 import { ToolGeometryFactory } from './ToolGeometryFactory';
 import { prepareMaterialRemoval, type MaterialRemovalPreparation } from '@services/tools/MaterialRemovalPreparation';
-import { MaterialSimulationSession } from '@services/simulation/MaterialSimulationSession';
 import { MaterialReplaySession } from '@services/simulation/MaterialReplaySession';
 import type { ReplayFrame } from '@services/simulation/MaterialReplayEngine';
 import { createPlotReplayTimeline, type PlotReplayTimeline } from '@services/tools/PlotReplayTimeline';
@@ -40,7 +42,12 @@ import { rotationQuaternion } from '@services/simulation/SimulationTransforms';
 export class NCToolpathPlot extends HTMLElement {
   private scene?: THREE.Scene;
   private camera?: THREE.PerspectiveCamera;
-  private renderer?: THREE.WebGLRenderer;
+  private renderer?: THREE.WebGLRenderer | WebGPURenderer;
+  private rendererReady?: Promise<void>;
+  private gpuDevice?: GPUDevice;
+  private gpuFallbackReason = '';
+  private gpuWarmupStock?: GpuDexelStock;
+  private gpuComputeError?: string;
   private controls?: OrbitControls;
   private plotService: PlotService;
   private eventBus: EventBus;
@@ -69,12 +76,11 @@ export class NCToolpathPlot extends HTMLElement {
   private requestGeneration = 0;
   private stale = false;
   private readonly detectedToolsByChannel = new Map<string, ToolIdentifier[]>();
-  private materialSimulation?: MaterialSimulationSession;
   private removalSetup?: { binding: StockBinding; resolutionMm: number };
   private removalSetupScope?: string;
   private removalGeneration = 0;
   private removalPreparation?: DeepReadonly<MaterialRemovalPreparation>;
-  private materialReplay?: MaterialReplaySession;
+  private materialReplay?: MaterialReplaySession | GpuMaterialReplaySession;
   private replayTimeline?: PlotReplayTimeline;
   private replayPosition = 0;
   private replayRequestedPosition = 0;
@@ -82,6 +88,8 @@ export class NCToolpathPlot extends HTMLElement {
   private replayBusy = false;
   private replayPlaying = false;
   private replayTimer?: ReturnType<typeof setTimeout>;
+  private cursorReplayTimer?: ReturnType<typeof setTimeout>;
+  private replayPrepared = false;
   private readonly stockMeshes = new Map<number, THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>>();
 
   constructor() {
@@ -99,7 +107,7 @@ export class NCToolpathPlot extends HTMLElement {
 
   connectedCallback() {
     this.render();
-    this.initThree();
+    this.rendererReady = this.initThree();
     this.setupEventListeners();
   }
 
@@ -119,8 +127,19 @@ export class NCToolpathPlot extends HTMLElement {
     if (this.controls) {
       this.controls.dispose();
     }
+    if (this.materialObject?.userData.releaseGpuStock) {
+      this.removeOwnedPlotObject(this.materialObject);
+      this.materialObject = null;
+    }
+    this.gpuWarmupStock?.dispose();
+    this.gpuWarmupStock = undefined;
     if (this.renderer) {
-      this.renderer.dispose();
+      const device = this.gpuDevice;
+      this.gpuDevice = undefined;
+      void Promise.resolve(this.renderer.dispose()).catch((error: unknown) => {
+        console.error('Plot renderer shutdown failed:', error);
+      }).finally(() => device?.destroy());
+      this.renderer = undefined;
     }
   }
 
@@ -139,7 +158,7 @@ export class NCToolpathPlot extends HTMLElement {
       const materials = run.materialRemoval?.stock ? [run.materialRemoval.stock] : [];
       this.updatePlot(structuredClone(run.plotMetadata) as PlotMetadata, materials);
       this.updateMaterialRemovalStatus();
-      this.updateRemovalSetup();
+      this.updateRemovalResolution();
       this.updateReplayControls();
       this.refreshStaleness();
       if (!this.stale && run.materialRemoval?.status === 'ready') {
@@ -200,7 +219,7 @@ export class NCToolpathPlot extends HTMLElement {
       const sameLocation = this.selectionLocation?.channelId === location.channelId &&
         this.selectionLocation.lineNumber === location.lineNumber;
       this.selectionLocation = location;
-      this.selectOccurrence(sameLocation ? this.selectedExecutionStep : undefined);
+      this.selectOccurrence(sameLocation ? this.selectedExecutionStep : undefined, true);
     }));
   }
 
@@ -229,49 +248,35 @@ export class NCToolpathPlot extends HTMLElement {
     element.textContent = preparation?.diagnostics.map((diagnostic) => diagnostic.message).join(' ') ?? '';
   }
 
-  private updateRemovalSetup(): void {
-    const details = this.shadowRoot?.querySelector<HTMLElement>('#removal-setup');
-    const select = this.shadowRoot?.querySelector<HTMLSelectElement>('#removal-frame');
+  private updateRemovalResolution(): void {
+    const resolution = this.shadowRoot?.querySelector<HTMLInputElement>('#removal-resolution');
     const run = this.displayedRunId ? this.executedProgramService.getPlotRun(this.displayedRunId) : undefined;
-    if (!details || !select) return;
-    details.hidden = !this.simulationEnabled || !run?.materialRemoval?.stock;
-    select.replaceChildren(new Option('Select stock workpiece frame', ''));
-    const frames = new Set(run?.plotMetadata.segments.flatMap((segment) =>
-      segment.poses?.map((pose) => pose.frameId) ?? []) ?? []);
-    for (const frame of frames) select.add(new Option(frame, frame));
-    select.value = this.removalSetup?.binding.frameId ??
-      (frames.has('workpiece:tableBC') ? 'workpiece:tableBC' : '');
+    if (!resolution) return;
+    const input = run?.inputs[0];
+    const manual = input && this.stockBindingScope(input) === this.removalSetupScope
+      ? this.removalSetup : input?.materialSimulation;
+    resolution.value = String(manual?.resolutionMm ?? run?.materialRemoval?.simulation?.resolutionMm ?? 0.05);
   }
 
-  private readRemovalSetup(): { binding: StockBinding; resolutionMm: number } {
-    const value = (id: string): number => {
-      const input = this.shadowRoot?.querySelector<HTMLInputElement>(`#removal-${id}`);
-      if (!input?.value.trim() || !Number.isFinite(Number(input.value))) {
-        throw new Error(`Removal ${id} must be a finite number`);
-      }
-      return Number(input.value);
-    };
-    const vector = (prefix: string): [number, number, number] =>
-      [value(`${prefix}-x`), value(`${prefix}-y`), value(`${prefix}-z`)];
-    const axis = this.shadowRoot?.querySelector<HTMLSelectElement>('#removal-spindle-axis')?.value;
-    if (axis !== 'x' && axis !== 'y' && axis !== 'z') throw new Error('Select a spindle axis');
-    return {
-      binding: {
-        frameId: this.shadowRoot?.querySelector<HTMLSelectElement>('#removal-frame')?.value ?? '',
-        position: vector('position'), rotation: vector('rotation'), spindleOrigin: vector('spindle'),
-        spindleAxis: [axis === 'x' ? 1 : 0, axis === 'y' ? 1 : 0, axis === 'z' ? 1 : 0],
-      },
-      resolutionMm: value('resolution'),
-    };
-  }
-
-  private async runRemovalFromSetup(): Promise<void> {
+  private async changeRemovalResolution(): Promise<void> {
     const status = this.shadowRoot?.getElementById('material-removal-status');
     try {
       this.refreshStaleness();
       const run = this.displayedRunId ? this.executedProgramService.getPlotRun(this.displayedRunId) : undefined;
       if (!run || this.stale) throw new Error('Plot the current program before material removal');
-      const setup = this.readRemovalSetup();
+      const field = this.shadowRoot?.querySelector<HTMLInputElement>('#removal-resolution');
+      if (!field?.value.trim() || !Number.isFinite(field.valueAsNumber))
+        throw new Error('Removal resolution must be a finite number');
+      const binding = this.removalPreparation?.simulation?.binding;
+      if (!binding) throw new Error('Configure a matching stock binding in the backend machine definition');
+      const setup: { binding: StockBinding; resolutionMm: number } = {
+        binding: {
+          frameId: binding.frameId,
+          position: [...binding.position], rotation: [...binding.rotation],
+          spindleOrigin: [...binding.spindleOrigin], spindleAxis: [...binding.spindleAxis],
+        },
+        resolutionMm: field.valueAsNumber,
+      };
       const preparation = prepareMaterialRemoval(run.inputs, run.plotMetadata, setup);
       if (preparation.status !== 'ready') {
         throw new Error(preparation.diagnostics.map((diagnostic) => diagnostic.message).join(' '));
@@ -280,16 +285,53 @@ export class NCToolpathPlot extends HTMLElement {
       this.removalSetupScope = this.stockBindingScope(run.inputs[0]);
       await this.startMaterialRemoval(preparation);
     } catch (error) {
-      console.error('Material removal setup failed:', error);
+      console.error('Material removal resolution change failed:', error);
       if (status) {
         status.hidden = false;
-        status.textContent = `Material removal unavailable: ${error instanceof Error ? error.message : 'Invalid setup'}`;
+        status.textContent = `Material removal unavailable: ${error instanceof Error ? error.message : 'Invalid resolution'}`;
       }
     }
   }
 
-  private createMaterialSimulationSession(runId: string): MaterialSimulationSession {
-    return new MaterialSimulationSession(runId);
+  private async createReplaySession(runId: string): Promise<MaterialReplaySession | GpuMaterialReplaySession> {
+    await this.rendererReady;
+    const enabled = this.shadowRoot?.querySelector<HTMLInputElement>('#gpu-stock')?.checked;
+    this.gpuFallbackReason = '';
+    if (enabled && this.renderer instanceof WebGPURenderer && this.gpuDevice && !this.gpuComputeError) {
+      const field = this.shadowRoot?.querySelector<HTMLInputElement>('#gpu-fine-resolution');
+      const session = new GpuMaterialReplaySession(runId, this.renderer, this.gpuDevice, {
+        finePitchMm: field?.valueAsNumber ?? 0.02,
+        residentBytes: this.gpuWarmupStock?.estimatedBytes ?? 0,
+        onRefined: (frame) => {
+          if (this.materialReplay === session && !this.stale && this.replayPrepared && this.replayRequestedPosition === frame.requestedPosition) this.installReplayFrame(frame);
+        },
+        onRefinementError: (error) => {
+          if (this.materialReplay !== session || this.stale) return;
+          this.replayStatus(`GPU fine refinement unavailable: ${error.message}. Coarse stock is retained; change fine pitch or switch to CPU simulation.`);
+          const status = this.shadowRoot?.getElementById('material-removal-status');
+          if (status) status.textContent = `GPU fine refinement failed: ${error.message}. Displayed stock remains coarse, not the requested fine result.`;
+        },
+      });
+      return session;
+    }
+    if (enabled) this.gpuFallbackReason = this.gpuComputeError ?? 'WebGPU compute is not available in this view';
+    return this.createMaterialReplaySession(runId);
+  }
+
+  private async startSelectedSession(session: MaterialReplaySession | GpuMaterialReplaySession,
+    input: DeepReadonly<SimulationInput>, steps: readonly number[],
+    progress: (processed: number, total: number) => void, prepareFinal = false): Promise<ReplayFrame | GpuReplayFrame> {
+    try { return await session.start(input, steps, progress, prepareFinal); }
+    catch (error) {
+      if (!(session instanceof GpuMaterialReplaySession) || this.materialReplay !== session ||
+          (error instanceof DOMException && error.name === 'AbortError')) throw error;
+      console.warn('GPU stock unavailable; using CPU simulation:', error);
+      this.gpuFallbackReason = error instanceof Error ? error.message : 'GPU stock initialization failed';
+      session.cancel();
+      const cpu = this.createMaterialReplaySession(session.runId);
+      this.materialReplay = cpu;
+      return cpu.start(input, steps, progress, prepareFinal);
+    }
   }
 
   private async startMaterialRemoval(preparation: DeepReadonly<MaterialRemovalPreparation>): Promise<void> {
@@ -298,20 +340,38 @@ export class NCToolpathPlot extends HTMLElement {
     this.removalPreparation = preparation;
     this.updateReplayControls();
     const generation = this.removalGeneration;
-    const session = this.createMaterialSimulationSession(this.displayedRunId);
-    this.materialSimulation = session;
     const status = this.shadowRoot?.getElementById('material-removal-status');
     const cancel = this.shadowRoot?.querySelector<HTMLButtonElement>('#cancel-removal');
     if (cancel) cancel.hidden = false;
-    this.showInitialStock(preparation.simulation);
     try {
-      const result = await session.start(preparation.simulation, (processed, total) => {
+      const run = this.executedProgramService.getPlotRun(this.displayedRunId);
+      if (!run) throw new Error('Material removal requires a retained executed run');
+      const timeline = createPlotReplayTimeline(run);
+      const session = await this.createReplaySession(this.displayedRunId);
+      if (generation !== this.removalGeneration) { session.cancel(); return; }
+      this.materialReplay = session;
+      this.replayTimeline = timeline;
+      this.replayBusy = true;
+      this.updateReplayControls();
+      this.showInitialStock(preparation.simulation);
+      const frame = await this.startSelectedSession(session, preparation.simulation,
+        timeline.occurrences.map((occurrence) => occurrence.executionStep), (processed, total) => {
         if (generation !== this.removalGeneration || !status) return;
         status.hidden = false;
         status.textContent = `Geometric removal: ${processed}/${total} motions. Feed cutting is assumed; spindle operation is not verified.`;
-      });
+      }, true);
       if (generation !== this.removalGeneration || this.stale || session.runId !== this.displayedRunId) return;
+      if ('backend' in frame) {
+        this.replayPrepared = true;
+        this.installReplayFrame(frame);
+        return;
+      }
+      if (!frame.finalResult) throw new Error('Prepared stock response is missing final diagnostics');
+      const result = frame.finalResult;
       this.installStockSurface(result);
+      this.replayPosition = this.replayRequestedPosition = frame.position;
+      this.replayPrepared = true;
+      this.replayStatus(`Final stock prepared with ${frame.historyMode === 'partial-disk' ? 'partial disk history' : 'bounded checkpoint fallback'}; ${((frame.historyBytes ?? 0) / 1048576).toFixed(1)} MiB history.${frame.historyWarning ? ` ${frame.historyWarning}` : ''}`);
       if (status) {
         status.hidden = false;
         const stopped = result.stop
@@ -344,13 +404,18 @@ export class NCToolpathPlot extends HTMLElement {
       }
     } catch (error) {
       if (generation !== this.removalGeneration) return;
+      this.cancelReplay();
       console.error('Material removal failed:', error);
       if (status) {
         status.hidden = false;
         status.textContent = `Material removal failed: ${error instanceof Error ? error.message : 'Worker failure'}. Initial stock is shown, not a completed result.`;
       }
     } finally {
-      if (generation === this.removalGeneration && cancel) cancel.hidden = true;
+      if (generation === this.removalGeneration) {
+        this.replayBusy = false;
+        if (cancel) cancel.hidden = true;
+        this.updateReplayControls();
+      }
     }
   }
 
@@ -402,8 +467,6 @@ export class NCToolpathPlot extends HTMLElement {
 
   private cancelMaterialRemoval(): void {
     this.removalGeneration++;
-    this.materialSimulation?.cancel();
-    this.materialSimulation = undefined;
     this.cancelReplay();
     const cancel = this.shadowRoot?.querySelector<HTMLButtonElement>('#cancel-removal');
     if (cancel) cancel.hidden = true;
@@ -413,19 +476,26 @@ export class NCToolpathPlot extends HTMLElement {
     return JSON.stringify([programIdentityKey(input.snapshot.identity), input.machineName, input.machineProfile?.profileRevision]);
   }
 
-  private selectOccurrence(step?: number): void {
+  private selectOccurrence(step?: number, debounce = false): void {
+    if (this.cursorReplayTimer !== undefined) clearTimeout(this.cursorReplayTimer);
+    this.cursorReplayTimer = undefined;
     this.refreshStaleness();
     if (this.stale || !this.selectionLocation || !this.displayedRunId) {
       this.clearSelection();
       return;
     }
     const location = this.selectionLocation;
-    if (this.materialReplay && this.shadowRoot?.querySelector<HTMLInputElement>('#replay-follow')?.checked) {
+    if (this.materialReplay && this.replayPrepared) {
       const index = this.replayTimeline?.occurrences.findIndex((occurrence) =>
         occurrence.channelId === location.channelId && occurrence.lineNumber === location.lineNumber &&
         (step === undefined || occurrence.executionStep === step));
       if (index !== undefined && index >= 0) {
-        void this.seekReplay(index + 1);
+        if (debounce) {
+          this.cursorReplayTimer = setTimeout(() => {
+            this.cursorReplayTimer = undefined;
+            void this.seekReplay(index + 1);
+          }, 120);
+        } else void this.seekReplay(index + 1);
       } else {
         this.clearSelection();
         const status = this.shadowRoot?.getElementById('plot-status');
@@ -486,31 +556,28 @@ export class NCToolpathPlot extends HTMLElement {
     const button = (id: string) => this.shadowRoot?.querySelector<HTMLButtonElement>(`#replay-${id}`);
     const start = button('start');
     if (start) {
-      start.disabled = !available;
-      start.textContent = active ? 'Restart Replay' : 'Start Replay';
+      start.disabled = !available || (this.replayBusy && !this.replayPrepared);
+      start.textContent = 'Replay';
     }
     const play = button('play');
     if (play) {
-      play.disabled = !active || this.stale || (this.replayBusy && this.replayPosition === 0);
+      play.disabled = !active || !this.replayPrepared || this.stale;
       play.textContent = this.replayPlaying ? 'Pause' : 'Play';
       play.setAttribute('aria-pressed', String(this.replayPlaying));
     }
     const previous = button('previous');
-    if (previous) previous.disabled = !active || this.stale || this.replayRequestedPosition <= 0;
+    if (previous) previous.disabled = !active || !this.replayPrepared || this.stale || this.replayRequestedPosition <= 0;
     const next = button('next');
-    if (next) next.disabled = !active || this.stale ||
+    if (next) next.disabled = !active || !this.replayPrepared || this.stale ||
       this.replayRequestedPosition >= (this.replayTimeline?.occurrences.length ?? 0);
     const final = button('final');
-    if (final) final.disabled = !available || !active;
-    const timeline = this.shadowRoot?.querySelector<HTMLInputElement>('#replay-position');
-    if (timeline) {
-      timeline.disabled = !active || this.stale;
-      timeline.max = String(this.replayTimeline?.occurrences.length ?? 0);
-      timeline.value = String(this.replayRequestedPosition);
-      timeline.setAttribute('aria-valuetext', `${this.replayRequestedPosition} completed execution occurrences`);
-    }
-    const follow = this.shadowRoot?.querySelector<HTMLInputElement>('#replay-follow');
-    if (follow) follow.disabled = !active || this.stale;
+    if (final) final.disabled = !available || !active || !this.replayPrepared;
+    const resolution = this.shadowRoot?.querySelector<HTMLInputElement>('#removal-resolution');
+    if (resolution) resolution.disabled = !available || this.replayBusy;
+    const status = this.shadowRoot?.getElementById('replay-status');
+    if (status) status.hidden = controls.hidden;
+    const hint = this.shadowRoot?.querySelector<HTMLElement>('.orbit-hint');
+    if (hint) hint.hidden = !controls.hidden;
     controls.setAttribute('aria-busy', String(this.replayBusy));
     const cancel = this.shadowRoot?.querySelector<HTMLButtonElement>('#cancel-removal');
     if (cancel && active) cancel.hidden = false;
@@ -533,15 +600,18 @@ export class NCToolpathPlot extends HTMLElement {
     this.replayBusy = false;
     this.replayPosition = 0;
     this.replayRequestedPosition = 0;
+    this.replayPrepared = false;
+    if (this.cursorReplayTimer !== undefined) clearTimeout(this.cursorReplayTimer);
+    this.cursorReplayTimer = undefined;
     const cancel = this.shadowRoot?.querySelector<HTMLButtonElement>('#cancel-removal');
-    if (cancel && !this.materialSimulation) cancel.hidden = true;
+    if (cancel) cancel.hidden = true;
     if (active) this.replayStatus('Replay stopped. Last displayed stock is retained; no further cuts are applied.');
     this.updateReplayControls();
   }
 
   private replayStatus(text: string): void {
     const status = this.shadowRoot?.getElementById('replay-status');
-    if (status) status.textContent = text;
+    if (status) status.textContent = `${text}${this.gpuFallbackReason ? ` GPU unavailable: ${this.gpuFallbackReason}. Using CPU simulation.` : ''}`;
   }
 
   private async startReplay(): Promise<void> {
@@ -549,7 +619,11 @@ export class NCToolpathPlot extends HTMLElement {
     const run = this.displayedRunId ? this.executedProgramService.getPlotRun(this.displayedRunId) : undefined;
     const input = this.removalPreparation?.simulation;
     if (!run || !input || this.stale) {
-      this.replayStatus('Bind stock and plot the current program before starting replay.');
+      this.replayStatus('Plot the current program with a configured backend stock binding before starting replay.');
+      return;
+    }
+    if (this.materialReplay && this.replayPrepared) {
+      await this.seekReplay(0);
       return;
     }
     let generation = this.replayGeneration;
@@ -557,7 +631,8 @@ export class NCToolpathPlot extends HTMLElement {
       const timeline = createPlotReplayTimeline(run);
       this.cancelMaterialRemoval();
       generation = this.replayGeneration;
-      const session = this.createMaterialReplaySession(run.runId);
+      const session = await this.createReplaySession(run.runId);
+      if (generation !== this.replayGeneration) { session.cancel(); return; }
       this.materialReplay = session;
       this.replayTimeline = timeline;
       this.replayBusy = true;
@@ -570,12 +645,13 @@ export class NCToolpathPlot extends HTMLElement {
         status.hidden = false;
         status.textContent = 'Line replay: stock is shown after completed execution occurrences. Feed cutting is assumed; spindle operation is not verified.';
       }
-      const frame = await session.start(input, timeline.occurrences.map((occurrence) => occurrence.executionStep),
+      const frame = await this.startSelectedSession(session, input, timeline.occurrences.map((occurrence) => occurrence.executionStep),
         (processed, total) => {
           if (this.materialReplay === session && !this.stale)
             this.replayStatus(`Updating replay stock: ${processed}/${total} cutting motions...`);
         });
       if (generation !== this.replayGeneration || this.stale || session.runId !== this.displayedRunId) return;
+      this.replayPrepared = true;
       this.installReplayFrame(frame);
     } catch (error) {
       if (generation !== this.replayGeneration || (error instanceof DOMException && error.name === 'AbortError')) return;
@@ -591,8 +667,10 @@ export class NCToolpathPlot extends HTMLElement {
   }
 
   private async seekReplay(position: number, playback = false): Promise<void> {
-    const session = this.materialReplay;
+    let session = this.materialReplay;
     if (!session || this.stale) return;
+    if (this.cursorReplayTimer !== undefined) clearTimeout(this.cursorReplayTimer);
+    this.cursorReplayTimer = undefined;
     if (!playback) this.pauseReplay();
     const generation = ++this.replayGeneration;
     this.replayBusy = true;
@@ -600,7 +678,21 @@ export class NCToolpathPlot extends HTMLElement {
     this.updateReplayControls();
     this.replayStatus(`Seeking executed occurrence ${position}...`);
     try {
-      const frame = await session.seek(position);
+      let frame: ReplayFrame | GpuReplayFrame;
+      try { frame = await session.seek(position); }
+      catch (error) {
+        if (!(session instanceof GpuMaterialReplaySession) || (error instanceof DOMException && error.name === 'AbortError')) throw error;
+        if (generation !== this.replayGeneration || session !== this.materialReplay || this.stale) return;
+        console.error('GPU replay failed; switching to CPU:', error);
+        this.gpuFallbackReason = error instanceof Error ? error.message : 'GPU replay failure';
+        session.cancel();
+        const input = this.removalPreparation?.simulation;
+        if (!input || !this.replayTimeline) throw error;
+        session = this.createMaterialReplaySession(session.runId);
+        this.materialReplay = session;
+        await session.start(input, this.replayTimeline.occurrences.map((entry) => entry.executionStep));
+        frame = await session.seek(position);
+      }
       if (generation !== this.replayGeneration || this.stale || session !== this.materialReplay) return;
       this.installReplayFrame(frame);
       if (frame.stop || frame.position === frame.total) this.pauseReplay();
@@ -627,7 +719,21 @@ export class NCToolpathPlot extends HTMLElement {
     }, 150);
   }
 
-  private installReplayFrame(frame: ReplayFrame): void {
+  private installReplayFrame(frame: ReplayFrame | GpuReplayFrame): void {
+    if ('backend' in frame) {
+      if (this.materialObject !== frame.stock.group) this.replaceMaterialObject(frame.stock.group);
+      this.replayPosition = frame.position;
+      this.replayRequestedPosition = frame.requestedPosition;
+      this.selectReplayFrame(frame);
+      const occurrence = this.replayTimeline?.occurrences[frame.position - 1];
+      const stopped = frame.stop ? ` Stopped before unsupported step ${frame.stop.executionStep ?? '?'}: ${frame.stop.message}.` : '';
+      const text = `GPU tri-dexel ${frame.phase}: ${frame.pitchMm} mm ray pitch, ${frame.position}/${frame.total}, line ${occurrence?.lineNumber ?? '?'}; ${frame.processedMotions} completed cutting motions; ${frame.cacheHit ? 'cached GPU state' : `${frame.elapsedMs.toFixed(0)} ms compute/readiness`}; ${(frame.estimatedBytes / 1048576).toFixed(1)} MiB estimated CPU/GPU buffers.${stopped} Sampling pitch is not a certified surface tolerance. Magenta pixels indicate a display traversal limit; increase pitch. Feed cutting is assumed; spindle operation is not verified.`;
+      this.replayStatus(text);
+      const status = this.shadowRoot?.getElementById('material-removal-status');
+      if (status) { status.hidden = false; status.textContent = text; }
+      this.updateReplayControls();
+      return;
+    }
     if (frame.replace || !this.materialObject || this.materialObject.name !== 'machined-stock') {
       this.installStockSurface(frame);
     } else {
@@ -661,11 +767,30 @@ export class NCToolpathPlot extends HTMLElement {
       : `Initial stock (0/${frame.total})`;
     const stopped = frame.stop ? ` Stopped before unsupported step ${frame.stop.executionStep ?? '?'}: ${frame.stop.message}.` : '';
     const incomplete = this.replayTimeline?.complete ? '' : ' Motion occurrences only: backend command history is unavailable.';
-    this.replayStatus(`${prefix}. ${frame.processedMotions} cutting motions; ${frame.subtractionMs.toFixed(0)} ms subtraction, ${frame.meshingMs.toFixed(0)} ms meshing${frame.checkpointMs ? `, ${frame.checkpointMs.toFixed(0)} ms checkpoints` : ''}. Checkpoints: ${frame.checkpointCount}, ${(frame.checkpointBytes / 1048576).toFixed(1)} MiB${frame.skippedCheckpoints ? `; ${frame.skippedCheckpoints} skipped for memory` : ''}${frame.evictedCheckpoints ? `; ${frame.evictedCheckpoints} evicted` : ''}.${stopped}${incomplete}`);
+    const history = frame.historyMode === 'partial-disk'
+      ? ` Partial history: ${((frame.historyBytes ?? 0) / 1048576).toFixed(1)} MiB disk, ${(frame.historyMs ?? 0).toFixed(0)} ms history encoding/storage/restore; ${frame.appliedMotions} new cutting motions.`
+      : ` Checkpoints: ${frame.checkpointCount}, ${(frame.checkpointBytes / 1048576).toFixed(1)} MiB${frame.skippedCheckpoints ? `; ${frame.skippedCheckpoints} skipped for memory` : ''}${frame.evictedCheckpoints ? `; ${frame.evictedCheckpoints} evicted` : ''}.`;
+    const missReason = {
+      'first-visit': 'first visit',
+      'evicted-or-cleared': 'previous surfaces evicted or cleared',
+      'not-retained': 'previous visit not retained',
+      disabled: 'surface cache disabled',
+    };
+    const surfaceMode = frame.surfaceCacheHit ? 'Cached exact surfaces'
+      : frame.surfaceReconstructed === false ? 'Unchanged surfaces' : 'Surface reconstruction';
+    const meshPhases = frame.extractionMs !== undefined && frame.triangulationMs !== undefined && frame.adaptationMs !== undefined
+      ? ` [${frame.extractionMs.toFixed(0)}/${frame.triangulationMs.toFixed(0)}/${frame.adaptationMs.toFixed(0)} ms extraction/triangulation/adaptation; ${frame.dirtyChunks ?? 0} dirty, ${frame.remeshedChunks ?? 0} rebuilt chunks; ${frame.fineTriangles ?? 0} fine -> ${frame.outputTriangles ?? 0} output rebuilt triangles]`
+      : '';
+    const cacheLimit = frame.surfaceCacheLimitBytes === undefined ? ''
+      : `/${(frame.surfaceCacheLimitBytes / 1048576).toFixed(1)}`;
+    const topology = frame.topologyPasses === undefined ? ''
+      : `; ${frame.topologyPasses} topology passes${frame.topologyReused ? ' (reused)' : ''}; ${((frame.topologyCachePeakBytes ?? 0) / 1048576).toFixed(1)} MiB temporary topology`;
+    const surfaces = ` ${surfaceMode}${frame.surfaceCacheMissReason ? ` (${missReason[frame.surfaceCacheMissReason]})` : ''}${meshPhases}${topology}; ${((frame.surfaceCacheBytes ?? 0) / 1048576).toFixed(1)}${cacheLimit} MiB shared surface history; ${frame.surfaceCacheStates ?? 0} retained states${frame.surfaceCacheEvictions ? `; ${frame.surfaceCacheEvictions} evicted` : ''}${frame.surfaceCacheClears ? `; ${frame.surfaceCacheClears} cleared` : ''}${frame.surfaceCacheSkipped ? `; ${frame.surfaceCacheSkipped} states not retained for memory` : ''}.`;
+    this.replayStatus(`${prefix}. ${frame.processedMotions} cutting motions; ${frame.subtractionMs.toFixed(0)} ms subtraction, ${frame.meshingMs.toFixed(0)} ms meshing${frame.checkpointMs ? `, ${frame.checkpointMs.toFixed(0)} ms checkpoints` : ''}.${history}${surfaces}${frame.historyWarning ? ` ${frame.historyWarning}` : ''}${stopped}${incomplete}`);
     this.updateReplayControls();
   }
 
-  private selectReplayFrame(frame: ReplayFrame): void {
+  private selectReplayFrame(frame: Pick<ReplayFrame, 'position' | 'executionStep'>): void {
     const occurrence = this.replayTimeline?.occurrences[frame.position - 1];
     if (!occurrence) {
       this.clearSelection();
@@ -822,6 +947,23 @@ export class NCToolpathPlot extends HTMLElement {
           background: color-mix(in srgb, var(--vscode-editor-background, #282c34) 80%, transparent);
           padding: 4px 8px;
           border-radius: 4px;
+          max-width: calc(100% - 16px);
+          box-sizing: border-box;
+        }
+        .simulation-controls {
+          display: flex;
+          flex-wrap: wrap;
+          align-items: center;
+          gap: 4px;
+          margin-top: 6px;
+        }
+        .simulation-controls[hidden] {
+          display: none;
+        }
+        .simulation-controls label {
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
         }
         .orbit-hint {
           position: absolute;
@@ -920,33 +1062,6 @@ export class NCToolpathPlot extends HTMLElement {
             <button class="plot-button" id="view-xz">X-Z</button>
             <button class="plot-button" id="view-yz">Y-Z</button>
           </div>
-          <details id="removal-setup" hidden style="max-height:260px;overflow:auto;background:var(--vscode-editor-background,#282c34);padding:8px">
-            <summary>Removal setup (geometric preview)</summary>
-            <label>Workpiece frame <select id="removal-frame"><option value="">Select stock workpiece frame</option></select></label>
-            <p>Map the initial program stock into this frame. Feed cutting is assumed; no spindle verification.</p>
-            ${['position', 'rotation', 'spindle'].map((prefix) => `
-              <div>${prefix === 'position' ? 'Program-to-workpiece translation (mm)' : prefix === 'rotation' ? 'Program-to-workpiece rotation (degrees, X/Y/Z)' : 'Spindle origin in workpiece frame (mm)'}</div>
-              <div style="display:flex;gap:4px">${['x', 'y', 'z'].map((axis) => `
-                <label>${axis.toUpperCase()} <input id="removal-${prefix}-${axis}" type="number" value="0" step="any" style="width:65px"></label>
-              `).join('')}</div>
-            `).join('')}
-            <label>Turning spindle axis <select id="removal-spindle-axis"><option value="z">+Z</option><option value="x">+X</option><option value="y">+Y</option></select></label>
-            <label>Boundary spacing (mm) <input id="removal-resolution" type="number" min="0.05" max="5" step="0.05" value="0.5" style="width:65px"></label>
-            <button class="plot-button" id="run-removal">Bind stock and run removal</button>
-          </details>
-          <details id="stock-replay" hidden style="max-height:230px;overflow:auto;background:var(--vscode-editor-background,#282c34);padding:8px">
-            <summary>Line-by-line stock replay</summary>
-            <div style="display:flex;flex-wrap:wrap;gap:4px;margin:6px 0">
-              <button class="plot-button" id="replay-start" disabled>Start Replay</button>
-              <button class="plot-button" id="replay-previous" disabled>Previous</button>
-              <button class="plot-button" id="replay-play" aria-pressed="false" disabled>Play</button>
-              <button class="plot-button" id="replay-next" disabled>Next</button>
-              <button class="plot-button" id="replay-final" disabled title="Leave replay and calculate the final stock">Final Stock</button>
-            </div>
-            <label>Executed timeline <input id="replay-position" type="range" min="0" max="0" value="0" step="1" disabled style="width:100%"></label>
-            <label><input id="replay-follow" type="checkbox" disabled> Follow editor cursor / selected occurrence</label>
-            <div id="replay-status" role="status" style="margin-top:6px">Replay is optional. Repeated source lines are separate executed occurrences.</div>
-          </details>
           <div class="axis-controls">
             <button class="plot-button" id="rotate-x" title="Rotate around X axis">Rot X</button>
             <button class="plot-button" id="rotate-y" title="Rotate around Y axis">Rot Y</button>
@@ -963,6 +1078,17 @@ export class NCToolpathPlot extends HTMLElement {
           <div id="material-removal-status" role="status" style="max-height:60px;overflow:auto" hidden></div>
           <label for="plot-occurrence">Occurrence</label>
           <select id="plot-occurrence" disabled style="max-width:100%;width:180px;height:28px"></select>
+          <div id="replay-status" role="status" style="max-height:60px;overflow:auto;margin-top:6px" hidden>Cursor following is automatic. Repeated source lines are separate executed occurrences.</div>
+          <div id="stock-replay" class="simulation-controls" role="group" aria-label="Stock simulation controls" hidden>
+            <label title="Experimental GPU simulation; unsupported operations explicitly fall back to CPU"><input id="gpu-stock" type="checkbox" checked> GPU progressive</label>
+            <label>GPU fine pitch (mm) <input id="gpu-fine-resolution" type="number" min="0.001" max="5" step="0.001" value="0.02" style="width:65px"></label>
+            <label>CPU resolution (mm) <input id="removal-resolution" type="number" min="0.05" max="5" step="0.05" value="0.05" style="width:65px" disabled></label>
+            <button class="plot-button" id="replay-start" disabled title="Return to initial stock">Replay</button>
+            <button class="plot-button" id="replay-previous" disabled>Previous</button>
+            <button class="plot-button" id="replay-play" aria-pressed="false" disabled>Play</button>
+            <button class="plot-button" id="replay-next" disabled>Next</button>
+            <button class="plot-button" id="replay-final" disabled title="Seek the retained final stock history">Final Stock</button>
+          </div>
         </div>
         <div class="orbit-hint">
           🖱️ Left: Rotate | Middle: Pan | Scroll: Zoom
@@ -990,12 +1116,7 @@ export class NCToolpathPlot extends HTMLElement {
       }
     });
     this.shadowRoot?.getElementById('replay-final')?.addEventListener('click', () => {
-      if (this.removalPreparation) void this.startMaterialRemoval(this.removalPreparation);
-    });
-    this.shadowRoot?.querySelector<HTMLInputElement>('#replay-position')?.addEventListener('input', (event) =>
-      void this.seekReplay(Number((event.currentTarget as HTMLInputElement).value)));
-    this.shadowRoot?.querySelector<HTMLInputElement>('#replay-follow')?.addEventListener('change', () => {
-      if (this.selectionLocation) this.selectOccurrence(this.selectedExecutionStep);
+      if (this.replayTimeline) void this.seekReplay(this.replayTimeline.occurrences.length);
     });
     this.shadowRoot?.querySelector<HTMLSelectElement>('#plot-occurrence')?.addEventListener('change', (event) => {
       const control = event.currentTarget as HTMLSelectElement;
@@ -1012,7 +1133,11 @@ export class NCToolpathPlot extends HTMLElement {
 
     const materialButton = this.shadowRoot?.getElementById('toggle-material');
     materialButton?.addEventListener('click', () => this.toggleMaterial());
-    this.shadowRoot?.getElementById('run-removal')?.addEventListener('click', () => void this.runRemovalFromSetup());
+    this.shadowRoot?.getElementById('removal-resolution')?.addEventListener('change', () => void this.changeRemovalResolution());
+    for (const id of ['gpu-stock', 'gpu-fine-resolution']) this.shadowRoot?.getElementById(id)?.addEventListener('change', () => {
+      const preparation = this.removalPreparation;
+      if (preparation && !this.stale) void this.startMaterialRemoval(preparation);
+    });
     this.shadowRoot?.getElementById('cancel-removal')?.addEventListener('click', () => {
       const replay = Boolean(this.materialReplay);
       this.cancelMaterialRemoval();
@@ -1235,7 +1360,7 @@ export class NCToolpathPlot extends HTMLElement {
     }
   }
 
-  private initThree() {
+  private async initThree(): Promise<void> {
     const container = this.shadowRoot?.getElementById('plot-container');
     if (!container) return;
 
@@ -1249,15 +1374,44 @@ export class NCToolpathPlot extends HTMLElement {
     this.camera.position.set(50, 50, 50);
     this.camera.lookAt(0, 0, 0);
 
-    // Renderer setup — WebGL is unavailable in some browsers/sandboxes/headless hosts.
-    try {
-      this.renderer = new THREE.WebGLRenderer({ antialias: true });
-    } catch (error) {
-      console.error('Failed to create a WebGL renderer:', error);
-      this.showWebglUnavailable(container);
-      return;
+    if (navigator.gpu) {
+      try {
+        const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+        if (!adapter) throw new Error('No WebGPU adapter');
+        const device = await adapter.requestDevice();
+        const renderer = new WebGPURenderer({ antialias: true, device });
+        try { await renderer.init(); }
+        catch (error) { await renderer.dispose(); device.destroy(); throw error; }
+        if (!this.isConnected) { await renderer.dispose(); device.destroy(); return; }
+        this.gpuDevice = device;
+        this.renderer = renderer;
+        device.addEventListener('uncapturederror', (event) => {
+          console.error('WebGPU device error:', event.error.message);
+          this.replayStatus(`WebGPU error: ${event.error.message}. Switch to CPU simulation or reload the view.`);
+        });
+        void device.lost.then((info) => {
+          if (info.reason === 'destroyed' || this.gpuDevice !== device || !this.isConnected) return;
+          console.error('WebGPU device lost:', info.message);
+          this.gpuComputeError = `WebGPU device lost: ${info.message || info.reason}`;
+          this.cancelMaterialRemoval();
+          const gpuControl = this.shadowRoot?.querySelector<HTMLInputElement>('#gpu-stock');
+          if (gpuControl) gpuControl.disabled = true;
+          this.replayStatus(`WebGPU device lost: ${info.message}. Reload the view to restore rendering.`);
+        });
+      } catch (error) {
+        console.warn('WebGPU renderer unavailable; using WebGL and CPU simulation:', error);
+        this.gpuFallbackReason = error instanceof Error ? error.message : 'WebGPU initialization failed';
+      }
     }
-    this.renderer.setSize(container.clientWidth, container.clientHeight);
+    if (!this.renderer) {
+      try { this.renderer = new THREE.WebGLRenderer({ antialias: true }); }
+      catch (error) {
+        console.error('Failed to create a WebGL renderer:', error);
+        this.showWebglUnavailable(container);
+        return;
+      }
+    }
+    this.renderer.setSize(Math.max(1, container.clientWidth), Math.max(1, container.clientHeight));
     this.renderer.setPixelRatio(window.devicePixelRatio);
     container.appendChild(this.renderer.domElement);
 
@@ -1289,6 +1443,26 @@ export class NCToolpathPlot extends HTMLElement {
     this.resizeObserver.observe(container);
 
     this.setupThemeObserver();
+
+    if (this.renderer instanceof WebGPURenderer && this.gpuDevice) {
+      const warmup = new GpuDexelStock(this.renderer, this.gpuDevice, new THREE.Vector3(1, 1, 1), 0.1, false, [], new THREE.Matrix4());
+      this.gpuWarmupStock = warmup;
+      try {
+        await warmup.calculate(0);
+        const scene = new THREE.Scene();
+        scene.add(warmup.group);
+        const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 10);
+        camera.position.set(0, 0, 3);
+        await this.renderer.compileAsync(scene, camera);
+        scene.remove(warmup.group);
+      } catch (error) {
+        console.error('GPU stock shader preparation failed:', error);
+        this.gpuComputeError = error instanceof Error ? error.message : 'GPU shader preparation failed';
+        warmup.dispose();
+        this.gpuWarmupStock = undefined;
+      }
+      if (!this.isConnected) return;
+    }
 
     // Start animation loop
     this.animateScene();
@@ -1371,7 +1545,7 @@ export class NCToolpathPlot extends HTMLElement {
 
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
-    this.renderer.setSize(width, height);
+    this.renderer.setSize(Math.max(1, width), Math.max(1, height));
   }
 
   private updatePlot(
@@ -1639,7 +1813,7 @@ export class NCToolpathPlot extends HTMLElement {
     this.stale = false;
     this.simulationEnabled = false;
     this.updateMaterialRemovalStatus();
-    this.updateRemovalSetup();
+    this.updateRemovalResolution();
     this.updateReplayControls();
     this.materialVisible = true;
     this.updateMaterialControl();
@@ -1675,6 +1849,8 @@ export class NCToolpathPlot extends HTMLElement {
   /** Segmented paths and highlights own their resources; never dispose shared axes/cache here. */
   private removeOwnedPlotObject(object: THREE.Object3D): void {
     this.scene?.remove(object);
+    const releaseGpuStock: unknown = object.userData.releaseGpuStock;
+    if (typeof releaseGpuStock === 'function') { releaseGpuStock(); return; }
     const geometries = new Set<THREE.BufferGeometry>();
     const materials = new Set<THREE.Material>();
     object.traverse((child) => {

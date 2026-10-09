@@ -41,6 +41,7 @@ export class MaterialReplaySession {
     input: DeepReadonly<SimulationInput>,
     steps: readonly number[],
     progress: (processed: number, total: number) => void = () => {},
+    prepareFinal = false,
   ): Promise<ReplayFrame> {
     this.cancel();
     this.total = steps.length;
@@ -81,6 +82,7 @@ export class MaterialReplaySession {
         requestId: ++this.requestId,
         input: captured,
         steps: [...steps],
+        prepareFinal,
       });
     } catch (error) {
       this.cancel();
@@ -131,6 +133,27 @@ export class MaterialReplaySession {
   }
 
   cancel(): void {
-    this.fail(new DOMException('Material replay cancelled', 'AbortError'));
+    const worker = this.worker;
+    const active = this.active;
+    const queued = this.queued;
+    this.worker = undefined;
+    this.active = undefined;
+    this.queued = undefined;
+    const error = new DOMException('Material replay cancelled', 'AbortError');
+    active?.reject(error);
+    queued?.reject(error);
+    if (!worker) return;
+    worker.onmessage = null;
+    worker.onmessageerror = null;
+    worker.onerror = (event) => {
+      console.error('Material replay cache shutdown failed:', event.message);
+      worker.terminate();
+    };
+    try {
+      worker.postMessage({ type: 'close', requestId: 0 });
+    } catch (shutdownError) {
+      console.error('Material replay cache shutdown request failed:', shutdownError);
+      worker.terminate();
+    }
   }
 }

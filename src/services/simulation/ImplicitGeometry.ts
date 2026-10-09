@@ -19,6 +19,7 @@ export interface ImplicitVolume {
     spindleAxis: THREE.Vector3;
     polygon: readonly THREE.Vector2[];
     planes?: readonly { x: number; y: number; offset: number }[];
+    radialDirection?: THREE.Vector3;
   };
   /** Ball translations in a shared rotation-only cutter frame. */
   ballBounds?: {

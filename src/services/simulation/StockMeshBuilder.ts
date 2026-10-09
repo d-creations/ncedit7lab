@@ -5,11 +5,15 @@ import {
   boundaryNormalComponent,
   type BoundaryCell,
   type BoundaryCoordinates,
+  type BoundaryTopology,
 } from './StockModel';
 import { CELL_CORNERS, CELL_EDGES, edgeIndex } from './ImplicitGeometry';
 import { boundedQef, type HermiteSample } from './HermiteQef';
 import { SIMULATION_LIMITS, type StockSurfaceChunk } from './SimulationTypes';
 import { adaptSurface, surfaceAdaptationWorkspaceBound } from './SurfaceAdaptation';
+
+export const MAX_TOPOLOGY_CACHE_BYTES = 32 * 1024 * 1024;
+const TOPOLOGY_WORDS = 7;
 
 const FACES = [
   { axis: 0, side: 0, corners: [0, 2, 6, 4] },
@@ -225,6 +229,11 @@ export class StockMeshBuilder {
   private readonly surfaceToleranceRatio: number;
   private skippedAdaptationChunks = 0;
   private intersectionCachePeak = 0;
+  private readonly topologyCacheBytes: number;
+  private warnedTopologyCache = false;
+  topologyPasses = 0;
+  topologyReused = false;
+  topologyCachePeakBytes = 0;
 
   /** Cumulative chunk rebuilds retaining fine geometry due to optional workspace. */
   get skippedChunks(): number {
@@ -241,8 +250,12 @@ export class StockMeshBuilder {
 
   constructor(
     private readonly faceLimit: number = SIMULATION_LIMITS.surfaceFaces,
-    options: { surfaceToleranceRatio?: number } = {},
+    options: { surfaceToleranceRatio?: number; topologyCacheBytes?: number } = {},
   ) {
+    this.topologyCacheBytes = options.topologyCacheBytes ?? MAX_TOPOLOGY_CACHE_BYTES;
+    if (!Number.isSafeInteger(this.topologyCacheBytes) || this.topologyCacheBytes < 0 ||
+      this.topologyCacheBytes > MAX_TOPOLOGY_CACHE_BYTES)
+      throw new Error('Invalid bounded topology cache capacity');
     this.surfaceToleranceRatio = options.surfaceToleranceRatio ?? 0.1;
     if (
       !Number.isFinite(this.surfaceToleranceRatio) ||
@@ -511,6 +524,9 @@ export class StockMeshBuilder {
     const extractionBefore = stock.boundaryExtractionMs;
     this.chunkDiagnostics.length = 0;
     this.extractionMs = 0;
+    this.topologyPasses = 0;
+    this.topologyReused = false;
+    this.topologyCachePeakBytes = 0;
     const changed: StockSurfaceChunk[] = [];
     const requested = new Set<number>();
     const [nx, ny, nz] = stock.chunkDimensions;
@@ -551,33 +567,85 @@ export class StockMeshBuilder {
     const intersections = new Map<string, HermiteSample>();
     const seams = new Map<string, Set<number>>();
     let seamBytes = 0;
-    const retainedWorkspace = (): number =>
-      this.surfaceCacheBytes() + seamBytes + this.chunkDiagnostics.length * 256;
-    // Discover coarse seam keys before collecting fine breakpoints. Each pass
-    // retains only one chunk's extracted cells, not the whole fine surface.
-    for (const [id, cells] of stock.iterateBoundaryTopology(extractionContext, retainedWorkspace)) {
-      chunkIds.add(id);
-      for (const cell of cells) {
-        const direction = cell.span?.findIndex((size) => size > 1) ?? -1;
-        if (direction < 0) continue;
-        for (const face of FACES) {
-          if (face.axis === direction) continue;
-          if (!face.edges.some((edge) => cell.crossedEdges & (1 << edge))) continue;
-          const key = seamKey(cell, face.axis, face.side, direction);
-          if (!seams.has(key)) {
-            seams.set(key, new Set());
-            seamBytes += 192;
+    const topology = new Map<number, Uint32Array>();
+    let topologyBytes = 0;
+    let cachingTopology = this.topologyCacheBytes > 0;
+    const abandonTopology = (): void => {
+      topology.clear();
+      topologyBytes = 0;
+      cachingTopology = false;
+      if (!this.warnedTopologyCache) {
+        console.warn('Temporary seam topology reuse cannot fit available workspace; using streamed extraction at unchanged detail.');
+        this.warnedTopologyCache = true;
+      }
+    };
+    const retainedWorkspace = (): number => {
+      const base = this.surfaceCacheBytes() + seamBytes + this.chunkDiagnostics.length * 256;
+      return base + topologyBytes;
+    };
+    const previousRelease = stock.releaseSurfaceWorkspace;
+    stock.releaseSurfaceWorkspace = (required) => {
+      const released = topologyBytes;
+      if (released) abandonTopology();
+      return released + (released < required ? (previousRelease?.(required - released) ?? 0) : 0);
+    };
+    try {
+      // Discover coarse seam keys before collecting fine breakpoints. Each pass
+      // retains only one chunk's extracted cells, not the whole fine surface.
+      this.topologyPasses++;
+      for (const [id, cells] of stock.iterateBoundaryTopology(
+        extractionContext,
+        retainedWorkspace,
+      )) {
+        chunkIds.add(id);
+        if (cachingTopology) {
+          const bytes = cells.length * TOPOLOGY_WORDS * 4 + 320;
+          const encodable = cells.every((cell) =>
+            [cell.x, cell.y, cell.z, ...(cell.span ?? [0, 0, 0]), cell.crossedEdges].every(
+              (value) => Number.isSafeInteger(value) && value >= 0 && value <= 0xffffffff,
+            ),
+          );
+          if (
+            !encodable ||
+            topologyBytes + bytes > this.topologyCacheBytes ||
+            !stock.canAccountSurfaceWorkspace(retainedWorkspace() + bytes)
+          ) {
+            abandonTopology();
+          } else if (cachingTopology) {
+            topologyBytes += bytes;
             stock.accountSurfaceWorkspace(retainedWorkspace());
+            const packed = new Uint32Array(cells.length * TOPOLOGY_WORDS);
+            cells.forEach((cell, index) => {
+              const offset = index * TOPOLOGY_WORDS;
+              packed.set(
+                [cell.x, cell.y, cell.z, ...(cell.span ?? [0, 0, 0]), cell.crossedEdges],
+                offset,
+              );
+            });
+            topology.set(id, packed);
+            this.topologyCachePeakBytes = Math.max(this.topologyCachePeakBytes, topologyBytes);
+          }
+        }
+        for (const cell of cells) {
+          const direction = cell.span?.findIndex((size) => size > 1) ?? -1;
+          if (direction < 0) continue;
+          for (const face of FACES) {
+            if (face.axis === direction) continue;
+            if (!face.edges.some((edge) => cell.crossedEdges & (1 << edge))) continue;
+            const key = seamKey(cell, face.axis, face.side, direction);
+            if (!seams.has(key)) {
+              seams.set(key, new Set());
+              seamBytes += 192;
+              stock.accountSurfaceWorkspace(retainedWorkspace());
+            }
           }
         }
       }
-    }
-    const changedIds = new Set([
-      ...requested,
-      ...[...chunkIds].filter((id) => !this.cache.has(id)),
-    ]);
-    for (const [, cells] of stock.iterateBoundaryTopology(extractionContext, retainedWorkspace))
-      for (const cell of cells)
+      const changedIds = new Set([
+        ...requested,
+        ...[...chunkIds].filter((id) => !this.cache.has(id)),
+      ]);
+      const collectBreakpoints = (cell: BoundaryTopology): void => {
         for (const face of FACES) {
           if (!face.edges.some((edge) => cell.crossedEdges & (1 << edge))) continue;
           for (const direction of [0, 1, 2]) {
@@ -593,133 +661,183 @@ export class StockMeshBuilder {
           }
           stock.accountSurfaceWorkspace(retainedWorkspace());
         }
-    stock.accountSurfaceWorkspace(retainedWorkspace());
-    for (const id of changedIds)
-      if (!chunkIds.has(id)) {
-        const previous = this.cache.get(id);
-        if (!previous) continue;
-        this.triangles -= previous.positions.length / 9;
-        this.cache.delete(id);
-        changed.push({ id, positions: new Float32Array(), normals: new Float32Array() });
-      }
-    for (const [id, cells] of stock.iterateBoundaryChunks(changedIds, retainedWorkspace)) {
-      const chunkStarted = performance.now();
-      // Shared edges use the same ascending lattice endpoints, stored root and
-      // Float32 calculation in either chunk. Memoization need not retain samples
-      // from completed chunks; face-QEF inputs remain exactly canonical.
-      intersections.clear();
-      const count = cells.reduce((sum, cell) => sum + triangleCapacity(cell, seams), 0);
-      const previous = (this.cache.get(id)?.positions.length ?? 0) / 9;
-      const workspaceBytes = retainedWorkspace() + count * 73;
-      stock.accountSurfaceWorkspace(workspaceBytes + intersections.size * 256);
-      const positions = new Float32Array(count * 9),
-        normals = new Float32Array(count * 9);
-      const eligible = new Uint8Array(count);
-      let offset = 0;
-      this.visitTriangles(
-        stock,
-        cells,
-        intersections,
-        seams,
-        workspaceBytes,
-        (points, directions, adaptable) => {
-          eligible[offset / 9] = adaptable ? 1 : 0;
-          for (let i = 0; i < 3; i++) {
-            points[i].toArray(positions, offset);
-            directions[i].toArray(normals, offset);
-            offset += 3;
-          }
-        },
-      );
-      const baseBytes = workspaceBytes + intersections.size * 256;
-      const triangulationMs = performance.now() - chunkStarted;
-      // Fine staging is budgeted independently; the actual reduced triangle
-      // count is checked before allocating its final output buffers.
-      const x = id % nx,
-        y = Math.floor(id / nx) % ny,
-        z = Math.floor(id / (nx * ny));
-      const minimum = new THREE.Vector3(x, y, z)
-        .multiplyScalar(stock.chunkSize * stock.resolutionMm)
-        .add(stock.latticeMinimum);
-      let adaptationBytes = 0;
-      const adaptable =
-        this.surfaceToleranceRatio > 0 && eligible.subarray(0, offset / 9).some(Boolean);
-      const canAdapt =
-        adaptable &&
-        stock.canAccountSurfaceWorkspace(
-          baseBytes + surfaceAdaptationWorkspaceBound(offset / 9) + offset * 8,
-        );
-      // Deliberately retain the fine mesh (zero added deviation) when optional
-      // worst-case work plus final output cannot fit. Core budget errors above
-      // and below still propagate; this is not an exception fallback.
-      if (adaptable && !canAdapt) this.skippedAdaptationChunks++;
-      const adaptationStarted = performance.now();
-      const selection = canAdapt
-        ? adaptSurface(
-            positions.subarray(0, offset),
-            normals.subarray(0, offset),
-            eligible.subarray(0, offset / 9),
-            stock.resolutionMm * this.surfaceToleranceRatio,
-            (bytes) => {
-              adaptationBytes = bytes;
-              stock.accountSurfaceWorkspace(baseBytes + bytes);
-            },
-            new THREE.Box3(
-              minimum,
-              minimum.clone().addScalar(stock.chunkSize * stock.resolutionMm),
-            ),
-          )
-        : undefined;
-      const adaptationMs = performance.now() - adaptationStarted;
-      const outputTriangles = selection ? selection.length / 3 : offset / 9;
-      if (this.triangles - previous + outputTriangles > this.faceLimit * 2)
-        throw new Error(
-          `Stock surface exceeds the ${this.faceLimit.toLocaleString()} face budget; use coarser boundary spacing`,
-        );
-      let outputPositions = positions,
-        outputNormals = normals;
-      if (selection) {
-        stock.accountSurfaceWorkspace(baseBytes + adaptationBytes + outputTriangles * 72);
-        outputPositions = new Float32Array(outputTriangles * 9);
-        outputNormals = new Float32Array(outputTriangles * 9);
-        selection.forEach((source, index) => {
-          for (let axis = 0; axis < 3; axis++) {
-            outputPositions[index * 3 + axis] = positions[source + axis];
-            outputNormals[index * 3 + axis] = normals[source + axis];
-          }
-        });
-      } else if (offset !== positions.length) {
-        stock.accountSurfaceWorkspace(baseBytes + offset * 8);
-        outputPositions = positions.slice(0, offset);
-        outputNormals = normals.slice(0, offset);
-      }
-      const chunk = {
-        id,
-        positions: outputPositions,
-        normals: outputNormals,
       };
-      this.cache.set(id, chunk);
-      this.triangles += outputTriangles - previous;
-      changed.push(chunk);
-      stock.accountSurfaceWorkspace(retainedWorkspace() + 256);
-      this.chunkDiagnostics.push({
-        id,
-        cells: cells.length,
-        analyticalPanels: cells.filter((cell) => cell.span?.some((span) => span > 1)).length,
-        fineTriangles: offset / 9,
-        outputTriangles,
-        triangulationMs,
-        adaptationMs,
-        elapsedMs: performance.now() - chunkStarted,
-      });
+      if (cachingTopology) {
+        cachedTopology: for (const packed of topology.values()) {
+          for (let offset = 0; offset < packed.length; offset += TOPOLOGY_WORDS) {
+            collectBreakpoints({
+              x: packed[offset],
+              y: packed[offset + 1],
+              z: packed[offset + 2],
+              span: packed[offset + 3]
+                ? [packed[offset + 3], packed[offset + 4], packed[offset + 5]]
+                : undefined,
+              crossedEdges: packed[offset + 6],
+            });
+            if (!cachingTopology) break cachedTopology;
+          }
+        }
+        this.topologyReused = cachingTopology;
+      }
+      if (!cachingTopology) {
+        this.topologyPasses++;
+        for (const [, cells] of stock.iterateBoundaryTopology(extractionContext, retainedWorkspace))
+          for (const cell of cells) collectBreakpoints(cell);
+      }
+      topology.clear();
+      topologyBytes = 0;
+      stock.accountSurfaceWorkspace(retainedWorkspace());
+      for (const id of changedIds)
+        if (!chunkIds.has(id)) {
+          const previous = this.cache.get(id);
+          if (!previous) continue;
+          this.triangles -= previous.positions.length / 9;
+          this.cache.delete(id);
+          changed.push({ id, positions: new Float32Array(), normals: new Float32Array() });
+        }
+      for (const [id, cells] of stock.iterateBoundaryChunks(changedIds, retainedWorkspace)) {
+        const chunkStarted = performance.now();
+        // Shared edges use the same ascending lattice endpoints, stored root and
+        // Float32 calculation in either chunk. Memoization need not retain samples
+        // from completed chunks; face-QEF inputs remain exactly canonical.
+        intersections.clear();
+        const count = cells.reduce((sum, cell) => sum + triangleCapacity(cell, seams), 0);
+        const previous = (this.cache.get(id)?.positions.length ?? 0) / 9;
+        const workspaceBytes = retainedWorkspace() + count * 73;
+        stock.accountSurfaceWorkspace(workspaceBytes + intersections.size * 256);
+        const positions = new Float32Array(count * 9),
+          normals = new Float32Array(count * 9);
+        const eligible = new Uint8Array(count);
+        let offset = 0;
+        this.visitTriangles(
+          stock,
+          cells,
+          intersections,
+          seams,
+          workspaceBytes,
+          (points, directions, adaptable) => {
+            eligible[offset / 9] = adaptable ? 1 : 0;
+            for (let i = 0; i < 3; i++) {
+              points[i].toArray(positions, offset);
+              directions[i].toArray(normals, offset);
+              offset += 3;
+            }
+          },
+        );
+        const baseBytes = workspaceBytes + intersections.size * 256;
+        const triangulationMs = performance.now() - chunkStarted;
+        // Fine staging is budgeted independently; the actual reduced triangle
+        // count is checked before allocating its final output buffers.
+        const x = id % nx,
+          y = Math.floor(id / nx) % ny,
+          z = Math.floor(id / (nx * ny));
+        const minimum = new THREE.Vector3(x, y, z)
+          .multiplyScalar(stock.chunkSize * stock.resolutionMm)
+          .add(stock.latticeMinimum);
+        let adaptationBytes = 0;
+        const adaptable =
+          this.surfaceToleranceRatio > 0 && eligible.subarray(0, offset / 9).some(Boolean);
+        const canAdapt =
+          adaptable &&
+          stock.canAccountSurfaceWorkspace(
+            baseBytes + surfaceAdaptationWorkspaceBound(offset / 9) + offset * 8,
+          );
+        // Deliberately retain the fine mesh (zero added deviation) when optional
+        // worst-case work plus final output cannot fit. Core budget errors above
+        // and below still propagate; this is not an exception fallback.
+        if (adaptable && !canAdapt) this.skippedAdaptationChunks++;
+        const adaptationStarted = performance.now();
+        const selection = canAdapt
+          ? adaptSurface(
+              positions.subarray(0, offset),
+              normals.subarray(0, offset),
+              eligible.subarray(0, offset / 9),
+              stock.resolutionMm * this.surfaceToleranceRatio,
+              (bytes) => {
+                adaptationBytes = bytes;
+                stock.accountSurfaceWorkspace(baseBytes + bytes);
+              },
+              new THREE.Box3(
+                minimum,
+                minimum.clone().addScalar(stock.chunkSize * stock.resolutionMm),
+              ),
+            )
+          : undefined;
+        const adaptationMs = performance.now() - adaptationStarted;
+        const outputTriangles = selection ? selection.length / 3 : offset / 9;
+        if (this.triangles - previous + outputTriangles > this.faceLimit * 2)
+          throw new Error(
+            `Stock surface exceeds the ${this.faceLimit.toLocaleString()} face budget; use coarser boundary spacing`,
+          );
+        let outputPositions = positions,
+          outputNormals = normals;
+        if (selection) {
+          stock.accountSurfaceWorkspace(baseBytes + adaptationBytes + outputTriangles * 72);
+          outputPositions = new Float32Array(outputTriangles * 9);
+          outputNormals = new Float32Array(outputTriangles * 9);
+          selection.forEach((source, index) => {
+            for (let axis = 0; axis < 3; axis++) {
+              outputPositions[index * 3 + axis] = positions[source + axis];
+              outputNormals[index * 3 + axis] = normals[source + axis];
+            }
+          });
+        } else if (offset !== positions.length) {
+          stock.accountSurfaceWorkspace(baseBytes + offset * 8);
+          outputPositions = positions.slice(0, offset);
+          outputNormals = normals.slice(0, offset);
+        }
+        const chunk = {
+          id,
+          positions: outputPositions,
+          normals: outputNormals,
+        };
+        this.cache.set(id, chunk);
+        this.triangles += outputTriangles - previous;
+        changed.push(chunk);
+        stock.accountSurfaceWorkspace(retainedWorkspace() + 256);
+        this.chunkDiagnostics.push({
+          id,
+          cells: cells.length,
+          analyticalPanels: cells.filter((cell) => cell.span?.some((span) => span > 1)).length,
+          fineTriangles: offset / 9,
+          outputTriangles,
+          triangulationMs,
+          adaptationMs,
+          elapsedMs: performance.now() - chunkStarted,
+        });
+      }
+      stock.dirtyChunks.clear();
+      stock.accountSurfaceWorkspace(0);
+      this.extractionMs = stock.boundaryExtractionMs - extractionBefore;
+      return changed;
+    } finally {
+      topology.clear();
+      stock.releaseSurfaceWorkspace = previousRelease;
     }
-    stock.dirtyChunks.clear();
-    stock.accountSurfaceWorkspace(0);
-    this.extractionMs = stock.boundaryExtractionMs - extractionBefore;
-    return changed;
   }
 
   getChunks(): StockSurfaceChunk[] {
     return [...this.cache.values()].filter((chunk) => chunk.positions.length > 0);
+  }
+
+  restoreChunks(chunks: readonly StockSurfaceChunk[]): StockSurfaceChunk[] {
+    const target = new Map(chunks.map((chunk) => [chunk.id, chunk]));
+    const triangles = chunks.reduce((sum, chunk) => sum + chunk.positions.length / 9, 0);
+    if (target.size !== chunks.length || triangles > this.faceLimit * 2 ||
+      chunks.some((chunk) => chunk.positions.length % 9 ||
+        chunk.normals.length !== chunk.positions.length))
+      throw new Error('Invalid cached stock surface');
+    const changed: StockSurfaceChunk[] = [];
+    for (const id of this.cache.keys())
+      if (!target.has(id))
+        changed.push({ id, positions: new Float32Array(), normals: new Float32Array() });
+    for (const chunk of chunks)
+      if (this.cache.get(chunk.id) !== chunk) changed.push(chunk);
+    this.cache.clear();
+    for (const chunk of chunks) this.cache.set(chunk.id, chunk);
+    this.triangles = triangles;
+    this.chunkDiagnostics.length = 0;
+    this.extractionMs = 0;
+    return changed;
   }
 }

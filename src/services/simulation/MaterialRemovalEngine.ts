@@ -16,7 +16,7 @@ import { rotationQuaternion, stockPlacement } from './SimulationTransforms';
 import { IndexedBallSweeps, MAX_INDEXED_SWEEPS } from './IndexedBallSweeps';
 import type { ImplicitVolume } from './ImplicitGeometry';
 
-function materialCounters(stock: StockModel) {
+export function materialCounters(stock: StockModel) {
   return {
     materialDistanceTests: stock.materialDistanceTests,
     materialNormalTests: stock.materialNormalTests,
@@ -124,6 +124,8 @@ export class MaterialRemovalEngine {
   readonly operationDiagnostics: RemovalOperationDiagnostic[] = [];
   private activeOperation?: RemovalOperationDiagnostic;
   private operationHasSubtraction = false;
+  private operationKey?: string;
+  private operationBefore?: ReturnType<MaterialRemovalEngine['snapshot']>;
 
   private observedVolume<T extends ImplicitVolume>(volume: T): T {
     const observation = this.observation;
@@ -319,13 +321,15 @@ export class MaterialRemovalEngine {
     progress: (processed: number) => void = () => {},
     indexed = true,
     profileOperations = true,
+    retainOperation = false,
+    motionOffset = 0,
   ): void {
     let pending: ImplicitVolume[] = [];
     let pendingKey: string | undefined;
     let pendingEnd = -1;
     let processed = 0;
-    let operationKey: string | undefined;
-    let before: ReturnType<MaterialRemovalEngine['snapshot']> | undefined;
+    let operationKey = profileOperations ? this.operationKey : undefined;
+    let before = profileOperations ? this.operationBefore : undefined;
     const finishOperation = (): void => {
       const operation = this.activeOperation;
       if (!operation || !before) return;
@@ -438,8 +442,8 @@ export class MaterialRemovalEngine {
           reference: motion.start.reference,
           endFrameId: motion.end.frameId,
           endReference: motion.end.reference,
-          firstMotionIndex: batch.startIndex,
-          lastMotionIndex: batch.endIndex,
+          firstMotionIndex: batch.startIndex + motionOffset,
+          lastMotionIndex: batch.endIndex + motionOffset,
           motionCount: 0,
           motions: [],
           elapsedMs: 0,
@@ -471,11 +475,11 @@ export class MaterialRemovalEngine {
         this.stock.reserveDiagnosticBytes(
           (batch.endIndex - batch.startIndex + 1) * MOTION_DIAGNOSTIC_BYTES,
         );
-        operation.lastMotionIndex = batch.endIndex;
+        operation.lastMotionIndex = batch.endIndex + motionOffset;
         for (let index = batch.startIndex; index <= batch.endIndex; index++) {
           const source = batch.sourceMotions[index];
           operation.motions.push({
-            motionIndex: index,
+            motionIndex: index + motionOffset,
             executionStep: source.executionStep,
             lineNumber: source.lineNumber,
           });
@@ -514,7 +518,9 @@ export class MaterialRemovalEngine {
       }
     }
     flush();
-    finishOperation();
+    if (!retainOperation) finishOperation();
+    this.operationKey = retainOperation ? operationKey : undefined;
+    this.operationBefore = retainOperation ? before : undefined;
   }
 
   private snapshot() {
@@ -557,6 +563,17 @@ export function simulateMaterialRemoval(
   const chunks = builder.getChunks();
   const meshingMs = performance.now() - meshingStarted;
   const finalMaterialCounters = materialCounters(engine.stock);
+  return createMaterialRemovalResult(input, engine, builder, chunks, started, subtractionMs,
+    meshingMs, initialMaterialCounters, afterSubtractionMaterialCounters, finalMaterialCounters);
+}
+
+export function createMaterialRemovalResult(
+  input: DeepReadonly<SimulationInput>, engine: MaterialRemovalEngine, builder: StockMeshBuilder,
+  chunks: SimulationResult['chunks'], started: number, subtractionMs: number, meshingMs: number,
+  initialMaterialCounters: ReturnType<typeof materialCounters>,
+  afterSubtractionMaterialCounters: ReturnType<typeof materialCounters>,
+  finalMaterialCounters = materialCounters(engine.stock),
+): SimulationResult {
   const meshingDiagnostics = builder.chunkDiagnostics;
   const meshingTotals = meshingDiagnostics.reduce(
     (totals, chunk) => {

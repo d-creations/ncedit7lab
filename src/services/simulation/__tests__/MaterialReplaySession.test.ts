@@ -85,7 +85,8 @@ describe('persistent material replay session', () => {
     expect(create).toHaveBeenCalledOnce();
     expect(fake.terminate).not.toHaveBeenCalled();
     session.cancel();
-    expect(fake.terminate).toHaveBeenCalledOnce();
+    expect(fake.postMessage).toHaveBeenLastCalledWith({ type: 'close', requestId: 0 });
+    expect(fake.terminate).not.toHaveBeenCalled();
   });
 
   it('coalesces rapid seeks and requires a full replacement after a potentially discarded delta', async () => {
@@ -128,7 +129,8 @@ describe('persistent material replay session', () => {
     send(a, { type: 'frame', requestId: 1, frame: frame(2) });
     send(b, { type: 'frame', requestId: 3, frame: frame() });
     await Promise.all([activeRejection, queuedRejection, latest]);
-    expect(a.terminate).toHaveBeenCalledOnce();
+    expect(a.postMessage).toHaveBeenLastCalledWith({ type: 'close', requestId: 0 });
+    expect(a.terminate).not.toHaveBeenCalled();
     session.cancel();
   });
 

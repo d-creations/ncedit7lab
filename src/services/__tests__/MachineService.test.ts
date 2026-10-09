@@ -6,11 +6,15 @@ import type { BackendGateway } from '../BackendGateway';
 describe('machine simulation metadata read capability', () => {
   it('transports explicit syntax but never infers it from a name, control type or tool regex', async () => {
     const syntax = { kind: 'block', open: '(', close: ')', maxLineLength: 80 } as const;
+    const stockBinding = {
+      frameId: 'workpiece:mainSpindle', position: [0, 0, 0], rotation: [0, 0, 0],
+      spindleOrigin: [0, 0, 0], spindleAxis: [0, 0, 1],
+    };
     const backend = { listMachines: vi.fn().mockResolvedValue({ machines: [
       {
         machineName: 'EXPLICIT', controlType: 'TEST', simulationCommentSyntax: syntax,
         axes: ['X', 'Z'], availableChannels: 2, profileRevision: 'sha256:explicit',
-        supportedPoseContracts: [], simulation: { modelId: 'demo' },
+        supportedPoseContracts: [], simulation: { modelId: 'demo', stockBindings: [stockBinding] },
       },
       {
         machineName: 'SIEMENS_MILL', controlType: 'SIEMENS', axes: ['X', 'Y', 'Z'],
@@ -23,7 +27,7 @@ describe('machine simulation metadata read capability', () => {
     expect(profiles[1].simulationCommentSyntax).toBeUndefined();
     expect(profiles[0]).toMatchObject({
       axes: ['X', 'Z'], availableChannels: 2, profileRevision: 'sha256:explicit',
-      supportedPoseContracts: [], simulation: { modelId: 'demo' },
+      supportedPoseContracts: [], simulation: { modelId: 'demo', stockBindings: [stockBinding] },
     });
   });
 });

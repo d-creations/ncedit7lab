@@ -27,13 +27,15 @@
   "dependencies": {
     "ace-builds": "^1.43.4",
     "cnc7drawnccode": "git+https://github.com/d-creations/CNC7drawNCcode.git",
-    "three": "^0.161.0"
+    "three": "^0.186.1"
   },
   "devDependencies": {
-    "@types/three": "^0.161.0",
+    "@types/node": "^22.20.5",
+    "@types/three": "^0.186.0",
     "@typescript-eslint/eslint-plugin": "^6.20.0",
     "@typescript-eslint/parser": "^6.20.0",
     "@vitest/ui": "^4.0.12",
+    "@webgpu/types": "^0.1.74",
     "eslint": "^8.56.0",
     "eslint-config-prettier": "^9.1.0",
     "eslint-plugin-prettier": "^5.1.3",

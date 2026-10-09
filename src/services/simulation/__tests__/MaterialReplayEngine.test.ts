@@ -58,6 +58,21 @@ function input(motions: RemovalMotion[] = []): SimulationInput {
     },
   };
 }
+
+it('keeps cached 0.05 mm surfaces installed for a non-cutting execution occurrence', async () => {
+  const setup = input([motion([-1, 0, -1], [1, 0, -1], 1)]);
+  setup.resolutionMm = 0.05;
+  const replay = new MaterialReplayEngine(setup, [0, 1, 2]);
+  await replay.prepareFinal(() => {});
+  const initial = replay.seek(0);
+  expect(initial.chunks.length).toBeGreaterThan(1);
+  const stateOnly = replay.seek(1);
+  expect(stateOnly.surfaceCacheHit).toBe(true);
+  expect(stateOnly.chunks).toEqual([]);
+  expect(stateOnly.appliedMotions).toBe(0);
+  expect(stateOnly.surfaceReconstructed).toBe(false);
+  await replay.close();
+});
 function geometry(chunks: readonly StockSurfaceChunk[]): string[] {
   return chunks
     .flatMap((chunk) => {

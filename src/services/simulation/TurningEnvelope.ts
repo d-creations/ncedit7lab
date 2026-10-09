@@ -148,6 +148,16 @@ export function buildTurningEnvelope(
     return new THREE.Vector2(relative.dot(radial), relative.dot(spindleAxis));
   });
   const polygon = endMatrix ? convexHull(projected) : projected;
+  return turningSectionVolume(polygon, spindleOrigin, spindleAxis, radial);
+}
+
+/** Rebuild the same analytical section for a stored rotational-history state. */
+export function turningSectionVolume(
+  polygon: readonly THREE.Vector2[],
+  spindleOrigin: THREE.Vector3,
+  spindleAxis: THREE.Vector3,
+  radial: THREE.Vector3,
+): ImplicitVolume & { inside: (point: THREE.Vector3) => boolean } {
   const field = convexField(polygon);
   const minimumRadial = Math.min(...polygon.map((point) => point.x));
   const maximumRadial = Math.max(...polygon.map((point) => point.x));
@@ -185,6 +195,7 @@ export function buildTurningEnvelope(
       spindleAxis: spindleAxis.clone(),
       polygon,
       planes: field.planes,
+      radialDirection: radial.clone(),
     },
     identity: JSON.stringify(['turning', spindleOrigin.toArray(), spindleAxis.toArray(), polygon]),
     distance: evaluate,

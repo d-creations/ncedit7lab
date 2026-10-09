@@ -6,6 +6,7 @@ import { SimulationCommentCodec } from '../SimulationCommentCodec';
 import { ProgramToolService } from '../ProgramToolService';
 import { prepareMaterialRemoval } from '../MaterialRemovalPreparation';
 import type { ProgramToolDefinition } from '../SimulationMetadata';
+import type { StockBinding } from '../../simulation/SimulationTypes';
 
 const syntax = { kind: 'line', prefix: ';' } as const;
 const codec = new SimulationCommentCodec();
@@ -49,7 +50,59 @@ function metadata(...segments: PlotSegment[]): PlotMetadata {
   return { points: [], segments };
 }
 
+function machineInput(bindings: StockBinding[] = [setup.binding]): PlotRunInput {
+  return {
+    ...input('1', stock),
+    machineProfile: {
+      machineName: 'test', controlType: 'test', axes: ['C1'], availableChannels: 1,
+      defaultTools: [], feedLimits: { min: 0, max: 10000 },
+      simulation: {
+        schemaVersion: 1, revision: 1, modelId: 'test', displayName: 'test',
+        fidelity: 'configured', poseContract: 'workpiece-tool-reference-v1',
+        carriers: ['mainSpindle', 'subSpindle'].map((id) => ({
+          id, role: 'workpiece', referenceOrientationDegrees: [0, 0, 0], rotationChain: [],
+        })),
+        toolMounts: [], stockBindings: structuredClone(bindings),
+      },
+    },
+  };
+}
+
 describe('material removal prerequisites', () => {
+  it('uses the matching backend stock binding with 0.05 mm detail and captures a copy', () => {
+    const source = machineInput([setup.binding, { ...setup.binding, frameId: 'workpiece:subSpindle' }]);
+    const result = prepareMaterialRemoval([source], metadata(move()));
+    expect(result.status).toBe('ready');
+    expect(result.simulation?.resolutionMm).toBe(0.05);
+    expect(result.simulation?.binding).toEqual(setup.binding);
+    expect(result.simulation?.binding).not.toBe(source.machineProfile?.simulation?.stockBindings?.[0]);
+  });
+
+  it('prefers program overrides, and then explicit setup, over backend defaults', () => {
+    const source = machineInput();
+    source.materialSimulation = {
+      binding: { ...setup.binding, position: [1, 0, 0] }, resolutionMm: 0.1,
+    };
+    expect(prepareMaterialRemoval([source], metadata(move())).simulation).toMatchObject(source.materialSimulation);
+    expect(prepareMaterialRemoval([source], metadata(move()), setup).simulation).toMatchObject(setup);
+  });
+
+  it('requires manual binding for unmatched or multiple executed workpiece frames', () => {
+    const source = machineInput([{ ...setup.binding, frameId: 'workpiece:subSpindle' }]);
+    expect(prepareMaterialRemoval([source], metadata(move())).status).toBe('blocked');
+    const other = move({ poses: move().poses?.map((pose) => ({ ...pose, frameId: 'workpiece:subSpindle' })) });
+    expect(prepareMaterialRemoval([machineInput()], metadata(move(), other)).status).toBe('blocked');
+  });
+
+  it.each([
+    [{ ...setup.binding, spindleAxis: [0, 0, 0] }],
+    [{ ...setup.binding, frameId: 'workpiece:unknown' }],
+    [setup.binding, setup.binding],
+    [{ ...setup.binding, position: [Infinity, 0, 0] }],
+  ] satisfies StockBinding[][])('rejects invalid backend binding defaults: %j', (...bindings) => {
+    expect(() => prepareMaterialRemoval([machineInput(bindings)], metadata(move()))).toThrow();
+  });
+
   it('does not guess stock for metadata-free programs', () => {
     expect(prepareMaterialRemoval([input()], metadata(move()))).toEqual({
       status: 'not-configured', channelIds: ['1'], diagnostics: [],

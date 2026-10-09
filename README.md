@@ -25,6 +25,11 @@ To run the project locally:
 npm install
 ```
 
+Start the Docker backend with `docker compose up --build`, then run `npm run dev`
+for frontend development. Vite proxies `/api` and `/cgiserver_import` to the
+Docker backend at `http://127.0.0.1:8000`. The built frontend is also available
+directly at that backend URL after a production build.
+
 To build for production:
 
 ```bash
@@ -55,7 +60,6 @@ For USB storage transfer:
 ```
 
 In USB mode, `transferDefaultIp` is interpreted as a filesystem path visible to the backend process. Path 1 uses the selected root folder directly. Optional `PATH2` and `PATH3` subfolders are used when present.
-
 
 
 

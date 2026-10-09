@@ -1,4 +1,5 @@
 import type { SimulationCommentSyntax } from '../services/tools/SimulationCommentCodec';
+import type { StockBinding } from '../services/simulation/SimulationTypes';
 
 export interface BackendFeatures {
   transfer_enabled: boolean;
@@ -51,6 +52,7 @@ export interface MachineSimulationConfig {
   poseContract: typeof WORKPIECE_TOOL_REFERENCE_POSE_CONTRACT;
   carriers: MachineSimulationCarrier[];
   toolMounts: MachineSimulationToolMount[];
+  stockBindings?: StockBinding[];
 }
 
 export interface SimulationToolInput {

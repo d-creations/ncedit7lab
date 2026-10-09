@@ -1,5 +1,6 @@
 /// <reference types="vite/client" />
 import { describe, expect, it, vi } from 'vitest';
+import { writeFileSync } from 'node:fs';
 import type { PlotResponse, ServerMachineListResponse } from '@core/types';
 import { BackendGateway } from '../../BackendGateway';
 import { ExecutedProgramService } from '../../ExecutedProgramService';
@@ -7,9 +8,15 @@ import { EventBus } from '../../EventBus';
 import { MachineService } from '../../MachineService';
 import { ProgramToolService } from '../../tools/ProgramToolService';
 import { SimulationCommentCodec } from '../../tools/SimulationCommentCodec';
-import { simulateMaterialRemoval } from '../MaterialRemovalEngine';
+import {
+  simulateMaterialRemoval,
+  MaterialRemovalEngine,
+  batchRemovalMotions,
+} from '../MaterialRemovalEngine';
+import { StockMeshBuilder } from '../StockMeshBuilder';
 import { SIMULATION_LIMITS } from '../SimulationTypes';
 import { MaterialReplayEngine, REPLAY_LIMITS, type ReplayFrame } from '../MaterialReplayEngine';
+import { MemoryReplayTraceStore } from '../ReplayTraceStore';
 import { createPlotReplayTimeline } from '../../tools/PlotReplayTimeline';
 import text from './fixtures/star-mixed-removal.nc?raw';
 
@@ -121,6 +128,163 @@ describe.skipIf(import.meta.env.RUN_STAR_REMOVAL_BENCHMARK !== '1')(
           expect(result.boundaryCells).toBeLessThan(baseline.boundaryCells / 3);
           expect(result.allocatedNodes).toBeLessThan(baseline.allocatedNodes / 3);
           expect(result.surfaceBytes).toBeLessThan(baseline.surfaceBytes);
+        }
+        if (import.meta.env.RUN_STAR_TOPOLOGY_BENCHMARK === '1') {
+          const measurements = [];
+          for (const count of [30, 161]) {
+            for (const order of ['streamed-first', 'reused-first'] as const) {
+              const input = { ...simulation, motions: simulation.motions.slice(0, count) };
+              const streamedEngine = new MaterialRemovalEngine(input);
+              streamedEngine.applyBatches(batchRemovalMotions(input.motions));
+              const reusedEngine = new MaterialRemovalEngine(input);
+              reusedEngine.applyBatches(batchRemovalMotions(input.motions));
+              const streamed = new StockMeshBuilder(undefined, { topologyCacheBytes: 0 });
+              const reused = new StockMeshBuilder();
+              const surfaceBytes = (builder: StockMeshBuilder): number =>
+                builder
+                  .getChunks()
+                  .reduce(
+                    (sum, chunk) =>
+                      sum + chunk.positions.byteLength + chunk.normals.byteLength + 512,
+                    0,
+                  );
+              const measure = (
+                engine: MaterialRemovalEngine,
+                builder: StockMeshBuilder,
+                peer: MaterialRemovalEngine,
+                retainedSurfaceBytes: number,
+              ): number => {
+                engine.stock.setReplayWorkspaceBytes(
+                  peer.stock.allocatedBytes + result.surfaceBytes + retainedSurfaceBytes,
+                );
+                const started = performance.now();
+                builder.buildChanged(engine.stock);
+                return performance.now() - started;
+              };
+              let streamedMs: number;
+              let reusedMs: number;
+              if (order === 'streamed-first') {
+                streamedMs = measure(streamedEngine, streamed, reusedEngine, 0);
+                reusedMs = measure(reusedEngine, reused, streamedEngine, surfaceBytes(streamed));
+              } else {
+                reusedMs = measure(reusedEngine, reused, streamedEngine, 0);
+                streamedMs = measure(streamedEngine, streamed, reusedEngine, surfaceBytes(reused));
+              }
+              const expected = new Map(streamed.getChunks().map((chunk) => [chunk.id, chunk]));
+              expect(reused.getChunks().length).toBe(expected.size);
+              for (const chunk of reused.getChunks()) {
+                const reference = expected.get(chunk.id);
+                if (!reference) throw new Error(`Missing reference chunk ${chunk.id}`);
+                for (const key of ['positions', 'normals'] as const) {
+                  const actual = new Uint32Array(
+                    chunk[key].buffer,
+                    chunk[key].byteOffset,
+                    chunk[key].length,
+                  );
+                  const original = new Uint32Array(
+                    reference[key].buffer,
+                    reference[key].byteOffset,
+                    reference[key].length,
+                  );
+                  expect(actual.length, `${count} motions, chunk ${chunk.id}, ${key}`).toBe(
+                    original.length,
+                  );
+                  expect(
+                    actual.every((word, index) => word === original[index]),
+                    `${count} motions, chunk ${chunk.id}, ${key}`,
+                  ).toBe(true);
+                }
+              }
+              expect(reusedEngine.stock.removedCells).toBe(streamedEngine.stock.removedCells);
+              expect(reusedEngine.stock.peakAllocatedBytes).toBeLessThanOrEqual(
+                SIMULATION_LIMITS.stockBytes,
+              );
+              expect(reused.topologyPasses).toBe(1);
+              const measurement = {
+                count,
+                order,
+                streamedMs,
+                reusedMs,
+                streamedExtractionMs: streamed.extractionMs,
+                reusedExtractionMs: reused.extractionMs,
+                topologyMiB: reused.topologyCachePeakBytes / 1048576,
+                peakMiB: reusedEngine.stock.peakAllocatedBytes / 1048576,
+                exactGeometryAndNormals: true,
+              };
+              measurements.push(measurement);
+              console.info('live STAR topology reuse benchmark', JSON.stringify(measurement));
+            }
+          }
+          if (process.env.NC_EDIT_BENCHMARK_RESULTS_FILE)
+            writeFileSync(
+              process.env.NC_EDIT_BENCHMARK_RESULTS_FILE,
+              JSON.stringify(measurements, null, 2),
+            );
+        }
+        if (import.meta.env.RUN_STAR_PARTIAL_REPLAY_BENCHMARK === '1') {
+          const timeline = createPlotReplayTimeline(run);
+          const steps = timeline.occurrences.map((occurrence) => occurrence.executionStep);
+          const replay = new MaterialReplayEngine(simulation, steps);
+          replay.setTraceStore(new MemoryReplayTraceStore());
+          const records: object[] = [];
+          try {
+            const prepared = await replay.prepareFinal(() => {});
+            expect(prepared.removedCells).toBe(result.removedCells);
+            expect(prepared.processedMotions).toBe(162);
+            expect(prepared.historyMode).toBe('partial-disk');
+            expect(
+              prepared.finalResult?.operationDiagnostics?.map((operation) => operation.mode),
+            ).toEqual(['turning', 'milling', 'turning', 'milling']);
+            const firstMilling = simulation.motions.find((motion) => motion.mode === 'milling');
+            if (!firstMilling) throw new Error('Mixed replay fixture requires milling');
+            const millingPosition = steps.indexOf(firstMilling.executionStep) + 1;
+            const visited = new Set([steps.length]);
+            for (const position of [
+              millingPosition - 1,
+              millingPosition,
+              steps.length,
+              millingPosition - 1,
+              millingPosition,
+              0,
+              steps.length,
+              0,
+              steps.length,
+            ]) {
+              const frame = await replay.seekRecorded(position);
+              expect(frame.historyMode).toBe('partial-disk');
+              expect(frame.appliedMotions).toBe(0);
+              if (visited.has(position)) expect(frame.surfaceCacheHit).toBe(true);
+              visited.add(position);
+              expect(frame.surfaceCacheBytes).toBeLessThanOrEqual(REPLAY_LIMITS.surfaceCacheBytes);
+              expect(frame.peakStockBytes).toBeLessThanOrEqual(SIMULATION_LIMITS.stockBytes);
+              if (position === steps.length) expect(frame.removedCells).toBe(result.removedCells);
+              records.push({
+                position,
+                removedCells: frame.removedCells,
+                elapsedMs: frame.elapsedMs,
+                meshingMs: frame.meshingMs,
+                historyMs: frame.historyMs,
+                historyBytes: frame.historyBytes,
+                peakBytes: frame.peakStockBytes,
+                appliedMotions: frame.appliedMotions,
+                surfaceCacheHit: frame.surfaceCacheHit,
+                surfaceCacheBytes: frame.surfaceCacheBytes,
+                surfaceCacheMissReason: frame.surfaceCacheMissReason,
+                surfaceCacheEvictions: frame.surfaceCacheEvictions,
+                extractionMs: frame.extractionMs,
+                triangulationMs: frame.triangulationMs,
+                adaptationMs: frame.adaptationMs,
+                dirtyChunks: frame.dirtyChunks,
+                remeshedChunks: frame.remeshedChunks,
+              });
+            }
+            console.info(
+              'live STAR partial history (uncompressed deterministic store)',
+              JSON.stringify({ preparationMs: prepared.elapsedMs, records }),
+            );
+          } finally {
+            await replay.close();
+          }
         }
         if (import.meta.env.RUN_STAR_REPLAY_BENCHMARK === '1') {
           const timeline = createPlotReplayTimeline(run);
@@ -249,7 +413,11 @@ describe.skipIf(import.meta.env.RUN_STAR_REMOVAL_BENCHMARK !== '1')(
           }),
         );
       },
-      import.meta.env.RUN_STAR_REPLAY_BENCHMARK === '1' ? 600000 : 300000,
+      import.meta.env.RUN_STAR_REPLAY_BENCHMARK === '1' ||
+        import.meta.env.RUN_STAR_PARTIAL_REPLAY_BENCHMARK === '1' ||
+        import.meta.env.RUN_STAR_TOPOLOGY_BENCHMARK === '1'
+        ? 600000
+        : 300000,
     );
   },
 );

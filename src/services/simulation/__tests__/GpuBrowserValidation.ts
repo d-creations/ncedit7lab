@@ -7,7 +7,7 @@ import type { RemovalMotion, SimulationInput } from '../SimulationTypes';
 import { stockPlacement } from '../SimulationTransforms';
 import type { ProgramToolDefinition } from '../../tools/SimulationMetadata';
 
-export async function runGpuCylinderShadingValidation(): Promise<object> {
+export async function runGpuCylinderShadingValidation(drilled = false): Promise<object> {
   if (!navigator.gpu) throw new Error('WebGPU is unavailable');
   const adapter = await navigator.gpu.requestAdapter();
   if (!adapter) throw new Error('WebGPU adapter is unavailable');
@@ -18,24 +18,67 @@ export async function runGpuCylinderShadingValidation(): Promise<object> {
   await renderer.init();
   renderer.setPixelRatio(1);
   renderer.setSize(256, 256);
+  const sweeps = drilled
+    ? compileGpuSweeps({
+        algorithmVersion: 2,
+        stock: { type: 'cylinder', diameter: 2, length: 2 },
+        binding: {
+          frameId: 'workpiece:matcap-test',
+          position: [0, 0, 0],
+          rotation: [0, 0, 0],
+          spindleOrigin: [0, 0, 0],
+          spindleAxis: [0, 0, 1],
+        },
+        resolutionMm: 0.02,
+        motions: [
+          {
+            executionStep: 1,
+            mode: 'milling',
+            tool: {
+              toolNumber: 1,
+              description: 'Axial bore',
+              cutting: [{ type: 'endMill', diameter: 0.5, length: 4 }],
+            },
+            start: {
+              position: [0, 0, -2],
+              orientation: [0, 0, 0, 1],
+              frameId: 'workpiece:matcap-test',
+              reference: 'millingTip',
+            },
+            end: {
+              position: [0, 0, -2],
+              orientation: [0, 0, 0, 1],
+              frameId: 'workpiece:matcap-test',
+              reference: 'millingTip',
+            },
+          },
+        ],
+      })
+    : [];
   const stock = new GpuDexelStock(
     renderer,
     device,
     new THREE.Vector3(2, 2, 2),
     0.02,
     true,
-    [],
+    sweeps,
     new THREE.Matrix4(),
   );
   const target = new RenderTarget(256, 256);
   try {
-    await stock.calculate(0);
+    await stock.calculate(sweeps.length);
+    if (drilled) {
+      const counts = new Uint32Array(await renderer.getArrayBufferAsync(stock.countAttribute));
+      if (!counts.includes(1) || !counts.includes(2))
+        throw new Error('Drilled shading fixture must contain both intact and split material rays');
+    }
     const scene = new THREE.Scene();
     scene.add(stock.group);
     const camera = new THREE.PerspectiveCamera((2 * Math.atan(0.3) * 180) / Math.PI, 1, 0.1, 10);
     camera.position.set(4, 0, 0);
     camera.up.set(0, 0, 1);
     camera.lookAt(0, 0, 0);
+    camera.updateMatrixWorld();
     renderer.setRenderTarget(target);
     renderer.render(scene, camera);
     const pixels = await renderer.readRenderTargetPixelsAsync(target, 0, 0, 256, 256);
@@ -48,7 +91,21 @@ export async function runGpuCylinderShadingValidation(): Promise<object> {
       const t = (32 - Math.sqrt(64 - 60 * projectedY * projectedY)) / (2 * a);
       const y = projectedY * t;
       const x = 4 * (1 - t);
-      const linear = 0.7 * (0.3 + (0.55 * (x + y)) / Math.sqrt(6));
+      const z = 0.0046875 * t;
+      const normal = new THREE.Vector3(x, y, 0)
+        .normalize()
+        .transformDirection(camera.matrixWorldInverse);
+      const view = new THREE.Vector3(x, y, z)
+        .applyMatrix4(camera.matrixWorldInverse)
+        .negate()
+        .normalize();
+      const right = new THREE.Vector3(view.z, 0, -view.x).normalize();
+      const up = new THREE.Vector3().crossVectors(view, right);
+      const u = right.dot(normal),
+        v = up.dot(normal);
+      const highlight = Math.exp(-3 * ((u + 0.35) ** 2 + (v - 0.4) ** 2));
+      const fill = Math.exp(-2 * ((u - 0.55) ** 2 + v * v));
+      const linear = 0.93 * (0.46 + 0.1 * v + 0.25 * highlight + 0.1 * fill);
       const srgb = new THREE.Color(linear, 0, 0).convertLinearToSRGB().r;
       const red = pixels[(128 * 256 + column) * 4];
       linearError += (red - 255 * linear) ** 2;
@@ -63,10 +120,11 @@ export async function runGpuCylinderShadingValidation(): Promise<object> {
     const meanSecondDifference = roughness / 126;
     if (redRmse > 1 || meanSecondDifference > 1)
       throw new Error(
-        `GPU cylinder shading is inaccurate or striped: RMSE=${redRmse}, second difference=${meanSecondDifference}`,
+        `GPU cylinder MatCap is inaccurate or striped: RMSE=${redRmse}, second difference=${meanSecondDifference}`,
       );
     return {
       passed: true,
+      drilled,
       pitchMm: 0.02,
       samples: 128,
       redRmse,

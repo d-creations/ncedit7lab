@@ -39,6 +39,22 @@ import { SimulationCapabilityError } from './SimulationTypes';
 
 export const DEXEL_DISPATCH_RAYS = 16384;
 
+export const DEXEL_MATCAP_WGSL = `
+fn gpuStockMatcap(normal: vec3f, viewDirection: vec3f) -> vec3f {
+  let view = normalize(viewDirection);
+  var right = vec3f(view.z, 0.0, -view.x);
+  if (dot(right, right) < 1e-10) { right = vec3f(1.0, 0.0, 0.0); }
+  right = normalize(right);
+  let up = cross(view, right);
+  let uv = vec2f(dot(right, normal), dot(up, normal));
+  // A procedural lit-sphere map: broad studio highlights, no shadow passes.
+  let highlight = exp(-3.0 * dot(uv - vec2f(-0.35, 0.4), uv - vec2f(-0.35, 0.4)));
+  let fill = exp(-2.0 * dot(uv - vec2f(0.55, 0.0), uv - vec2f(0.55, 0.0)));
+  let brightness = 0.46 + 0.10 * uv.y + 0.25 * highlight + 0.10 * fill;
+  return vec3f(0.93, 0.94, 0.96) * brightness;
+}
+`;
+
 type DexelDevice = Pick<
   GPUDevice,
   'lost' | 'pushErrorScope' | 'popErrorScope' | 'createShaderModule'
@@ -142,6 +158,19 @@ fn gpuDexelNearestAxis(p: vec3f, axis: u32, size: vec3f, dims: vec3f) -> vec4f {
   }
   return result;
 }
+fn gpuDexelMatchEndpoint(ray: u32, reference: f32, entry: bool, limit: f32) -> vec2f {
+  var best = vec2f(0.0, 1e20);
+  var second = 1e20;
+  for (var i = 0u; i < dexelCounts.value[ray]; i++) {
+    let span = dexelIntervals.value[ray * ${DEXEL_INTERVALS}u + i];
+    let endpoint = select(span.y, span.x, entry);
+    let distance = abs(endpoint - reference);
+    if (distance < best.y) { second = best.y; best = vec2f(endpoint, distance); }
+    else { second = min(second, distance); }
+  }
+  if (best.y > limit || second - best.y < 0.000001) { return vec2f(0.0, -1.0); }
+  return vec2f(best.x, 1.0);
+}
 fn gpuDexelAxisSample(p: vec3f, axis: u32, size: vec3f, dims: vec3f) -> vec4f {
   let nearest = gpuDexelNearestAxis(p, axis, size, dims);
   var u = 1u; var v = 2u;
@@ -163,37 +192,33 @@ fn gpuDexelAxisSample(p: vec3f, axis: u32, size: vec3f, dims: vec3f) -> vec4f {
   rays[2] = gpuRayIndex(point, axis, size, dims);
   point[u] = -size[u] * 0.5 + (high[u] + 0.5) * h[u];
   rays[3] = gpuRayIndex(point, axis, size, dims);
-  let count = dexelCounts.value[rays[0]];
-  if (count == 0u || dexelCounts.value[rays[1]] != count ||
-      dexelCounts.value[rays[2]] != count || dexelCounts.value[rays[3]] != count) { return nearest; }
-  var result = vec4f(0.0, 0.0, 0.0, 1e20);
-  for (var i = 0u; i < count; i++) {
-    let a = dexelIntervals.value[rays[0] * ${DEXEL_INTERVALS}u + i];
-    let b = dexelIntervals.value[rays[1] * ${DEXEL_INTERVALS}u + i];
-    let c = dexelIntervals.value[rays[2] * ${DEXEL_INTERVALS}u + i];
-    let d = dexelIntervals.value[rays[3] * ${DEXEL_INTERVALS}u + i];
-    // Do not blend disjoint walls; interval-count changes are rejected above.
-    if (max(max(a.x, b.x), max(c.x, d.x)) >= min(min(a.y, b.y), min(c.y, d.y))) { return nearest; }
-    let span = mix(mix(a, b, weight[u]), mix(c, d, weight[u]), weight[v]);
-    let lower = span.x - p[axis]; let upper = p[axis] - span.y;
-    let field = max(lower, upper);
-    if (field < result.w) {
-      let du = mix(b - a, d - c, weight[v]) / h[u];
-      let dv = mix(c - a, d - b, weight[u]) / h[v];
-      let entry = lower >= upper;
-      result = vec4f(0.0, 0.0, 0.0, field);
-      result[axis] = select(1.0, -1.0, entry);
-      result[u] = select(-du.y, du.x, entry) * select(0.0, 1.0, high[u] > low[u]);
-      result[v] = select(-dv.y, dv.x, entry) * select(0.0, 1.0, high[v] > low[v]);
-    }
-  }
+  if (nearest.w > 1e19) { return nearest; }
+  let entry = nearest[axis] < 0.0;
+  let reference = p[axis] - nearest[axis] * nearest.w;
+  let limit = 4.0 * max(h[u], h[v]);
+  let a = gpuDexelMatchEndpoint(rays[0], reference, entry, limit);
+  let b = gpuDexelMatchEndpoint(rays[1], reference, entry, limit);
+  let c = gpuDexelMatchEndpoint(rays[2], reference, entry, limit);
+  let d = gpuDexelMatchEndpoint(rays[3], reference, entry, limit);
+  if (min(min(a.y, b.y), min(c.y, d.y)) < 0.0) { return nearest; }
+  let endpoint = mix(mix(a.x, b.x, weight[u]), mix(c.x, d.x, weight[u]), weight[v]);
+  let du = mix(b.x - a.x, d.x - c.x, weight[v]) / h[u];
+  let dv = mix(c.x - a.x, d.x - b.x, weight[u]) / h[v];
+  var result = vec4f(0.0, 0.0, 0.0, nearest[axis] * (p[axis] - endpoint));
+  result[axis] = nearest[axis];
+  result[u] = -nearest[axis] * du * select(0.0, 1.0, high[u] > low[u]);
+  result[v] = -nearest[axis] * dv * select(0.0, 1.0, high[v] > low[v]);
   return result;
 }
 fn gpuDexelNormal(p: vec3f, size: vec3f, dims: vec3f) -> vec3f {
   var surface = vec4f(0.0, 0.0, 0.0, -1e20);
   for (var axis = 0u; axis < 3u; axis++) {
     let sample = gpuDexelAxisSample(p, axis, size, dims);
-    if (sample.w > surface.w) { surface = sample; }
+    let magnitude = length(sample.xyz);
+    if (magnitude > 0.0 && sample.w < 1e19) {
+      let normalized = sample / magnitude;
+      if (normalized.w > surface.w) { surface = normalized; }
+    }
   }
   if (dot(surface.xyz, surface.xyz) < 1e-15) { return vec3f(0.0, 0.0, 1.0); }
   return normalize(surface.xyz);
@@ -353,21 +378,22 @@ export class GpuDexelStock {
       }) as Node<'vec4'>
     ).toVar('dexelHit');
     const normal = wgslFn(
-      `fn gpuStockShade(p: vec3f, size: vec3f, dims: vec3f) -> vec3f {
-      let n = gpuDexelNormal(p, size, dims);
-      let lighting = 0.3 + 0.55 * max(dot(n, normalize(vec3f(1.0, 1.0, 2.0))), 0.0) + 0.15 * max(dot(n, normalize(vec3f(-1.0, 0.5, 0.0))), 0.0);
-      return vec3f(0.70, 0.57, 0.38) * lighting;
-    }`,
+      'fn gpuStockNormal(p: vec3f, size: vec3f, dims: vec3f) -> vec3f { return gpuDexelNormal(p, size, dims); }',
       [helpers, displayHelpers],
     );
+    const matcap = wgslFn(DEXEL_MATCAP_WGSL);
     material.fragmentNode = Fn(() => {
       If(hit.w.equal(0), () => {
         Discard();
       });
-      const shaded = normal({
+      const surfaceNormal = normal({
         p: hit.xyz,
         size: sizeNode,
         dims: dimensionsNode,
+      }) as Node<'vec3'>;
+      const shaded = matcap({
+        normal: modelViewMatrix.mul(vec4(surfaceNormal, 0)).xyz.normalize(),
+        viewDirection: modelViewMatrix.mul(vec4(hit.xyz, 1)).xyz.negate(),
       }) as Node<'vec3'>;
       return vec4(hit.w.lessThan(0).select(vec3(1, 0, 1), shaded), 1);
     })();

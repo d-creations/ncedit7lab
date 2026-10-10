@@ -616,10 +616,16 @@ A custom Three.js node material renders GPU-resident dexel intervals directly
 inside the stock bounding box, with surface depth and estimated normals.
 Tools, toolpaths, cameras and controls stay in the same scene. Production
 calculation reads only a small GPU error header, not the stock/triangle buffers.
-Display normals use derivatives of bilinearly interpolated interval endpoints
-on matching neighbouring rays. Interval-count changes and disjoint material
-spans reject interpolation; geometry traversal and subtraction still use the
-recorded intervals, so shading does not fill holes or smooth away cuts.
+Display normals use derivatives of bilinearly interpolated entry/exit endpoints
+on neighbouring rays, matched by proximity and endpoint direction rather than
+total interval count. Ambiguous matches and distances above four transverse
+sampling pitches reject interpolation. This is a display heuristic, not a
+proof of surface identity. Directional fields are normalized by their gradient
+magnitude before normal selection. Geometry traversal and subtraction still
+use recorded intervals, so shading does not fill holes or smooth away cuts.
+Stock uses a bright neutral procedural MatCap (lit-sphere shading) in view
+space, with broad highlights and no additional texture, shadow pass or stock
+buffer. It does not respond to scene lights or model physical self-shadowing.
 The hit shader returns the occupied point that was tested rather than the
 outside edge of that column, avoiding invalid shading samples at cell seams.
 This reduces striped normals; it does not turn ray pitch into a guaranteed
@@ -685,10 +691,13 @@ stale refinement and explicit fine-capacity failure.
 
 `runGpuCylinderShadingValidation()` renders a 0.02 mm cylinder at 256 x 256,
 compares 128 red-channel samples against independently calculated perspective
-ray intersections and analytical lighting, and checks adjacent-pixel second
+ray intersections and analytical MatCap appearance, and checks adjacent-pixel second
 differences for striping. Both red-channel RMSE and average second difference
 must be at most one 8-bit colour value. The corrected shader measured
-0.52/0.62 respectively in local Edge validation.
+0.44/0.37 respectively in local browser validation. Passing `true` adds an
+axial bore and verifies that intact/split rays coexist while the outer-wall
+appearance remains correct. This does not certify the actual user's mixed
+part or guarantee unchanged frame time.
 
 Browser validation on 2026-10-09 passed on an Intel Gen-12LP adapter for a
 synthetic 20 mm box/cylinder fixture at both pitches. The mixed fixture has

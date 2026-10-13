@@ -3,7 +3,14 @@ import type { CompiledGpuSweep } from './GpuSweepCompiler';
 import { SimulationCapabilityError } from './SimulationTypes';
 
 export const DEXEL_TILE_SIZE = 32;
-export const DEXEL_INTERVALS = 4;
+export const DEXEL_INTERVALS = 16;
+export const DEXEL_MAX_INTERVALS = 64;
+export type DexelIntervalCapacity = 4 | 8 | 16 | 32 | 64;
+export class GpuDexelIntervalOverflowError extends SimulationCapabilityError {
+  constructor(capacity: DexelIntervalCapacity) {
+    super(`GPU stock exceeds ${capacity} material intervals on a ray`);
+  }
+}
 export const DEXEL_MEMORY_BYTES = 256 * 1024 * 1024;
 export const DEXEL_BINDING_BYTES = 128 * 1024 * 1024;
 
@@ -17,9 +24,16 @@ export interface DexelLayout {
   intervalBytes: number;
   estimatedBytes: number;
   pitchMm: number;
+  intervalCapacity: DexelIntervalCapacity;
 }
 
-export function createDexelLayout(size: THREE.Vector3, pitchMm: number): DexelLayout {
+export function createDexelLayout(
+  size: THREE.Vector3,
+  pitchMm: number,
+  intervalCapacity: DexelIntervalCapacity = DEXEL_INTERVALS,
+): DexelLayout {
+  if (![4, 8, 16, 32, 64].includes(intervalCapacity))
+    throw new SimulationCapabilityError('GPU interval capacity must be 4, 8, 16, 32 or 64');
   if (
     !Number.isFinite(pitchMm) ||
     pitchMm < 0.001 ||
@@ -41,7 +55,7 @@ export function createDexelLayout(size: THREE.Vector3, pitchMm: number): DexelLa
   const rayCounts = tileCounts.map((n) => n * DEXEL_TILE_SIZE ** 2) as [number, number, number];
   const rays = rayCounts.reduce((sum, n) => sum + n, 0);
   const tiles = tileCounts.reduce((sum, n) => sum + n, 0);
-  const intervalBytes = rays * DEXEL_INTERVALS * 8;
+  const intervalBytes = rays * intervalCapacity * 8;
   // Storage attributes retain a CPU allocation as well as their GPU buffers.
   const estimatedBytes = 2 * (intervalBytes + rays * 4 + tiles * 8) + 4096;
   if (
@@ -63,6 +77,7 @@ export function createDexelLayout(size: THREE.Vector3, pitchMm: number): DexelLa
     intervalBytes,
     estimatedBytes,
     pitchMm,
+    intervalCapacity,
   };
 }
 

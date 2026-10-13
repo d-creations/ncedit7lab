@@ -28,6 +28,10 @@ interface PlotHarness extends HTMLElement {
   scene?: THREE.Scene;
   renderer?: THREE.WebGLRenderer | WebGPURenderer;
   gpuDevice?: GPUDevice;
+  camera?: THREE.PerspectiveCamera;
+  renderScene(): void;
+  gpuRendererLost: boolean;
+  gpuRenderPending: boolean;
   highlightObject: THREE.LineSegments | null;
   toolObject: THREE.Group | null;
   plotNCCode(channel?: string): Promise<void>;
@@ -124,6 +128,13 @@ describe('editor Plot actions', () => {
         if (request.type === 'initialize') {
           replay = new MaterialReplayEngine(request.input, request.steps);
           replay.setTraceStore(new MemoryReplayTraceStore());
+          if (request.prepareFinal) {
+            worker.onmessage?.(new MessageEvent('message', {
+              data: { type: 'progress', requestId: request.requestId, processed: 0, total: request.input.motions.length },
+            }));
+            expect(plot.shadowRoot!.getElementById('material-removal-status')!.textContent)
+              .toContain(`Geometric removal (CPU hybrid): 0/${request.input.motions.length} motions.`);
+          }
         }
         const frame = request.type === 'initialize' && request.prepareFinal
           ? await replay.prepareFinal(() => {})
@@ -143,7 +154,15 @@ describe('editor Plot actions', () => {
       plot.renderer = new WebGPURenderer();
       vi.spyOn(plot.renderer, 'render').mockImplementation(() => {});
       vi.spyOn(plot.renderer, 'dispose').mockResolvedValue();
-      const device: Partial<GPUDevice> = { destroy: vi.fn() };
+      const device: Partial<GPUDevice> = {
+        destroy: vi.fn(),
+        queue: {
+          __brand: 'GPUQueue', label: '',
+          onSubmittedWorkDone: vi.fn().mockResolvedValue(undefined),
+          submit: vi.fn(), writeBuffer: vi.fn(), writeTexture: vi.fn(),
+          copyExternalImageToTexture: vi.fn(),
+        },
+      };
       plot.gpuDevice = device as GPUDevice;
     }
     configureStock('workpiece:replay');
@@ -210,11 +229,16 @@ describe('editor Plot actions', () => {
 
   it('uses the GPU path for the complete coarse part, then installs fine stock after idle', async () => {
     vi.useFakeTimers();
-    const calculate = vi.spyOn(GpuDexelStock.prototype, 'calculate').mockResolvedValue(5);
+    const calculate = vi.spyOn(GpuDexelStock.prototype, 'calculate').mockImplementation(async () => {
+      expect(plot.shadowRoot!.getElementById('material-removal-status')!.textContent)
+        .toContain('Geometric removal (GPU dexel): 0/');
+      return 5;
+    });
     const { worker } = await readyReplay(true);
     expect(worker.postMessage).not.toHaveBeenCalled();
     const status = plot.shadowRoot!.getElementById('material-removal-status')!;
     expect(status.textContent).toContain('0.1 mm ray pitch');
+    expect(status.textContent).toContain('16 interval capacity per ray');
     expect(status.textContent).toContain('4/4');
     expect(plot.scene!.children.some((child) => child.name === 'gpu-dexel-stock')).toBe(true);
     await vi.advanceTimersByTimeAsync(350);
@@ -236,6 +260,25 @@ describe('editor Plot actions', () => {
     expect(worker.postMessage).toHaveBeenCalled();
     expect(plot.scene!.children.some((child) => child.name === 'machined-stock')).toBe(true);
     log.mockRestore();
+  });
+
+  it('reports reused GPU occurrences and newly applied cuts when stepping forward', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(GpuDexelStock.prototype, 'calculate').mockResolvedValue(5);
+    const copy = vi.spyOn(GpuDexelStock.prototype, 'copyFrom').mockResolvedValue(3);
+    const { worker } = await readyReplay(true);
+    const status = plot.shadowRoot!.getElementById('material-removal-status')!;
+    plot.shadowRoot!.querySelector<HTMLButtonElement>('#replay-start')!.click();
+    await vi.waitFor(() => expect(status.textContent).toContain('0/4'));
+    const next = plot.shadowRoot!.querySelector<HTMLButtonElement>('#replay-next')!;
+    next.click();
+    await vi.waitFor(() => expect(status.textContent).toContain('1/4'));
+    expect(status.textContent).toContain('GPU stock copied from occurrence 0; 0 new cutting motions');
+    next.click();
+    await vi.waitFor(() => expect(status.textContent).toContain('2/4'));
+    expect(status.textContent).toContain('GPU stock copied from occurrence 1; 1 new cutting motions');
+    expect(copy).toHaveBeenCalledTimes(2);
+    expect(worker.postMessage).not.toHaveBeenCalled();
   });
 
   it('shows mesh phases and first-visit/cache-hit diagnostics without stale timings', async () => {
@@ -390,6 +433,38 @@ describe('editor Plot actions', () => {
     await plot.plotNCCode('1');
 
     expect(requestPlot).toHaveBeenCalledTimes(1);
+  });
+
+  it('limits WebGPU rendering to one pending frame and stops after queue failure', async () => {
+    vi.spyOn(GpuDexelStock.prototype, 'calculate').mockResolvedValue(5);
+    await readyReplay(true);
+    plot.camera = new THREE.PerspectiveCamera();
+    vi.spyOn(document, 'hidden', 'get').mockReturnValue(false);
+    let finish!: () => void;
+    const queue = vi.mocked(plot.gpuDevice!.queue.onSubmittedWorkDone);
+    queue.mockImplementationOnce(() => new Promise<undefined>((resolve) => {
+      finish = () => resolve(undefined);
+    }));
+    const renderer = plot.renderer!;
+    vi.mocked(renderer.render).mockClear();
+    plot.renderScene();
+    plot.renderScene();
+    expect(renderer.render).toHaveBeenCalledOnce();
+    finish();
+    await vi.waitFor(() => {
+      plot.renderScene();
+      expect(renderer.render).toHaveBeenCalledTimes(2);
+    });
+    await vi.waitFor(() => expect(plot.gpuRenderPending).toBe(false));
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    queue.mockRejectedValueOnce(new Error('device removed'));
+    plot.renderScene();
+    await vi.waitFor(() => expect(plot.gpuRendererLost).toBe(true));
+    const count = vi.mocked(renderer.render).mock.calls.length;
+    plot.renderScene();
+    expect(renderer.render).toHaveBeenCalledTimes(count);
+    expect(plot.shadowRoot?.querySelector('#replay-status')?.textContent).toContain('device removed');
+    log.mockRestore();
   });
 
   it.each(['1', undefined])('renders once from the completed run for channel/global Plot %s', async (channelId) => {

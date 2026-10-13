@@ -1,10 +1,18 @@
 import * as THREE from 'three';
 import type { WebGPURenderer } from 'three/webgpu';
 import type { DeepReadonly } from '../tools/SimulationMetadata';
-import { compileGpuSweeps, GPU_SWEEP_STRIDE } from './GpuSweepCompiler';
+import { compileGpuSweeps, GPU_SWEEP_STRIDE, type CompiledGpuSweep } from './GpuSweepCompiler';
+import { recordGpuDiagnostic } from './GpuDiagnostics';
 import { batchRemovalMotions } from './MaterialRemovalEngine';
 import { GpuDexelStock } from './GpuDexelStock';
-import { createDexelLayout, DEXEL_MEMORY_BYTES } from './DexelLayout';
+import {
+  createDexelLayout,
+  DEXEL_MEMORY_BYTES,
+  DEXEL_INTERVALS,
+  DEXEL_MAX_INTERVALS,
+  GpuDexelIntervalOverflowError,
+  type DexelIntervalCapacity,
+} from './DexelLayout';
 import { materialSize, stockPlacement } from './SimulationTransforms';
 import {
   SimulationCapabilityError,
@@ -19,6 +27,8 @@ export interface GpuReplayFrame {
   total: number;
   executionStep?: number;
   processedMotions: number;
+  newMotions: number;
+  reusedPosition?: number;
   stop?: RemovalStop;
   phase: 'coarse' | 'fine';
   pitchMm: number;
@@ -56,6 +66,7 @@ export class GpuMaterialReplaySession {
   private readonly coarse = new Map<number, GpuDexelStock>();
   private readonly fine = new Map<number, GpuDexelStock>();
   private readonly owned = new Set<GpuDexelStock>();
+  private initialSweeps?: { position: number; sweeps: CompiledGpuSweep[] };
   private progress: (processed: number, total: number) => void = () => {};
 
   constructor(
@@ -121,13 +132,28 @@ export class GpuMaterialReplaySession {
         throw new SimulationCapabilityError(
           'GPU cutter compilation exceeds its 32 MiB staging budget; use CPU simulation',
         );
-      compileGpuSweeps(input);
+      const preparationStarted = performance.now();
+      if (prepareFinal && !input.stop) {
+        const merged = batchRemovalMotions(input.motions).map((batch) => batch.motion);
+        this.initialSweeps = {
+          position: steps.length,
+          sweeps: compileGpuSweeps({ ...input, motions: merged }),
+        };
+      } else {
+        compileGpuSweeps(input);
+      }
+      recordGpuDiagnostic(this.device, 'replay-preparation', {
+        motions: input.motions.length,
+        compiledSweeps: this.initialSweeps?.sweeps.length ?? input.motions.length,
+        elapsedMs: Math.round(performance.now() - preparationStarted),
+      });
       createDexelLayout(
         new THREE.Vector3(...materialSize(input.stock)),
         Math.max(0.1, this.options.finePitchMm),
       );
       return this.seek(prepareFinal ? steps.length : 0);
     } catch (error) {
+      this.initialSweeps = undefined;
       return Promise.reject(error);
     }
   }
@@ -219,53 +245,145 @@ export class GpuMaterialReplaySession {
     let stock = cache.get(position),
       elapsedMs = 0;
     const cacheHit = !!stock;
+    let newMotions = 0;
+    let reusedPosition: number | undefined;
     if (!stock) {
-      const motions = input.motions.filter((motion) => motion.executionStep <= step);
-      const merged = batchRemovalMotions(motions).map((batch) => batch.motion);
-      const sweeps = compileGpuSweeps({ ...input, motions: merged });
-      const size = new THREE.Vector3(...materialSize(input.stock));
-      const layout = createDexelLayout(size, pitch);
-      const indexEntries = Math.max(1, layout.tiles * sweeps.length);
-      const staging = layout.tiles * 96 + indexEntries * 16;
-      const records = sweeps.length * (GPU_SWEEP_STRIDE * 12 + 320);
-      this.makeRoom(layout.estimatedBytes + staging + records + 4096);
-      stock = new GpuDexelStock(
-        this.renderer,
-        this.device,
-        size,
-        pitch,
-        input.stock.type === 'cylinder',
-        sweeps,
-        stockPlacement(input.stock, input.binding),
-      );
-      try {
-        this.makeRoom(stock.estimatedBytes);
-        this.owned.add(stock);
-        this.progress(0, motionCount);
-        const calculationEpoch = this.epoch;
-        elapsedMs = await stock.calculate(
-          sweeps.length,
-          () => this.cancelled || calculationEpoch !== this.epoch,
-        );
-        if (this.cancelled) throw new DOMException('GPU replay cancelled', 'AbortError');
-        this.progress(motionCount, motionCount);
-        cache.set(position, stock);
-        stock.group.userData.releaseGpuStock = () => {
-          if (this.cancelled) {
-            cache.delete(position);
-            this.owned.delete(stock!);
-            stock!.dispose();
-          }
-        };
-      } catch (error) {
-        this.owned.delete(stock);
-        stock.dispose();
-        throw error;
+      let source: GpuDexelStock | undefined;
+      for (const [candidatePosition, candidate] of cache) {
+        if (
+          candidatePosition < position &&
+          (reusedPosition === undefined || candidatePosition > reusedPosition)
+        ) {
+          reusedPosition = candidatePosition;
+          source = candidate;
+        }
       }
+      const sourceStep =
+        reusedPosition !== undefined && reusedPosition > 0 ? this.steps[reusedPosition - 1] : -1;
+      const motions = input.motions.filter(
+        (motion) => motion.executionStep <= step && (!source || motion.executionStep > sourceStep),
+      );
+      newMotions = motions.length;
+      const preparationStarted = performance.now();
+      const prepared =
+        !source && this.initialSweeps?.position === position
+          ? this.initialSweeps.sweeps
+          : undefined;
+      this.initialSweeps = undefined;
+      const sweeps =
+        prepared ??
+        compileGpuSweeps({
+          ...input,
+          motions: batchRemovalMotions(motions).map((batch) => batch.motion),
+        });
+      recordGpuDiagnostic(this.device, 'frame-preparation', {
+        position,
+        phase,
+        reusedInitialSweeps: prepared !== undefined,
+        motions: motionCount,
+        newMotions,
+        reusedPosition: reusedPosition ?? -1,
+        compiledSweeps: sweeps.length,
+        elapsedMs: Math.round(performance.now() - preparationStarted),
+      });
+      const size = new THREE.Vector3(...materialSize(input.stock));
+      const calculationEpoch = this.epoch;
+      let intervalCapacity: DexelIntervalCapacity =
+        source?.layout.intervalCapacity ?? DEXEL_INTERVALS;
+      let retry: boolean;
+      do {
+        retry = false;
+        if (this.cancelled || calculationEpoch !== this.epoch)
+          throw new DOMException('GPU replay cancelled', 'AbortError');
+        const layout = createDexelLayout(size, pitch, intervalCapacity);
+        const indexEntries = Math.max(1, layout.tiles * sweeps.length);
+        const staging = layout.tiles * 96 + indexEntries * 16;
+        const records = sweeps.length * (GPU_SWEEP_STRIDE * 12 + 320);
+        this.makeRoom(layout.estimatedBytes + staging + records + 4096, source);
+        stock = new GpuDexelStock(
+          this.renderer,
+          this.device,
+          size,
+          pitch,
+          input.stock.type === 'cylinder',
+          sweeps,
+          stockPlacement(input.stock, input.binding),
+          intervalCapacity,
+        );
+        const attemptStarted = performance.now();
+        try {
+          this.makeRoom(stock.estimatedBytes, source);
+          this.owned.add(stock);
+          const cancelled = () => this.cancelled || calculationEpoch !== this.epoch;
+          this.progress(motionCount - newMotions, motionCount);
+          const copyMs = source ? await stock.copyFrom(source, cancelled) : 0;
+          const computeMs =
+            sweeps.length || !source ? await stock.calculate(sweeps.length, cancelled) : 0;
+          elapsedMs += copyMs + computeMs;
+          if (this.cancelled || calculationEpoch !== this.epoch)
+            throw new DOMException('GPU replay cancelled', 'AbortError');
+          this.progress(motionCount, motionCount);
+          cache.set(position, stock);
+          stock.group.userData.releaseGpuStock = () => {
+            if (this.cancelled) {
+              cache.delete(position);
+              this.owned.delete(stock!);
+              stock!.dispose();
+            }
+          };
+          break;
+        } catch (error) {
+          this.owned.delete(stock);
+          stock.dispose();
+          if (
+            !(error instanceof GpuDexelIntervalOverflowError) ||
+            intervalCapacity === DEXEL_MAX_INTERVALS
+          )
+            throw error;
+          elapsedMs += performance.now() - attemptStarted;
+          const nextCapacity: DexelIntervalCapacity = intervalCapacity === 16 ? 32 : 64;
+          recordGpuDiagnostic(this.device, 'interval-capacity-retry', {
+            position,
+            phase,
+            pitchMm: pitch,
+            from: intervalCapacity,
+            to: nextCapacity,
+          });
+          console.info(
+            '[NC-Edit7 GPU] Retrying interval capacity ' +
+              JSON.stringify({
+                position,
+                phase,
+                pitchMm: pitch,
+                from: intervalCapacity,
+                to: nextCapacity,
+              }),
+          );
+          intervalCapacity = nextCapacity;
+          retry = true;
+        }
+      } while (retry);
     } else {
       cache.delete(position);
       cache.set(position, stock);
     }
+    if (!cacheHit)
+      console.info(
+        '[NC-Edit7 GPU] Replay stock ready ' +
+          JSON.stringify({
+            position,
+            requestedPosition,
+            phase,
+            pitchMm: pitch,
+            intervalCapacity: stock.layout.intervalCapacity,
+            analyticalFlatSweeps: stock.analyticalFlatSweeps,
+            motions: motionCount,
+            newMotions,
+            reusedPosition,
+            elapsedMs: Math.round(elapsedMs),
+            estimatedMiB: Math.round(stock.estimatedBytes / 1048576),
+          }),
+      );
     return {
       backend: 'webgpu-dexel',
       position,
@@ -273,6 +391,8 @@ export class GpuMaterialReplaySession {
       total: this.steps.length,
       executionStep: position ? step : undefined,
       processedMotions: motionCount,
+      newMotions,
+      reusedPosition,
       stop:
         requestedPosition > this.safePosition || position === this.steps.length
           ? input.stop
@@ -289,16 +409,15 @@ export class GpuMaterialReplaySession {
     };
   }
 
-  private makeRoom(extra: number): void {
+  private makeRoom(extra: number, protectedStock?: GpuDexelStock): void {
     let bytes = [...this.owned].reduce(
       (sum, stock) => sum + stock.estimatedBytes,
       this.options.residentBytes ?? 0,
     );
     for (const cache of [this.fine, this.coarse]) {
       for (const [position, stock] of cache) {
-        if (bytes + extra <= DEXEL_MEMORY_BYTES && cache.size < (cache === this.fine ? 1 : 4))
-          break;
-        if (stock.group.parent) continue;
+        if (bytes + extra <= DEXEL_MEMORY_BYTES && cache.size < 4) break;
+        if (stock.group.parent || stock === protectedStock) continue;
         cache.delete(position);
         this.owned.delete(stock);
         bytes -= stock.estimatedBytes;
@@ -313,6 +432,7 @@ export class GpuMaterialReplaySession {
 
   cancel(): void {
     this.cancelled = true;
+    this.initialSweeps = undefined;
     this.epoch++;
     if (this.timer !== undefined) clearTimeout(this.timer);
     this.timer = undefined;

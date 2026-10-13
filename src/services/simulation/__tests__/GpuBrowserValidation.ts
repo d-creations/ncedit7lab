@@ -1,8 +1,8 @@
 import * as THREE from 'three';
 import { RenderTarget, WebGPURenderer, type NodeBuilder } from 'three/webgpu';
-import { GpuDexelStock } from '../GpuDexelStock';
+import { DEXEL_PASS_SWEEPS, GpuDexelStock } from '../GpuDexelStock';
 import { compileGpuSweeps, evaluateGpuSweep } from '../GpuSweepCompiler';
-import { DEXEL_INTERVALS } from '../DexelLayout';
+import { type DexelIntervalCapacity } from '../DexelLayout';
 import type { RemovalMotion, SimulationInput } from '../SimulationTypes';
 import { stockPlacement } from '../SimulationTransforms';
 import type { ProgramToolDefinition } from '../../tools/SimulationMetadata';
@@ -141,7 +141,11 @@ export async function runGpuCylinderShadingValidation(drilled = false): Promise<
   }
 }
 
-export async function runGpuBrowserValidation(partSizeMm = 2): Promise<object> {
+export async function runGpuBrowserValidation(
+  partSizeMm = 2,
+  denseCutters = false,
+  intervalCapacity: DexelIntervalCapacity = 16,
+): Promise<object> {
   if (!Number.isFinite(partSizeMm) || partSizeMm <= 0)
     throw new Error('Invalid GPU validation stock size');
   const scale = partSizeMm / 2;
@@ -226,7 +230,13 @@ export async function runGpuBrowserValidation(partSizeMm = 2): Promise<object> {
   try {
     for (const mixed of [false, true]) {
       const input = setup(mixed),
-        sweeps = compileGpuSweeps(input);
+        referenceSweeps = compileGpuSweeps(input),
+        sweeps = denseCutters
+          ? [
+              ...Array.from({ length: DEXEL_PASS_SWEEPS }, () => referenceSweeps[0]),
+              ...referenceSweeps,
+            ]
+          : referenceSweeps;
       for (const pitch of [0.1, 0.02]) {
         const stock = new GpuDexelStock(
           renderer,
@@ -236,6 +246,7 @@ export async function runGpuBrowserValidation(partSizeMm = 2): Promise<object> {
           mixed,
           sweeps,
           stockPlacement(input.stock, input.binding),
+          intervalCapacity,
         );
         stocks.push(stock);
         const ms = await stock.calculate(sweeps.length);
@@ -244,6 +255,61 @@ export async function runGpuBrowserValidation(partSizeMm = 2): Promise<object> {
         const intervals = new Float32Array(
           await renderer.getArrayBufferAsync(stock.intervalAttribute),
         );
+        const copyCapacity: DexelIntervalCapacity =
+          intervalCapacity < 16 ? 16 : intervalCapacity < 32 ? 32 : 64;
+        const prefix = new GpuDexelStock(
+          renderer,
+          device,
+          stock.layout.size.clone(),
+          pitch,
+          mixed,
+          sweeps.slice(0, 1),
+          stockPlacement(input.stock, input.binding),
+          intervalCapacity,
+        );
+        stocks.push(prefix);
+        const continued = new GpuDexelStock(
+          renderer,
+          device,
+          stock.layout.size.clone(),
+          pitch,
+          mixed,
+          sweeps.slice(1),
+          stockPlacement(input.stock, input.binding),
+          copyCapacity,
+        );
+        stocks.push(continued);
+        let copyMs = 0,
+          deltaMs = 0;
+        try {
+          await prefix.calculate(1);
+          copyMs = await continued.copyFrom(prefix);
+          deltaMs = await continued.calculate(sweeps.length - 1);
+          const copiedCounts = new Uint32Array(
+            await renderer.getArrayBufferAsync(continued.countAttribute),
+          );
+          const copiedIntervals = new Float32Array(
+            await renderer.getArrayBufferAsync(continued.intervalAttribute),
+          );
+          for (let ray = 0; ray < stock.layout.rays; ray++) {
+            if (copiedCounts[ray] !== counts[ray])
+              throw new Error(
+                `GPU copy/delta changed interval count: ray=${ray}, pitch=${pitch}, mixed=${mixed}`,
+              );
+            for (let i = 0; i < counts[ray] * 2; i++) {
+              if (
+                copiedIntervals[ray * copyCapacity * 2 + i] !==
+                intervals[ray * intervalCapacity * 2 + i]
+              )
+                throw new Error(
+                  `GPU copy/delta changed material endpoint: ray=${ray}, endpoint=${i}, pitch=${pitch}, mixed=${mixed}`,
+                );
+            }
+          }
+        } finally {
+          continued.dispose();
+          prefix.dispose();
+        }
         const dims = stock.layout.dimensions.toArray(),
           size = [partSizeMm, partSizeMm, partSizeMm];
         let checked = 0,
@@ -259,13 +325,15 @@ export async function runGpuBrowserValidation(partSizeMm = 2): Promise<object> {
                 (Math.floor(a / 32) + tilesU * Math.floor(b / 32)) * 1024 +
                 (a % 32) +
                 32 * (b % 32);
-              if (counts[ray] > DEXEL_INTERVALS) throw new Error('Invalid GPU interval count');
+              if (counts[ray] > intervalCapacity) throw new Error('Invalid GPU interval count');
               const point = new THREE.Vector3();
               point.setComponent(u, -scale + ((a + 0.5) * size[u]) / dims[u]);
               point.setComponent(v, -scale + ((b + 0.5) * size[v]) / dims[v]);
               for (let sample = 0; sample < 41; sample++) {
                 point.setComponent(axis, (-0.975 + sample * 0.04875) * scale);
-                const field = Math.min(...sweeps.map((sweep) => evaluateGpuSweep(sweep, point)));
+                const field = Math.min(
+                  ...referenceSweeps.map((sweep) => evaluateGpuSweep(sweep, point)),
+                );
                 const stockField = mixed
                   ? Math.max(Math.hypot(point.x, point.y) - scale, Math.abs(point.z) - scale)
                   : Math.max(Math.abs(point.x), Math.abs(point.y), Math.abs(point.z)) - scale;
@@ -274,7 +342,7 @@ export async function runGpuBrowserValidation(partSizeMm = 2): Promise<object> {
                 const expected = stockField < 0 && field >= 0;
                 let actual = false;
                 for (let i = 0; i < counts[ray]; i++) {
-                  const offset = (ray * DEXEL_INTERVALS + i) * 2;
+                  const offset = (ray * intervalCapacity + i) * 2;
                   actual ||=
                     point.getComponent(axis) >= intervals[offset] &&
                     point.getComponent(axis) <= intervals[offset + 1];
@@ -315,9 +383,15 @@ export async function runGpuBrowserValidation(partSizeMm = 2): Promise<object> {
             pitchMm: pitch,
             computeMs: Math.round(ms),
             warmComputeMs: Math.round(warmMs),
+            copyMs: Math.round(copyMs),
+            deltaComputeMs: Math.round(deltaMs),
+            copiedIntervalCapacity: copyCapacity,
+            incrementalRaysChecked: stock.layout.rays,
             checked,
             visiblePixels: visible,
             estimatedMiB: +(stock.estimatedBytes / 1048576).toFixed(2),
+            intervalCapacity,
+            denseCutters,
           });
         } finally {
           renderer.setRenderTarget(null);

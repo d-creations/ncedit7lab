@@ -603,6 +603,13 @@ transforms, stock binding, insert contour and executed Q reuse the existing
 validated geometry helpers. Unsupported orientations/geometry explicitly
 select the CPU path, rather than sampling an undocumented approximation.
 
+GPU startup and navigation use dexels only, not CPU hybrid meshing. For complete supported
+program startup, certified batched cutter sweeps are compiled once and handed
+to the initial coarse stock calculation rather than compiled again after
+preflight. This temporary handoff is released on use/cancellation. Preparation
+timings are included in GPU diagnostic breadcrumbs; this saves preparation
+work but does not promise a specific reduction in GPU execution time.
+
 Initial calculation and uncached line navigation build a coarse executed
 prefix at max(0.1 mm, selected fine pitch). After 350 ms without a new seek,
 the prefix is recomputed from original stock and retained cutter history at
@@ -646,7 +653,52 @@ Shader warmup can take over a second on a cold driver and is not part of the
 reported cutter-update timing.
 
 Compute work is submitted in batches of at most 16,384 rays, with GPU queue
-completion between submissions. Cancellation and obsolete navigation are
+completion between submissions. Batch size also scales down with the maximum
+tile cutter count, targeting at most 65,536 ray/cutter pairs (minimum one
+64-ray workgroup). Each ray processes at most 256 tile-list entries per pass;
+later passes restore its previously subtracted intervals rather than resetting
+stock. This bounds dense lists even when the workgroup minimum prevents further
+ray batching. Conservative cutter bounds wholly outside remaining ray material
+skip the expensive intersection calculation. Capacity/error flags are checked
+after each cutter pass so an overflowing stock can be retried promptly.
+Cutter cost varies, so this is not a watchdog guarantee.
+Stationary, axial, lateral and well-conditioned diagonal fixed-orientation flat endmills use analytical
+ray clipping: cylinder caps and radial quadratics for axial travel, or a
+rectangle/two-disks capsule intersected with the axial slab for lateral travel.
+Diagonal travel partitions the ray at at most eight changes in the admissible
+cutter-translation interval and nearest radial parameter, then clips each piece
+with a quadratic. The swept cylinder is convex, so the result is one interval.
+Near-parallel diagonal motion retains the original solver to avoid ill-conditioned
+division; motion components are not rounded away.
+The active arithmetic allowance remains the existing `1e-6` geometry/ray-scale
+allowance, transformed by the packed affine Lipschitz bound. This replaces up to
+155 field evaluations per intersecting ray/cutter pair; it does not change pitch,
+sample the depth axis, enlarge the allowance or approximate diagonal travel.
+Near-parallel diagonal flat travel and ball/drill/rounded cutters retain their existing bounded
+solver, and turning remains analytical. Readiness summaries include
+`analyticalFlatSweeps` so coverage can be measured on the actual program.
+Reference tests check known interval endpoints and independent continuous-field
+occupancy on transformed, oblique and reversed rays. Actual program timing and
+hardware validation of this fast path remain to be measured.
+WebGPU plot rendering permits only one outstanding frame, including explicit
+theme/highlight renders, skips background-tab frames and stops after queue
+failure or device loss. Sampling pitch and drawing-buffer resolution are
+unchanged.
+
+GPU diagnostics retain the last 24 events per device without NC source text.
+Browser console messages prefixed `[NC-Edit7 GPU]` report adapter initialization,
+completed calculations and render/queue completions slower than 500 ms.
+Device loss prints `Device loss diagnostics` as a JSON text message with replay
+positions, pending-frame state and recent compute/render submissions. Adapter
+and latest calculation context are retained separately so repeated rendering
+cannot evict them. Enable Debug/Verbose console messages to see calculation
+summaries; copy the complete device-loss text when reporting a hang. Removal
+readiness also emits an Info-level `Replay stock ready` JSON summary for each
+new coarse/fine state, including elapsed retries, pitch and successful interval
+capacity, newly applied motion count and any reused occurrence. Cached seeks do not repeat this summary. Removal
+progress explicitly labels GPU dexel versus CPU hybrid and includes any GPU
+fallback reason during CPU work. These records show pending work, not proof that
+a particular shader caused a driver reset. Cancellation and obsolete navigation are
 checked between batches; already-submitted GPU work cannot be interrupted.
 This avoids one whole-stock compute submission, but is not a guaranteed
 watchdog-time bound for every cutter workload or driver. Shader validation
@@ -657,8 +709,31 @@ reloaded; a lost WebGPU renderer cannot display CPU geometry either.
 
 Visited coarse states and recent fine states are retained within a 256 MiB
 combined CPU/GPU buffer estimate; storage attributes have both allocations.
-Each ray supports four disjoint material intervals. Overflow, numerical or
-intersection-work failures are errors, not truncated material. A 128 MiB
+Each phase retains up to four recent states when memory permits. On an uncached
+seek, the closest retained earlier state at the same pitch is copied into a new
+GPU stock, then only newly executed motions are compiled and subtracted.
+Copying uses a separate bounded GPU kernel, with no stock readback or additional
+snapshot buffers. Displayed/source stock remains immutable; cancellation discards
+the target, and the source is protected from eviction during preparation.
+Fine states never reuse coarse intervals. Exact cached seeks require no subtraction;
+non-cutting forward occurrences need only a copy. Initial final preparation,
+cold fine calculation and backward jumps without an earlier retained state still
+replay the selected prefix from original stock. This does not guarantee realtime
+cold jumps or a one-second final calculation.
+
+Cold coarse/fine stock starts with sixteen disjoint material intervals per ray;
+incremental targets start at their source's successful capacity.
+Interval overflow retries at thirty-two and then sixty-four intervals, rebuilding
+from original stock or recopying the immutable source before retrying the same
+delta, with the same executed prefix and pitch. Failed allocations are released
+before retry, and each capacity is charged to the same memory/staging limits.
+The status reports the successful capacity. Retrying adds work; it is not an
+accuracy reduction or a guarantee of realtime performance. Starting at sixteen
+avoids repeating the four/eight-capacity calculation, but uses more memory for
+simple parts. Exceeding sixty-four
+intervals, memory limits, numerical or intersection-work limits remains an
+explicit failure, never truncated material. Only interval overflow is retried;
+device loss and other errors are not. A 128 MiB
 per-storage-buffer cap is respected. Cutter compilation has a 32 MiB staging
 limit, and conservative cutter/index staging is preflighted before stock
 allocation. Fine allocation failures retain coarse
@@ -666,6 +741,19 @@ stock and explicitly identify that the requested fine result is unavailable.
 Large stock requiring excessive uniform fine-ray storage must use a larger
 pitch or the CPU solver. Tiling currently provides spatial cutter culling,
 not out-of-core stock or independently adaptive per-tile resolutions.
+
+All capacities share identical compute and display shader source: the active
+capacity/interval stride is a named uniform, while function-local scratch arrays
+are bounded at sixty-four. GPU/CPU storage allocation still uses the actual
+sixteen, thirty-two or sixty-four intervals; smaller states do not automatically
+allocate sixty-four. Larger scratch arrays may increase per-thread GPU cost;
+capacity limits are not a performance guarantee.
+This avoids capacity-specific shader-program compilation, though initial driver
+compilation and per-stock pipeline creation can still cost time. Compute
+breadcrumbs separate CPU preparation/submission time (`submitCpuMs`, including
+shader building, uploads and synchronous pipeline work) from queue completion
+wait (`queueWaitMs`, which can include other queued work). Slow first submissions
+are reported as JSON text; these timings do not isolate GPU execution alone.
 
 The display is a discretized tri-dexel reconstruction, not a certified solid,
 watertight export mesh or machining-error bound. Ray pitch does not establish

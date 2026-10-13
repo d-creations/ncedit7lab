@@ -38,6 +38,7 @@ import type { ReplayFrame } from '@services/simulation/MaterialReplayEngine';
 import { createPlotReplayTimeline, type PlotReplayTimeline } from '@services/tools/PlotReplayTimeline';
 import type { StockBinding, SimulationInput, SimulationResult } from '@services/simulation/SimulationTypes';
 import { rotationQuaternion } from '@services/simulation/SimulationTransforms';
+import { recordGpuDiagnostic, gpuDiagnosticSnapshot, gpuDiagnosticContext } from '@services/simulation/GpuDiagnostics';
 
 export class NCToolpathPlot extends HTMLElement {
   private scene?: THREE.Scene;
@@ -48,6 +49,8 @@ export class NCToolpathPlot extends HTMLElement {
   private gpuFallbackReason = '';
   private gpuWarmupStock?: GpuDexelStock;
   private gpuComputeError?: string;
+  private gpuRenderPending = false;
+  private gpuRendererLost = false;
   private controls?: OrbitControls;
   private plotService: PlotService;
   private eventBus: EventBus;
@@ -358,7 +361,8 @@ export class NCToolpathPlot extends HTMLElement {
         timeline.occurrences.map((occurrence) => occurrence.executionStep), (processed, total) => {
         if (generation !== this.removalGeneration || !status) return;
         status.hidden = false;
-        status.textContent = `Geometric removal: ${processed}/${total} motions. Feed cutting is assumed; spindle operation is not verified.`;
+        const backend = this.materialReplay instanceof GpuMaterialReplaySession ? 'GPU dexel' : 'CPU hybrid';
+        status.textContent = `Geometric removal (${backend}): ${processed}/${total} motions.${this.gpuFallbackReason ? ` GPU unavailable: ${this.gpuFallbackReason}. Using CPU simulation.` : ''} Feed cutting is assumed; spindle operation is not verified.`;
       }, true);
       if (generation !== this.removalGeneration || this.stale || session.runId !== this.displayedRunId) return;
       if ('backend' in frame) {
@@ -727,7 +731,8 @@ export class NCToolpathPlot extends HTMLElement {
       this.selectReplayFrame(frame);
       const occurrence = this.replayTimeline?.occurrences[frame.position - 1];
       const stopped = frame.stop ? ` Stopped before unsupported step ${frame.stop.executionStep ?? '?'}: ${frame.stop.message}.` : '';
-      const text = `GPU tri-dexel ${frame.phase}: ${frame.pitchMm} mm ray pitch, ${frame.position}/${frame.total}, line ${occurrence?.lineNumber ?? '?'}; ${frame.processedMotions} completed cutting motions; ${frame.cacheHit ? 'cached GPU state' : `${frame.elapsedMs.toFixed(0)} ms compute/readiness`}; ${(frame.estimatedBytes / 1048576).toFixed(1)} MiB estimated CPU/GPU buffers.${stopped} Sampling pitch is not a certified surface tolerance. Magenta pixels indicate a display traversal limit; increase pitch. Feed cutting is assumed; spindle operation is not verified.`;
+      const reuse = frame.reusedPosition !== undefined ? ` GPU stock copied from occurrence ${frame.reusedPosition}; ${frame.newMotions} new cutting motions.` : '';
+      const text = `GPU tri-dexel ${frame.phase}: ${frame.pitchMm} mm ray pitch, ${frame.position}/${frame.total}, line ${occurrence?.lineNumber ?? '?'}; ${frame.processedMotions} completed cutting motions; ${frame.cacheHit ? 'cached GPU state' : `${frame.elapsedMs.toFixed(0)} ms compute/readiness`}; ${(frame.estimatedBytes / 1048576).toFixed(1)} MiB estimated CPU/GPU buffers; ${frame.stock.layout.intervalCapacity} interval capacity per ray.${reuse}${stopped} Sampling pitch is not a certified surface tolerance. Magenta pixels indicate a display traversal limit; increase pitch. Feed cutting is assumed; spindle operation is not verified.`;
       this.replayStatus(text);
       const status = this.shadowRoot?.getElementById('material-removal-status');
       if (status) { status.hidden = false; status.textContent = text; }
@@ -1385,6 +1390,11 @@ export class NCToolpathPlot extends HTMLElement {
         if (!this.isConnected) { await renderer.dispose(); device.destroy(); return; }
         this.gpuDevice = device;
         this.renderer = renderer;
+        recordGpuDiagnostic(device, 'initialized', {
+          vendor: adapter.info.vendor, architecture: adapter.info.architecture,
+          description: adapter.info.description, pixelRatio: window.devicePixelRatio,
+        });
+        console.info('[NC-Edit7 GPU] Adapter initialized ' + JSON.stringify(gpuDiagnosticSnapshot(device)));
         device.addEventListener('uncapturederror', (event) => {
           console.error('WebGPU device error:', event.error.message);
           this.replayStatus(`WebGPU error: ${event.error.message}. Switch to CPU simulation or reload the view.`);
@@ -1392,7 +1402,15 @@ export class NCToolpathPlot extends HTMLElement {
         void device.lost.then((info) => {
           if (info.reason === 'destroyed' || this.gpuDevice !== device || !this.isConnected) return;
           console.error('WebGPU device lost:', info.message);
+          console.error('[NC-Edit7 GPU] Device loss diagnostics ' + JSON.stringify({
+            reason: info.reason, message: info.message,
+            renderPending: this.gpuRenderPending, replayPosition: this.replayPosition,
+            requestedPosition: this.replayRequestedPosition,
+            context: gpuDiagnosticContext(device),
+            recentEvents: gpuDiagnosticSnapshot(device),
+          }));
           this.gpuComputeError = `WebGPU device lost: ${info.message || info.reason}`;
+          this.gpuRendererLost = true;
           this.cancelMaterialRemoval();
           const gpuControl = this.shadowRoot?.querySelector<HTMLInputElement>('#gpu-stock');
           if (gpuControl) gpuControl.disabled = true;
@@ -1510,7 +1528,7 @@ export class NCToolpathPlot extends HTMLElement {
     this.scene.background = new THREE.Color(backgroundColor);
 
     if (this.renderer && this.scene && this.camera) {
-      this.renderer.render(this.scene, this.camera);
+      this.renderScene();
     }
   }
 
@@ -1519,6 +1537,51 @@ export class NCToolpathPlot extends HTMLElement {
     const bodyStyles = getComputedStyle(document.body);
     const value = rootStyles.getPropertyValue(cssVariable).trim() || bodyStyles.getPropertyValue(cssVariable).trim();
     return value || fallback;
+  }
+
+  private renderScene(): void {
+    if (!this.scene || !this.camera || !this.renderer || this.gpuRendererLost) return;
+    if (!(this.renderer instanceof WebGPURenderer) || !this.gpuDevice) {
+      this.renderer.render(this.scene, this.camera);
+      return;
+    }
+    if (this.gpuRenderPending || document.hidden) return;
+    const device = this.gpuDevice;
+    this.gpuRenderPending = true;
+    const started = performance.now();
+    recordGpuDiagnostic(device, 'render-submit', {
+      width: this.renderer.domElement.width, height: this.renderer.domElement.height,
+      replayPosition: this.replayPosition, replayBusy: this.replayBusy,
+    });
+    try {
+      this.renderer.render(this.scene, this.camera);
+    } catch (error) {
+      this.gpuRenderPending = false;
+      this.gpuRendererLost = true;
+      console.error('WebGPU plot rendering failed:', error);
+      recordGpuDiagnostic(device, 'render-error', { message: String(error) });
+      this.cancelMaterialRemoval();
+      this.replayStatus(`WebGPU rendering failed: ${error instanceof Error ? error.message : String(error)}. Reload the view to restore rendering.`);
+      return;
+    }
+    void device.queue.onSubmittedWorkDone().catch((error: unknown) => {
+      if (this.gpuDevice !== device) return;
+      this.gpuRendererLost = true;
+      console.error('WebGPU plot queue failed:', error);
+      recordGpuDiagnostic(device, 'render-queue-error', { message: String(error) });
+      this.cancelMaterialRemoval();
+      this.replayStatus(`WebGPU rendering queue failed: ${error instanceof Error ? error.message : String(error)}. Reload the view to restore rendering.`);
+    }).finally(() => {
+      if (this.gpuDevice === device) {
+        this.gpuRenderPending = false;
+        const elapsedMs = Math.round(performance.now() - started);
+        recordGpuDiagnostic(device, 'render-complete', { elapsedMs });
+        if (elapsedMs > 500)
+          console.warn('[NC-Edit7 GPU] Slow render/queue completion ' + JSON.stringify({
+            elapsedMs, recentEvents: gpuDiagnosticSnapshot(device),
+          }));
+      }
+    });
   }
 
   private animateScene() {
@@ -1530,7 +1593,7 @@ export class NCToolpathPlot extends HTMLElement {
     }
 
     if (this.scene && this.camera && this.renderer) {
-      this.renderer.render(this.scene, this.camera);
+      this.renderScene();
     }
   }
 
@@ -1639,7 +1702,7 @@ export class NCToolpathPlot extends HTMLElement {
 
     // Force a re-render if not animating
     if (!this.animationFrameId && this.renderer && this.camera) {
-      this.renderer.render(this.scene, this.camera);
+      this.renderScene();
     }
   }
 

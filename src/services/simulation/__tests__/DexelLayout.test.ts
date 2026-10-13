@@ -4,12 +4,29 @@ import {
   createDexelLayout,
   DEXEL_INTERVALS,
   DEXEL_MEMORY_BYTES,
+  type DexelIntervalCapacity,
   indexDexelTiles,
   subtractDexelInterval,
 } from '../DexelLayout';
 import type { CompiledGpuSweep } from '../GpuSweepCompiler';
 
 describe('bounded tiled tri-dexel layout', () => {
+  it.each([4, 8, 16, 32, 64] as DexelIntervalCapacity[])(
+    'accounts for %i intervals without changing pitch or ray dimensions',
+    (capacity) => {
+      const layout = createDexelLayout(new THREE.Vector3(2, 3, 4), 0.1, capacity);
+      expect(layout.intervalCapacity).toBe(capacity);
+      expect(layout.intervalBytes).toBe(layout.rays * capacity * 8);
+      expect(layout.dimensions.toArray()).toEqual([20, 30, 40]);
+      expect(layout.pitchMm).toBe(0.1);
+    },
+  );
+  it('checks storage and total-memory limits using the requested interval capacity', () => {
+    expect(createDexelLayout(new THREE.Vector3(20, 20, 20), 0.02, 4).estimatedBytes).toBeLessThan(
+      DEXEL_MEMORY_BYTES,
+    );
+    expect(() => createDexelLayout(new THREE.Vector3(20, 20, 20), 0.02, 8)).toThrow(/larger pitch/);
+  });
   it('uses three projected ray grids, padded only to 32-ray tiles', () => {
     const layout = createDexelLayout(new THREE.Vector3(2, 3, 4), 0.1);
     expect(layout.dimensions.toArray()).toEqual([20, 30, 40]);
@@ -18,8 +35,8 @@ describe('bounded tiled tri-dexel layout', () => {
     expect(layout.intervalBytes).toBe(layout.rays * DEXEL_INTERVALS * 8);
     expect(layout.estimatedBytes).toBeGreaterThan(layout.intervalBytes * 2);
   });
-  it('fits 20 mm cubic stock at 0.02 mm without pretending 1 micron global stock is cheap', () => {
-    expect(createDexelLayout(new THREE.Vector3(20, 20, 20), 0.02).estimatedBytes).toBeLessThan(
+  it('fits an explicit compact layout without pretending higher capacities or global micron stock are cheap', () => {
+    expect(createDexelLayout(new THREE.Vector3(20, 20, 20), 0.02, 4).estimatedBytes).toBeLessThan(
       DEXEL_MEMORY_BYTES,
     );
     expect(() => createDexelLayout(new THREE.Vector3(20, 20, 20), 0.001)).toThrow(/larger pitch/);
@@ -75,12 +92,7 @@ describe('multi-interval material subtraction', () => {
   it('reports overflow rather than truncating thin walls', () => {
     expect(() =>
       subtractDexelInterval(
-        [
-          [0, 1],
-          [2, 3],
-          [4, 5],
-          [6, 7],
-        ],
+        Array.from({ length: DEXEL_INTERVALS }, (_, i): [number, number] => [2 * i, 2 * i + 1]),
         [0.4, 0.6],
       ),
     ).toThrow(/intervals/);

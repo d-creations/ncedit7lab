@@ -15,6 +15,7 @@ import {
   GPU_SWEEP_STRIDE,
   GPU_SWEEP_WGSL,
   GPU_SWEEP_RAY_WGSL,
+  usesAnalyticalFlatRayCuts,
   type CompiledGpuSweep,
 } from '../GpuSweepCompiler';
 import { rotationQuaternion, stockPlacement } from '../SimulationTransforms';
@@ -162,9 +163,7 @@ describe('GPU continuous sweep compiler', () => {
     expect(sweeps[0].data.every(Number.isFinite)).toBe(true);
     expect(JSON.stringify(config)).toBe(before);
     expect(compileGpuSweeps(input([]))).toEqual([]);
-    expect(GPU_SWEEP_WGSL).toContain(
-      'fn gpuSweepDistance(point: vec3f, sweep: u32) -> f32',
-    );
+    expect(GPU_SWEEP_WGSL).toContain('fn gpuSweepDistance(point: vec3f, sweep: u32) -> f32');
     expect(GPU_SWEEP_WGSL).toContain('GPU_SWEEP_VEC4_STRIDE: u32 = 72u');
     expect(GPU_SWEEP_WGSL + GPU_SWEEP_RAY_WGSL).not.toMatch(/ptr\s*<\s*storage\b/);
   });
@@ -495,6 +494,96 @@ describe('bounded GPU ray sweep intervals', () => {
     expect(cap[0][0]).toBeCloseTo(-1, 1);
     expect(cap[0][1]).toBeCloseTo(1001, 1);
     expect(intervals(sweep, v(0, 1.1, 2), v(1), [0, 1000])).toEqual([]);
+  });
+  it('analytically clips lateral flat-mill capsule sides and end caps at the existing arithmetic allowance', () => {
+    const sweep = compileGpuSweeps(input([motion(flat, v(), v(3, 0, 0))]))[0];
+    const allowance = 7e-6 * sweep.data[30];
+    const along = intervals(sweep, v(0, 0, 2), v(1), [-2, 5]);
+    expect(along).toHaveLength(1);
+    expect(along[0][0]).toBeCloseTo(-1 - allowance, 8);
+    expect(along[0][1]).toBeCloseTo(4 + allowance, 8);
+    const across = intervals(sweep, v(1.5, 0, 2), v(0, 1), [-2, 5]);
+    expect(across[0][0]).toBeCloseTo(-1 - allowance, 8);
+    expect(across[0][1]).toBeCloseTo(1 + allowance, 8);
+    const vertical = intervals(sweep, v(1.5, 0, 0), v(0, 0, 1), [-2, 6]);
+    expect(vertical[0][0]).toBeCloseTo(-8e-6 * sweep.data[30], 8);
+    expect(vertical[0][1]).toBeCloseTo(4 + 8e-6 * sweep.data[30], 8);
+    expect(intervals(sweep, v(1.5, 1.001, 2), v(1), [0, 1])).toEqual([]);
+    expect(intervals(sweep, v(1.5, 0, 2), v(0, 1), [0.1, 0.2])).toEqual([[0.1, 0.2]]);
+  });
+  it('analytically clips stationary and reversed axial flat cylinders', () => {
+    const stationary = compileGpuSweeps(input([motion(flat, v(), v())]))[0];
+    const circle = intervals(stationary, v(0, 0, 2), v(1), [-2, 2]);
+    expect(circle[0][0]).toBeCloseTo(-1 - 4e-6 * stationary.data[30], 8);
+    expect(circle[0][1]).toBeCloseTo(1 + 4e-6 * stationary.data[30], 8);
+    const axial = compileGpuSweeps(input([motion(flat, v(), v(0, 0, -2))]))[0];
+    const cylinder = intervals(axial, v(), v(0, 0, 1), [-5, 7]);
+    expect(cylinder[0][0]).toBeCloseTo(-2 - 12e-6 * axial.data[30], 8);
+    expect(cylinder[0][1]).toBeCloseTo(4 + 12e-6 * axial.data[30], 8);
+  });
+  it.each([2, -2])(
+    'analytically clips diagonal flat travel with axial delta %s at known roots',
+    (z) => {
+      const sweep = compileGpuSweeps(input([motion(flat, v(), v(3, 0, z))]))[0];
+      expect(usesAnalyticalFlatRayCuts(sweep)).toBe(true);
+      const limits: readonly [number, number] = z > 0 ? [-2, 8] : [-4, 6];
+      const result = intervals(sweep, v(1.5, 0, 0), v(0, 0, 1), limits);
+      const allowance = 10e-6 * sweep.data[30],
+        radius = 1 + allowance;
+      const a = (z * (1.5 - radius)) / 3,
+        b = (z * (1.5 + radius)) / 3;
+      expect(result).toHaveLength(1);
+      expect(result[0][0]).toBeCloseTo(Math.min(a, b) - allowance, 8);
+      expect(result[0][1]).toBeCloseTo(4 + Math.max(a, b) + allowance, 8);
+    },
+  );
+  it('preserves diagonal flat occupancy across cap transitions, transformed tools and oblique rays', () => {
+    const orientation = rotationQuaternion([20, 30, -10]);
+    const next = random();
+    for (const travel of [v(3, -1, 2), v(-3, 1, -2), v(0.2, 0.3, 3)]) {
+      const cut = motion(flat);
+      cut.start.orientation = orientation.toArray();
+      cut.end.orientation = orientation.toArray();
+      cut.end.position = travel.applyQuaternion(orientation).toArray();
+      const sweep = compileGpuSweeps(input([cut]))[0];
+      expect(usesAnalyticalFlatRayCuts(sweep)).toBe(true);
+      for (const origin of sampled(sweep, 30)) {
+        const direction = v(next() - 0.5, next() - 0.5, next() - 0.5).normalize();
+        intervals(sweep, origin, direction);
+        intervals(sweep, origin, direction.negate());
+      }
+    }
+  });
+  it('retains the bounded solver for numerically near-parallel diagonal flat motion', () => {
+    for (const travel of [v(3, 1, 1e-6), v(1e-6, 0, 3)]) {
+      const sweep = compileGpuSweeps(input([motion(flat, v(), travel)]))[0];
+      expect(usesAnalyticalFlatRayCuts(sweep)).toBe(false);
+      intervals(sweep, v(0, 0, 2), v(1));
+      intervals(sweep, v(0.5, 0, 0), v(0, 0, 1));
+    }
+  });
+  it('reports unsupported numerical range rather than a success-shaped analytic interval', () => {
+    const sweep = compileGpuSweeps(input([motion(flat, v(), v(3, 0, 0))]))[0];
+    sweep.data[4] = 1e28;
+    expect(evaluateGpuSweepRayCuts(sweep, v(0, 0, 2), v(1), [-2, 5])).toBe(99);
+  });
+  it('preserves continuous flat sweep occupancy on rotated tools and oblique or reversed rays', () => {
+    const cut = motion(flat);
+    const orientation = rotationQuaternion([20, 30, -10]);
+    cut.start.orientation = orientation.toArray();
+    cut.end.orientation = orientation.toArray();
+    cut.end.position = v(3, -1, 0).applyQuaternion(orientation).toArray();
+    const sweep = compileGpuSweeps(input([cut]))[0];
+    expect(sweep.data[6]).toBe(0);
+    const next = random();
+    for (const origin of sampled(sweep, 60)) {
+      const direction = v(next() - 0.5, next() - 0.5, next() - 0.5).normalize();
+      intervals(sweep, origin, direction);
+      intervals(sweep, origin, direction.negate());
+    }
+    expect(GPU_SWEEP_RAY_WGSL.indexOf('return gpuFlatRayCuts')).toBeLessThan(
+      GPU_SWEEP_RAY_WGSL.indexOf('iteration < 48u'),
+    );
   });
 
   it('localizes rounded cutters across the old internal equator zero seam', () => {

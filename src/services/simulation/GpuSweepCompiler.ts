@@ -17,6 +17,18 @@ export const GPU_SWEEP_MAX_PLANES = 64;
 /** 72 vec4s / 1152 bytes per record. Never use a motion index as a record index. */
 export const GPU_SWEEP_STRIDE = (8 + GPU_SWEEP_MAX_PLANES) * 4;
 
+export function usesAnalyticalFlatRayCuts(sweep: CompiledGpuSweep): boolean {
+  const d = sweep.data;
+  // Near-parallel diagonals keep root localization rather than divide by tiny motion components.
+  return (
+    d[0] === 1 &&
+    (d[31] !== 0 ||
+      d[6] === 0 ||
+      (d[4] ** 2 + d[5] ** 2 >= 1e-8 &&
+        Math.abs(d[6]) >= 1e-4 * Math.max(1, Math.hypot(d[4], d[5], d[6]))))
+  );
+}
+
 /**
  * Record layout (vec4 indices):
  * 0: kind (flat=1, ball=2, drill=3, rounded=4, turning=5), radius, length, corner
@@ -489,6 +501,121 @@ export function evaluateGpuSweepRayCuts(
       limits[0] + low * (limits[1] - limits[0]),
       limits[0] + high * (limits[1] - limits[0]),
     ]);
+  if (usesAnalyticalFlatRayCuts(sweep)) {
+    const p = new THREE.Vector3(
+      data[8] * first.x + data[9] * first.y + data[10] * first.z + data[11],
+      data[12] * first.x + data[13] * first.y + data[14] * first.z + data[15],
+      data[16] * first.x + data[17] * first.y + data[18] * first.z + data[19],
+    );
+    const d = new THREE.Vector3(
+      data[8] * travel.x + data[9] * travel.y + data[10] * travel.z,
+      data[12] * travel.x + data[13] * travel.y + data[14] * travel.z,
+      data[16] * travel.x + data[17] * travel.y + data[18] * travel.z,
+    );
+    const allowance = epsilon * data[30];
+    const radius = data[1] + allowance;
+    const lower = (data[31] ? Math.min(0, data[6]) : 0) - allowance;
+    const upper = data[2] + (data[31] ? Math.max(0, data[6]) : 0) + allowance;
+    if (
+      [...p.toArray(), ...d.toArray(), data[4], data[5], data[6], radius, lower, upper].some(
+        (value) => !Number.isFinite(value) || Math.abs(value) >= 1e14,
+      ) ||
+      radius < 0 ||
+      lower > upper
+    )
+      return 99;
+    const slab = (point: number, delta: number, low: number, high: number): [number, number] => {
+      if (delta === 0) return point >= low && point <= high ? [0, 1] : [1, 0];
+      const a = (low - point) / delta,
+        b = (high - point) / delta;
+      return [Math.max(0, Math.min(a, b)), Math.min(1, Math.max(a, b))];
+    };
+    const disk = (x: number, y: number, dx = d.x, dy = d.y): [number, number] => {
+      const a = dx * dx + dy * dy,
+        c = x * x + y * y - radius * radius;
+      if (a === 0) return c <= 0 ? [0, 1] : [1, 0];
+      const roots: number[] = [];
+      quadratic(a, 2 * (x * dx + y * dy), c, (root) => roots.push(root));
+      if (!roots.length) return [1, 0];
+      return [Math.max(0, Math.min(...roots)), Math.min(1, Math.max(...roots))];
+    };
+    if (!data[31] && data[6] !== 0) {
+      // Breakpoints isolate switches of the feasible motion parameter and its clamped radial projection.
+      const squared = data[4] ** 2 + data[5] ** 2;
+      const projection: [number, number] = [
+        (p.x * data[4] + p.y * data[5]) / squared,
+        (d.x * data[4] + d.y * data[5]) / squared,
+      ];
+      const a: [number, number] = [(p.z - data[2] - allowance) / data[6], d.z / data[6]];
+      const b: [number, number] = [(p.z + allowance) / data[6], d.z / data[6]];
+      const low = data[6] > 0 ? a : b,
+        high = data[6] > 0 ? b : a;
+      const roots = [0, 1];
+      for (const [value, delta] of [
+        projection,
+        [projection[0] - 1, projection[1]],
+        low,
+        [low[0] - 1, low[1]],
+        high,
+        [high[0] - 1, high[1]],
+        [projection[0] - low[0], projection[1] - low[1]],
+        [projection[0] - high[0], projection[1] - high[1]],
+      ]) {
+        if (delta === 0) continue;
+        const root = -value / delta;
+        if (root > 0 && root < 1) roots.push(root);
+      }
+      roots.sort((a, b) => a - b);
+      let entry = 1,
+        exit = 0;
+      for (let i = 1; i < roots.length; i++) {
+        const middle = (roots[i - 1] + roots[i]) / 2;
+        const lo = Math.max(0, low[0] + low[1] * middle);
+        const hi = Math.min(1, high[0] + high[1] * middle);
+        if (lo > hi) continue;
+        const projected = projection[0] + projection[1] * middle;
+        let parameter: readonly [number, number] = projection;
+        if (projected < lo) parameter = lo > 0 ? low : [0, 0];
+        else if (projected > hi) parameter = hi < 1 ? high : [1, 0];
+        const circle = disk(
+          p.x - parameter[0] * data[4],
+          p.y - parameter[0] * data[5],
+          d.x - parameter[1] * data[4],
+          d.y - parameter[1] * data[5],
+        );
+        const start = Math.max(roots[i - 1], circle[0]);
+        const end = Math.min(roots[i], circle[1]);
+        if (start <= end) {
+          entry = Math.min(entry, start);
+          exit = Math.max(exit, end);
+        }
+      }
+      return entry <= exit ? convert([[entry, exit]]) : [];
+    }
+    const z = slab(p.z, d.z, lower, upper);
+    const regions: [number, number][] = [disk(p.x, p.y)];
+    if (!data[31]) {
+      const length = Math.hypot(data[4], data[5]);
+      if (length > 0) {
+        const ux = data[4] / length,
+          uy = data[5] / length;
+        const along = slab(p.x * ux + p.y * uy, d.x * ux + d.y * uy, 0, length);
+        const across = slab(-p.x * uy + p.y * ux, -d.x * uy + d.y * ux, -radius, radius);
+        regions.push(
+          [Math.max(along[0], across[0]), Math.min(along[1], across[1])],
+          disk(p.x - data[4], p.y - data[5]),
+        );
+      }
+    }
+    const hits = regions
+      .map(([low, high]): [number, number] => [Math.max(low, z[0]), Math.min(high, z[1])])
+      .filter(([low, high]) => low <= high);
+    if (!hits.length) return [];
+    // A swept flat cylinder is convex; its capsule pieces form one ray interval.
+    return convert([
+      [Math.min(...hits.map(([low]) => low)), Math.max(...hits.map(([, high]) => high))],
+    ]);
+  }
   if (data[0] !== 5) {
     const at = (t: number): number => {
       const point = first.clone().addScaledVector(travel, t);
@@ -649,7 +776,8 @@ function mergeRayIntervals(intervals: [number, number][]): [number, number][] {
 
 /**
  * Include after GPU_SWEEP_WGSL. Fixed work, no depth stepping. Milling clips
- * convex translation fields by bracketed minimization/root localization.
+ * well-conditioned flat cylinder translations analytically; other milling uses bracketed
+ * minimization/root localization of convex translation fields.
  * Turning partitions the ray at axial and quadratic plane roots, clips every
  * plane analytically, then unions the positive/reflected meridian branches.
  */
@@ -721,6 +849,134 @@ fn gpuRayPlaneInside(t: f32, a: f32, q: vec2f, radialOrigin: vec3f, radialTravel
   return a * length(radialOrigin + t * radialTravel) + q.x + q.y * t <= 0.0;
 }
 
+fn gpuRaySlab(point: f32, delta: f32, low: f32, high: f32) -> vec2f {
+  if (delta == 0.0) {
+    if (point >= low && point <= high) { return vec2f(0.0, 1.0); }
+    return vec2f(1.0, 0.0);
+  }
+  let a = (low - point) / delta; let b = (high - point) / delta;
+  return vec2f(max(0.0, min(a, b)), min(1.0, max(a, b)));
+}
+
+fn gpuRayDisk(point: vec2f, delta: vec2f, radius: f32) -> vec2f {
+  let A = dot(delta, delta); let C = dot(point, point) - radius * radius;
+  if (A == 0.0) {
+    if (C <= 0.0) { return vec2f(0.0, 1.0); }
+    return vec2f(1.0, 0.0);
+  }
+  let B = 2.0 * dot(point, delta);
+  let scale = max(A, max(abs(B), abs(C)));
+  let c = vec3f(A, B, C) / scale;
+  let discriminant = c.y * c.y - 4.0 * c.x * c.z;
+  if (discriminant < 0.0) { return vec2f(1.0, 0.0); }
+  let q = -0.5 * (c.y + select(1.0, -1.0, c.y < 0.0) * sqrt(discriminant));
+  if (q == 0.0) {
+    let t = -c.y / (2.0 * c.x);
+    return vec2f(max(0.0, t), min(1.0, t));
+  }
+  let a = q / c.x; let b = c.z / q;
+  return vec2f(max(0.0, min(a, b)), min(1.0, max(a, b)));
+}
+
+fn gpuFlatBreakpoint(line: vec2f, roots: ptr<function, array<f32, 10>>, count: u32) -> u32 {
+  if (line.y != 0.0) {
+    let root = -line.x / line.y;
+    if (root > 0.0 && root < 1.0) { (*roots)[count] = root; return count + 1u; }
+  }
+  return count;
+}
+
+fn gpuFlatDiagonalRayCuts(p: vec3f, d: vec3f, motion: vec3f, radius: f32, height: f32,
+                         allowance: f32, limits: vec2f, cuts: ptr<function, array<vec2f, 4>>) -> u32 {
+  let squared = dot(motion.xy, motion.xy);
+  let projection = vec2f(dot(p.xy, motion.xy), dot(d.xy, motion.xy)) / squared;
+  let a = vec2f(p.z - height - allowance, d.z) / motion.z;
+  let b = vec2f(p.z + allowance, d.z) / motion.z;
+  let low = select(b, a, motion.z > 0.0); let high = select(a, b, motion.z > 0.0);
+  var roots: array<f32, 10>; roots[0] = 0.0; roots[1] = 1.0;
+  var count = 2u;
+  count = gpuFlatBreakpoint(projection, &roots, count);
+  count = gpuFlatBreakpoint(projection - vec2f(1.0, 0.0), &roots, count);
+  count = gpuFlatBreakpoint(low, &roots, count);
+  count = gpuFlatBreakpoint(low - vec2f(1.0, 0.0), &roots, count);
+  count = gpuFlatBreakpoint(high, &roots, count);
+  count = gpuFlatBreakpoint(high - vec2f(1.0, 0.0), &roots, count);
+  count = gpuFlatBreakpoint(projection - low, &roots, count);
+  count = gpuFlatBreakpoint(projection - high, &roots, count);
+  for (var i = 1u; i < count; i++) {
+    var j = i;
+    loop {
+      if (j == 0u) { break; }
+      if (roots[j - 1u] <= roots[j]) { break; }
+      let old = roots[j - 1u]; roots[j - 1u] = roots[j]; roots[j] = old; j--;
+    }
+  }
+  var hit = vec2f(1.0, 0.0); var found = false;
+  for (var i = 1u; i < count; i++) {
+    let middle = (roots[i - 1u] + roots[i]) * 0.5;
+    let lo = max(0.0, low.x + low.y * middle); let hi = min(1.0, high.x + high.y * middle);
+    if (lo > hi) { continue; }
+    let projected = projection.x + projection.y * middle;
+    var parameter = projection;
+    if (projected < lo) { parameter = select(vec2f(0.0), low, lo > 0.0); }
+    else if (projected > hi) { parameter = select(vec2f(1.0, 0.0), high, hi < 1.0); }
+    let circle = gpuRayDisk(p.xy - parameter.x * motion.xy, d.xy - parameter.y * motion.xy, radius);
+    let start = max(roots[i - 1u], circle.x); let end = min(roots[i], circle.y);
+    if (start <= end) {
+      if (!found) { hit = vec2f(start, end); found = true; }
+      else { hit = vec2f(min(hit.x, start), max(hit.y, end)); }
+    }
+  }
+  if (!found) { return 0u; }
+  (*cuts)[0] = vec2f(limits.x) + hit * (limits.y - limits.x);
+  return 1u;
+}
+
+fn gpuFlatRayCuts(first: vec3f, travel: vec3f, limits: vec2f, base: u32, epsilon: f32,
+                  cuts: ptr<function, array<vec2f, 4>>) -> u32 {
+  let shape = dexelRecords.value[base];
+  let motion = dexelRecords.value[base + 1u];
+  let info = dexelRecords.value[base + 7u];
+  let h = vec4f(first, 1.0); let rayVector = vec4f(travel, 0.0);
+  let p = vec3f(dot(dexelRecords.value[base + 2u], h), dot(dexelRecords.value[base + 3u], h), dot(dexelRecords.value[base + 4u], h));
+  let d = vec3f(dot(dexelRecords.value[base + 2u], rayVector), dot(dexelRecords.value[base + 3u], rayVector), dot(dexelRecords.value[base + 4u], rayVector));
+  let allowance = epsilon * info.z;
+  let radius = shape.y + allowance;
+  let lower = select(0.0, min(0.0, motion.z), info.w != 0.0) - allowance;
+  let upper = shape.z + select(0.0, max(0.0, motion.z), info.w != 0.0) + allowance;
+  if (!all(abs(p) < vec3f(1e14)) || !all(abs(d) < vec3f(1e14)) || !all(abs(motion.xyz) < vec3f(1e14)) ||
+      !all(abs(vec3f(radius, lower, upper)) < vec3f(1e14)) || radius < 0.0 || lower > upper) { return 99u; }
+  if (info.w == 0.0 && motion.z != 0.0) {
+    return gpuFlatDiagonalRayCuts(p, d, motion.xyz, radius, shape.z, allowance, limits, cuts);
+  }
+  let z = gpuRaySlab(p.z, d.z, lower, upper);
+  var regions: array<vec2f, 3>;
+  regions[0] = gpuRayDisk(p.xy, d.xy, radius);
+  var count = 1u;
+  if (info.w == 0.0) {
+    let distance = length(motion.xy);
+    if (distance > 0.0) {
+      let along = motion.xy / distance; let across = vec2f(-along.y, along.x);
+      let a = gpuRaySlab(dot(p.xy, along), dot(d.xy, along), 0.0, distance);
+      let b = gpuRaySlab(dot(p.xy, across), dot(d.xy, across), -radius, radius);
+      regions[1] = vec2f(max(a.x, b.x), min(a.y, b.y));
+      regions[2] = gpuRayDisk(p.xy - motion.xy, d.xy, radius);
+      count = 3u;
+    }
+  }
+  var hit = vec2f(1.0, 0.0); var found = false;
+  for (var i = 0u; i < count; i++) {
+    let low = max(z.x, regions[i].x); let high = min(z.y, regions[i].y);
+    if (low <= high) {
+      if (!found) { hit = vec2f(low, high); found = true; }
+      else { hit = vec2f(min(hit.x, low), max(hit.y, high)); }
+    }
+  }
+  if (!found) { return 0u; }
+  (*cuts)[0] = vec2f(limits.x) + hit * (limits.y - limits.x);
+  return 1u;
+}
+
 fn gpuSweepRayCuts(origin:vec3f,direction:vec3f,limits:vec2f,sweep:u32,cuts:ptr<function,array<vec2f,4>>) -> u32 {
   if (!all(abs(origin) < vec3f(1e29)) || !all(abs(direction) < vec3f(1e29)) ||
       !all(abs(limits) < vec2f(1e29)) || dot(direction,direction) == 0.0 || limits.x > limits.y ||
@@ -737,6 +993,11 @@ fn gpuSweepRayCuts(origin:vec3f,direction:vec3f,limits:vec2f,sweep:u32,cuts:ptr<
       !all(abs(finish) <= vec3f(1e7))) { return 99u; }
   let coordinates = max(abs(first),abs(finish));
   let epsilon = 1e-6 * max(max(1.0,max(shape.y,shape.z)),max(length(travel),max(coordinates.x,max(coordinates.y,coordinates.z))));
+  let motion = dexelRecords.value[base + 1u];
+  if (shape.x == 1.0 && (sweepInfo.w != 0.0 || motion.z == 0.0 ||
+      (dot(motion.xy, motion.xy) >= 1e-8 && abs(motion.z) >= 1e-4 * max(1.0, length(motion.xyz))))) {
+    return gpuFlatRayCuts(first, travel, limits, base, epsilon, cuts);
+  }
   if (shape.x != 5.0) {
     var low = 0.0;
     var high = 1.0;

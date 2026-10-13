@@ -25,19 +25,32 @@ import {
 import {
   createDexelLayout,
   DEXEL_INTERVALS,
+  DEXEL_MAX_INTERVALS,
   DEXEL_MEMORY_BYTES,
+  GpuDexelIntervalOverflowError,
   indexDexelTiles,
   type DexelLayout,
+  type DexelIntervalCapacity,
 } from './DexelLayout';
 import {
   GPU_SWEEP_STRIDE,
   GPU_SWEEP_WGSL,
   GPU_SWEEP_RAY_WGSL,
   type CompiledGpuSweep,
+  usesAnalyticalFlatRayCuts,
 } from './GpuSweepCompiler';
 import { SimulationCapabilityError } from './SimulationTypes';
+import { recordGpuDiagnostic } from './GpuDiagnostics';
 
 export const DEXEL_DISPATCH_RAYS = 16384;
+export const DEXEL_PASS_SWEEPS = 256;
+
+export function dexelDispatchRays(tileRanges: Uint32Array): number {
+  let maxTileSweeps = 1;
+  for (let i = 1; i < tileRanges.length; i += 2)
+    maxTileSweeps = Math.max(maxTileSweeps, Math.min(DEXEL_PASS_SWEEPS, tileRanges[i]));
+  return Math.max(64, Math.min(DEXEL_DISPATCH_RAYS, Math.floor(65536 / maxTileSweeps / 64) * 64));
+}
 
 export const DEXEL_MATCAP_WGSL = `
 fn gpuStockMatcap(normal: vec3f, viewDirection: vec3f) -> vec3f {
@@ -64,7 +77,8 @@ function lostDeviceError(info: GPUDeviceLostInfo): SimulationCapabilityError {
   return new SimulationCapabilityError(`WebGPU device lost: ${info.message || info.reason}`);
 }
 
-const HELPERS = `
+// Fixed scratch arrays let all storage capacities share the same shader program.
+const DEXEL_HELPERS = `
 fn gpuRayInfo(id: u32, size: vec3f, dims: vec3f) -> vec4f {
   let tx = u32(ceil(dims.x / 32.0)); let ty = u32(ceil(dims.y / 32.0)); let tz = u32(ceil(dims.z / 32.0));
   let xCount = ty * tz * 1024u; let yCount = tx * tz * 1024u;
@@ -88,24 +102,25 @@ fn gpuRayIndex(p: vec3f, axis: u32, size: vec3f, dims: vec3f) -> u32 {
   let tile = c[u] / 32u + tilesU * (c[v] / 32u);
   return base + tile * 1024u + c[u] % 32u + 32u * (c[v] % 32u);
 }
-fn gpuCutIntervals(cut: vec2f, segments: ptr<function, array<vec2f, ${DEXEL_INTERVALS}>>, count: u32) -> u32 {
-  var result: array<vec2f, ${DEXEL_INTERVALS}>; var n = 0u;
+fn gpuCutIntervals(cut: vec2f, segments: ptr<function, array<vec2f, ${DEXEL_MAX_INTERVALS}>>, count: u32, capacity: u32) -> u32 {
+  if (cut.x == cut.y) { return count; }
+  var result: array<vec2f, ${DEXEL_MAX_INTERVALS}>; var n = 0u;
   for (var i = 0u; i < count; i++) {
     let old = (*segments)[i];
-    if (cut.y <= old.x || cut.x >= old.y) { if (n >= ${DEXEL_INTERVALS}u) { return 99u; } result[n] = old; n++; }
+    if (cut.y <= old.x || cut.x >= old.y) { if (n >= capacity) { return 99u; } result[n] = old; n++; }
     else {
-      if (old.x < cut.x) { if (n >= ${DEXEL_INTERVALS}u) { return 99u; } result[n] = vec2f(old.x, cut.x); n++; }
-      if (old.y > cut.y) { if (n >= ${DEXEL_INTERVALS}u) { return 99u; } result[n] = vec2f(cut.y, old.y); n++; }
+      if (old.x < cut.x) { if (n >= capacity) { return 99u; } result[n] = vec2f(old.x, cut.x); n++; }
+      if (old.y > cut.y) { if (n >= capacity) { return 99u; } result[n] = vec2f(cut.y, old.y); n++; }
     }
   }
   *segments = result; return n;
 }
 `;
 
-const COMPUTE = `
-fn gpuBuildDexels(id: u32, prefix: u32, size: vec3f, dims: vec3f, cylinder: u32) -> void {
+const DEXEL_COMPUTE = `
+fn gpuBuildDexels(id: u32, prefix: u32, entryOffset: u32, capacity: u32, resume: u32, size: vec3f, dims: vec3f, cylinder: u32) -> void {
   if (id >= arrayLength(&dexelCounts.value)) { return; }
-  dexelCounts.value[id] = 0u;
+  if (entryOffset == 0u && resume == 0u) { dexelCounts.value[id] = 0u; }
   let info = gpuRayInfo(id, size, dims); let axis = u32(info.w); var origin = info.xyz;
   if (any(origin > size * 0.5)) { return; }
   var direction = vec3f(0.0); direction[axis] = 1.0;
@@ -119,10 +134,15 @@ fn gpuBuildDexels(id: u32, prefix: u32, size: vec3f, dims: vec3f, cylinder: u32)
     }
   }
   origin[axis] = 0.0;
-  var segments: array<vec2f, ${DEXEL_INTERVALS}>; segments[0] = vec2f(lo, hi); var count = 1u;
+  var segments: array<vec2f, ${DEXEL_MAX_INTERVALS}>; segments[0] = vec2f(lo, hi); var count = 1u;
+  if (entryOffset > 0u || resume != 0u) {
+    count = dexelCounts.value[id];
+    for (var i = 0u; i < count; i++) { segments[i] = dexelIntervals.value[id * capacity + i]; }
+  }
   let epsilon = max(0.0000001, min(size.x / dims.x, min(size.y / dims.y, size.z / dims.z)) * 0.0005);
   let range = dexelTileRanges.value[id / 1024u];
-  for (var entry = 0u; entry < range.y; entry++) {
+  let entryEnd = min(range.y, entryOffset + ${DEXEL_PASS_SWEEPS}u);
+  for (var entry = entryOffset; entry < entryEnd; entry++) {
     let sweep = dexelTileSweeps.value[range.x + entry]; if (sweep >= prefix || count == 0u) { break; }
     let minimum = dexelBounds.value[sweep * 2u].xyz; let maximum = dexelBounds.value[sweep * 2u + 1u].xyz;
     var overlaps = true;
@@ -130,25 +150,41 @@ fn gpuBuildDexels(id: u32, prefix: u32, size: vec3f, dims: vec3f, cylinder: u32)
     if (!overlaps) { continue; }
     let end = min(hi, maximum[axis] + epsilon); var t = max(lo, minimum[axis] - epsilon);
     if (t >= end) { continue; }
+    var touchesMaterial = false;
+    for (var i = 0u; i < count; i++) {
+      if (t < segments[i].y && end > segments[i].x) { touchesMaterial = true; break; }
+    }
+    if (!touchesMaterial) { continue; }
     var cuts: array<vec2f, 4>;
     let cutCount = gpuSweepRayCuts(origin, direction, vec2f(t, end), sweep, &cuts);
     if (cutCount > 4u) { atomicOr(&dexelErrors.value[0], 2u); return; }
     for (var cut = 0u; cut < cutCount; cut++) {
-      count = gpuCutIntervals(cuts[cut], &segments, count);
-      if (count > ${DEXEL_INTERVALS}u) { atomicOr(&dexelErrors.value[0], 1u); return; }
+      count = gpuCutIntervals(cuts[cut], &segments, count, capacity);
+      if (count > capacity) { atomicOr(&dexelErrors.value[0], 1u); return; }
     }
   }
   dexelCounts.value[id] = count;
-  for (var i = 0u; i < count; i++) { dexelIntervals.value[id * ${DEXEL_INTERVALS}u + i] = segments[i]; }
+  for (var i = 0u; i < count; i++) { dexelIntervals.value[id * capacity + i] = segments[i]; }
 }
 `;
 
-const DISPLAY_HELPERS = `
-fn gpuDexelNearestAxis(p: vec3f, axis: u32, size: vec3f, dims: vec3f) -> vec4f {
+const DEXEL_COPY = `
+fn gpuCopyDexels(id: u32, sourceCapacity: u32, targetCapacity: u32) -> void {
+  if (id >= arrayLength(&copyTargetCounts.value)) { return; }
+  let count = copySourceCounts.value[id];
+  copyTargetCounts.value[id] = count;
+  for (var i = 0u; i < count; i++) {
+    copyTargetIntervals.value[id * targetCapacity + i] = copySourceIntervals.value[id * sourceCapacity + i];
+  }
+}
+`;
+
+const DEXEL_DISPLAY_HELPERS = `
+fn gpuDexelNearestAxis(p: vec3f, axis: u32, size: vec3f, dims: vec3f, capacity: u32) -> vec4f {
   let ray = gpuRayIndex(clamp(p, -size * 0.5, size * 0.5), axis, size, dims);
   var result = vec4f(0.0, 0.0, 0.0, 1e20);
   for (var i = 0u; i < dexelCounts.value[ray]; i++) {
-    let span = dexelIntervals.value[ray * ${DEXEL_INTERVALS}u + i];
+    let span = dexelIntervals.value[ray * capacity + i];
     let lower = span.x - p[axis]; let upper = p[axis] - span.y;
     let field = max(lower, upper);
     if (field < result.w) {
@@ -158,11 +194,11 @@ fn gpuDexelNearestAxis(p: vec3f, axis: u32, size: vec3f, dims: vec3f) -> vec4f {
   }
   return result;
 }
-fn gpuDexelMatchEndpoint(ray: u32, reference: f32, entry: bool, limit: f32) -> vec2f {
+fn gpuDexelMatchEndpoint(ray: u32, reference: f32, entry: bool, limit: f32, capacity: u32) -> vec2f {
   var best = vec2f(0.0, 1e20);
   var second = 1e20;
   for (var i = 0u; i < dexelCounts.value[ray]; i++) {
-    let span = dexelIntervals.value[ray * ${DEXEL_INTERVALS}u + i];
+    let span = dexelIntervals.value[ray * capacity + i];
     let endpoint = select(span.y, span.x, entry);
     let distance = abs(endpoint - reference);
     if (distance < best.y) { second = best.y; best = vec2f(endpoint, distance); }
@@ -171,8 +207,8 @@ fn gpuDexelMatchEndpoint(ray: u32, reference: f32, entry: bool, limit: f32) -> v
   if (best.y > limit || second - best.y < 0.000001) { return vec2f(0.0, -1.0); }
   return vec2f(best.x, 1.0);
 }
-fn gpuDexelAxisSample(p: vec3f, axis: u32, size: vec3f, dims: vec3f) -> vec4f {
-  let nearest = gpuDexelNearestAxis(p, axis, size, dims);
+fn gpuDexelAxisSample(p: vec3f, axis: u32, size: vec3f, dims: vec3f, capacity: u32) -> vec4f {
+  let nearest = gpuDexelNearestAxis(p, axis, size, dims, capacity);
   var u = 1u; var v = 2u;
   if (axis == 1u) { u = 0u; }
   if (axis == 2u) { u = 0u; v = 1u; }
@@ -196,10 +232,10 @@ fn gpuDexelAxisSample(p: vec3f, axis: u32, size: vec3f, dims: vec3f) -> vec4f {
   let entry = nearest[axis] < 0.0;
   let reference = p[axis] - nearest[axis] * nearest.w;
   let limit = 4.0 * max(h[u], h[v]);
-  let a = gpuDexelMatchEndpoint(rays[0], reference, entry, limit);
-  let b = gpuDexelMatchEndpoint(rays[1], reference, entry, limit);
-  let c = gpuDexelMatchEndpoint(rays[2], reference, entry, limit);
-  let d = gpuDexelMatchEndpoint(rays[3], reference, entry, limit);
+  let a = gpuDexelMatchEndpoint(rays[0], reference, entry, limit, capacity);
+  let b = gpuDexelMatchEndpoint(rays[1], reference, entry, limit, capacity);
+  let c = gpuDexelMatchEndpoint(rays[2], reference, entry, limit, capacity);
+  let d = gpuDexelMatchEndpoint(rays[3], reference, entry, limit, capacity);
   if (min(min(a.y, b.y), min(c.y, d.y)) < 0.0) { return nearest; }
   let endpoint = mix(mix(a.x, b.x, weight[u]), mix(c.x, d.x, weight[u]), weight[v]);
   let du = mix(b.x - a.x, d.x - c.x, weight[v]) / h[u];
@@ -210,10 +246,10 @@ fn gpuDexelAxisSample(p: vec3f, axis: u32, size: vec3f, dims: vec3f) -> vec4f {
   result[v] = -nearest[axis] * dv * select(0.0, 1.0, high[v] > low[v]);
   return result;
 }
-fn gpuDexelNormal(p: vec3f, size: vec3f, dims: vec3f) -> vec3f {
+fn gpuDexelNormal(p: vec3f, size: vec3f, dims: vec3f, capacity: u32) -> vec3f {
   var surface = vec4f(0.0, 0.0, 0.0, -1e20);
   for (var axis = 0u; axis < 3u; axis++) {
-    let sample = gpuDexelAxisSample(p, axis, size, dims);
+    let sample = gpuDexelAxisSample(p, axis, size, dims, capacity);
     let magnitude = length(sample.xyz);
     if (magnitude > 0.0 && sample.w < 1e19) {
       let normalized = sample / magnitude;
@@ -225,8 +261,8 @@ fn gpuDexelNormal(p: vec3f, size: vec3f, dims: vec3f) -> vec3f {
 }
 `;
 
-const TRACE = `
-fn gpuTraceDexels(origin: vec3f, surface: vec3f, size: vec3f, dims: vec3f) -> vec4f {
+const DEXEL_TRACE = `
+fn gpuTraceDexels(origin: vec3f, surface: vec3f, size: vec3f, dims: vec3f, capacity: u32) -> vec4f {
   let direction = normalize(surface - origin);
   var inverse = vec3f(0.0);
   for (var a = 0u; a < 3u; a++) { inverse[a] = 1.0 / select(direction[a], 1e-20, abs(direction[a]) < 1e-20); }
@@ -244,7 +280,7 @@ fn gpuTraceDexels(origin: vec3f, surface: vec3f, size: vec3f, dims: vec3f) -> ve
       let ray = gpuRayIndex(clamp(p, -size * 0.5, size * 0.5), axis, size, dims);
       var inMaterial = false; var entry = end - t;
       for (var i = 0u; i < dexelCounts.value[ray]; i++) {
-        let span = dexelIntervals.value[ray * ${DEXEL_INTERVALS}u + i];
+        let span = dexelIntervals.value[ray * capacity + i];
         if (p[axis] >= span.x && p[axis] <= span.y) { inMaterial = true; }
         if (abs(direction[axis]) >= 1e-15) {
           let next = (select(span.y, span.x, direction[axis] > 0.0) - p[axis]) / direction[axis] + epsilon;
@@ -273,28 +309,42 @@ export class GpuDexelStock {
   readonly group = new THREE.Group();
   readonly layout: DexelLayout;
   readonly estimatedBytes: number;
+  readonly analyticalFlatSweeps: number;
   readonly intervalAttribute: StorageBufferAttribute;
   readonly countAttribute: StorageBufferAttribute;
   private readonly attributes: StorageBufferAttribute[];
   private readonly prefix = uniform(0, 'uint').setName('dexelPrefix');
   private readonly rayOffset = uniform(0, 'uint').setName('dexelRayOffset');
+  private readonly entryOffset = uniform(0, 'uint').setName('dexelEntryOffset');
+  private readonly resume = uniform(0, 'uint').setName('dexelResume');
   private readonly errorAttribute = new StorageBufferAttribute(new Uint32Array(4), 1);
   private readonly computeNode;
   private readonly mesh: THREE.Mesh<THREE.BoxGeometry, MeshBasicNodeMaterial>;
   private disposed = false;
+  private calculated = false;
   private computeShader?: string;
+  private readonly dispatchRays: number;
+  private readonly maxTileSweeps: number;
 
   constructor(
     private readonly renderer: WebGPURenderer,
     private readonly device: DexelDevice,
     size: THREE.Vector3,
     pitchMm: number,
-    cylinder: boolean,
+    private readonly cylinder: boolean,
     sweeps: readonly CompiledGpuSweep[],
     stockToWorkpiece: THREE.Matrix4,
+    intervalCapacity: DexelIntervalCapacity = DEXEL_INTERVALS,
   ) {
-    this.layout = createDexelLayout(size, pitchMm);
+    this.layout = createDexelLayout(size, pitchMm, intervalCapacity);
+    this.analyticalFlatSweeps = sweeps.filter(usesAnalyticalFlatRayCuts).length;
     const index = indexDexelTiles(this.layout, sweeps);
+    this.maxTileSweeps = index.ranges.reduce(
+      (maximum, value, i) => (i % 2 === 1 ? Math.max(maximum, value) : maximum),
+      0,
+    );
+    // Ray count alone does not bound work: each ray evaluates its tile's cutter list.
+    this.dispatchRays = dexelDispatchRays(index.ranges);
     const recordData = new Float32Array(Math.max(4, sweeps.length * GPU_SWEEP_STRIDE));
     const boundData = new Float32Array(Math.max(8, sweeps.length * 8));
     sweeps.forEach((sweep, i) => {
@@ -311,7 +361,7 @@ export class GpuDexelStock {
         'GPU stock and cutter data exceed the combined CPU/GPU memory estimate',
       );
     this.intervalAttribute = new StorageBufferAttribute(
-      new Float32Array(this.layout.rays * DEXEL_INTERVALS * 2),
+      new Float32Array(this.layout.rays * intervalCapacity * 2),
       2,
     );
     this.countAttribute = new StorageBufferAttribute(new Uint32Array(this.layout.rays), 1);
@@ -331,28 +381,36 @@ export class GpuDexelStock {
     // Stable binding names allow shader reuse instead of recompiling per stock state.
     const sizeNode = uniform(size).setName('dexelSize'),
       dimensionsNode = uniform(this.layout.dimensions).setName('dexelDimensions');
+    const capacityNode = uniform(intervalCapacity, 'uint').setName('dexelCapacity');
     const intervals = storage(
       this.intervalAttribute,
       'vec2',
-      this.layout.rays * DEXEL_INTERVALS,
+      this.layout.rays * intervalCapacity,
     ).setName('dexelIntervals');
     const counts = storage(this.countAttribute, 'uint', this.layout.rays).setName('dexelCounts');
     // Global bindings avoid optional WGSL storage-pointer function parameters.
     const computeBindings = [
-      storage(records, 'vec4', recordData.length / 4).setName('dexelRecords').toReadOnly(),
-      storage(bounds, 'vec4', boundData.length / 4).setName('dexelBounds').toReadOnly(),
+      storage(records, 'vec4', recordData.length / 4)
+        .setName('dexelRecords')
+        .toReadOnly(),
+      storage(bounds, 'vec4', boundData.length / 4)
+        .setName('dexelBounds')
+        .toReadOnly(),
       storage(ranges, 'uvec2', this.layout.tiles).setName('dexelTileRanges').toReadOnly(),
       storage(indices, 'uint', index.sweeps.length).setName('dexelTileSweeps').toReadOnly(),
       intervals,
       counts,
       storage(this.errorAttribute, 'uint', 4).setName('dexelErrors').toAtomic(),
     ];
-    const helpers = code(HELPERS, [], 'wgsl'),
+    const helpers = code(DEXEL_HELPERS, [], 'wgsl'),
       sweepCode = code(`${GPU_SWEEP_WGSL}\n${GPU_SWEEP_RAY_WGSL}`, computeBindings, 'wgsl');
-    const build = wgslFn(COMPUTE, [helpers, sweepCode]);
+    const build = wgslFn(DEXEL_COMPUTE, [helpers, sweepCode]);
     this.computeNode = build({
       id: instanceIndex.add(this.rayOffset),
       prefix: this.prefix,
+      entryOffset: this.entryOffset,
+      resume: this.resume,
+      capacity: capacityNode,
       size: sizeNode,
       dims: dimensionsNode,
       cylinder: uniform(cylinder ? 1 : 0, 'uint').setName('dexelCylinder'),
@@ -362,23 +420,26 @@ export class GpuDexelStock {
     const readIntervals = storage(
       this.intervalAttribute,
       'vec2',
-      this.layout.rays * DEXEL_INTERVALS,
-    ).setName('dexelIntervals').toReadOnly();
+      this.layout.rays * intervalCapacity,
+    )
+      .setName('dexelIntervals')
+      .toReadOnly();
     const readCounts = storage(this.countAttribute, 'uint', this.layout.rays)
       .setName('dexelCounts')
       .toReadOnly();
-    const displayHelpers = code(DISPLAY_HELPERS, [readIntervals, readCounts], 'wgsl');
-    const trace = wgslFn(TRACE, [helpers, displayHelpers]);
+    const displayHelpers = code(DEXEL_DISPLAY_HELPERS, [readIntervals, readCounts], 'wgsl');
+    const trace = wgslFn(DEXEL_TRACE, [helpers, displayHelpers]);
     const hit = (
       trace({
         origin: camera,
         surface: positionLocal,
         size: sizeNode,
         dims: dimensionsNode,
+        capacity: capacityNode,
       }) as Node<'vec4'>
     ).toVar('dexelHit');
     const normal = wgslFn(
-      'fn gpuStockNormal(p: vec3f, size: vec3f, dims: vec3f) -> vec3f { return gpuDexelNormal(p, size, dims); }',
+      'fn gpuStockNormal(p: vec3f, size: vec3f, dims: vec3f, capacity: u32) -> vec3f { return gpuDexelNormal(p, size, dims, capacity); }',
       [helpers, displayHelpers],
     );
     const matcap = wgslFn(DEXEL_MATCAP_WGSL);
@@ -390,6 +451,7 @@ export class GpuDexelStock {
         p: hit.xyz,
         size: sizeNode,
         dims: dimensionsNode,
+        capacity: capacityNode,
       }) as Node<'vec3'>;
       const shaded = matcap({
         normal: modelViewMatrix.mul(vec4(surfaceNormal, 0)).xyz.normalize(),
@@ -410,64 +472,219 @@ export class GpuDexelStock {
     this.group.add(this.mesh);
   }
 
+  async copyFrom(source: GpuDexelStock, cancelled: () => boolean = () => false): Promise<number> {
+    if (this.disposed || source.disposed || cancelled())
+      throw new DOMException('GPU stock copy cancelled', 'AbortError');
+    if (
+      source === this ||
+      !source.calculated ||
+      source.renderer !== this.renderer ||
+      source.device !== this.device ||
+      source.cylinder !== this.cylinder ||
+      !source.group.matrix.equals(this.group.matrix) ||
+      !source.layout.size.equals(this.layout.size) ||
+      !source.layout.dimensions.equals(this.layout.dimensions) ||
+      source.layout.pitchMm !== this.layout.pitchMm ||
+      source.layout.intervalCapacity > this.layout.intervalCapacity
+    )
+      throw new SimulationCapabilityError(
+        'GPU stock copy requires a completed compatible stock at the same pitch and sufficient interval capacity',
+      );
+    this.calculated = false;
+    this.resume.value = 0;
+    const bindings = code(
+      '',
+      [
+        storage(
+          source.intervalAttribute,
+          'vec2',
+          source.layout.rays * source.layout.intervalCapacity,
+        )
+          .setName('copySourceIntervals')
+          .toReadOnly(),
+        storage(source.countAttribute, 'uint', source.layout.rays)
+          .setName('copySourceCounts')
+          .toReadOnly(),
+        storage(
+          this.intervalAttribute,
+          'vec2',
+          this.layout.rays * this.layout.intervalCapacity,
+        ).setName('copyTargetIntervals'),
+        storage(this.countAttribute, 'uint', this.layout.rays).setName('copyTargetCounts'),
+      ],
+      'wgsl',
+    );
+    const offset = uniform(0, 'uint').setName('dexelCopyOffset');
+    const node = wgslFn(DEXEL_COPY, [bindings])({
+      id: instanceIndex.add(offset),
+      sourceCapacity: uniform(source.layout.intervalCapacity, 'uint').setName(
+        'dexelCopySourceCapacity',
+      ),
+      targetCapacity: uniform(this.layout.intervalCapacity, 'uint').setName(
+        'dexelCopyTargetCapacity',
+      ),
+    }).compute(this.layout.rays, [64]);
+    const started = performance.now();
+    const lost = this.device.lost.then(lostDeviceError);
+    const batchRays = Math.min(
+      DEXEL_DISPATCH_RAYS,
+      Math.floor(65536 / source.layout.intervalCapacity / 64) * 64,
+    );
+    recordGpuDiagnostic(this.device, 'stock-copy-start', {
+      rays: this.layout.rays,
+      sourceCapacity: source.layout.intervalCapacity,
+      targetCapacity: this.layout.intervalCapacity,
+      pitchMm: this.layout.pitchMm,
+    });
+    let scoped = false;
+    let failure: unknown;
+    try {
+      this.device.pushErrorScope('validation');
+      scoped = true;
+      for (let ray = 0; ray < this.layout.rays; ray += batchRays) {
+        if (this.disposed || source.disposed || cancelled())
+          throw new DOMException('GPU stock copy cancelled', 'AbortError');
+        offset.value = ray;
+        await this.renderer.compute(node, Math.min(batchRays, this.layout.rays - ray));
+        const completion = await Promise.race([lost, this.device.queue.onSubmittedWorkDone()]);
+        if (completion instanceof Error) throw completion;
+      }
+      if (this.disposed || source.disposed || cancelled())
+        throw new DOMException('GPU stock copy cancelled', 'AbortError');
+    } catch (error) {
+      failure = error;
+    } finally {
+      node.dispose();
+      if (scoped) {
+        try {
+          const validation = await this.device.popErrorScope();
+          if (validation && failure === undefined)
+            failure = new SimulationCapabilityError(
+              `GPU stock copy validation failed: ${validation.message}`,
+            );
+        } catch (error) {
+          console.error('GPU stock copy validation scope failed:', error);
+          if (failure === undefined) failure = error;
+        }
+      }
+    }
+    if (failure !== undefined) {
+      recordGpuDiagnostic(this.device, 'stock-copy-error', { message: String(failure) });
+      throw failure;
+    }
+    if (this.disposed || source.disposed || cancelled())
+      throw new DOMException('GPU stock copy cancelled', 'AbortError');
+    this.resume.value = 1;
+    this.calculated = true;
+    const elapsedMs = performance.now() - started;
+    recordGpuDiagnostic(this.device, 'stock-copy-finished', { elapsedMs: Math.round(elapsedMs) });
+    return elapsedMs;
+  }
+
   async calculate(sweepCount: number, cancelled: () => boolean = () => false): Promise<number> {
     if (this.disposed) throw new DOMException('GPU stock disposed', 'AbortError');
     if (!Number.isSafeInteger(sweepCount) || sweepCount < 0)
       throw new Error('Invalid GPU sweep prefix');
+    this.calculated = false;
     this.prefix.value = sweepCount;
     this.errorAttribute.array.fill(0);
     this.errorAttribute.needsUpdate = true;
     const started = performance.now();
+    recordGpuDiagnostic(this.device, 'compute-start', {
+      pitchMm: this.layout.pitchMm,
+      intervalCapacity: this.layout.intervalCapacity,
+      rays: this.layout.rays,
+      sweeps: sweepCount,
+      resumedStock: this.resume.value !== 0,
+      analyticalFlatSweeps: this.analyticalFlatSweeps,
+      dispatchRays: this.dispatchRays,
+      maxTileSweeps: this.maxTileSweeps,
+      passSweeps: DEXEL_PASS_SWEEPS,
+      estimatedMiB: Math.round(this.estimatedBytes / 1048576),
+    });
     const lost = this.device.lost.then(lostDeviceError);
     this.device.pushErrorScope('validation');
     let validation: GPUError | null = null;
     let failure: unknown;
     try {
-      for (let offset = 0; offset < this.layout.rays; offset += DEXEL_DISPATCH_RAYS) {
+      const entries = Math.min(sweepCount, this.maxTileSweeps);
+      for (
+        let entryOffset = 0;
+        entryOffset < Math.max(1, entries);
+        entryOffset += DEXEL_PASS_SWEEPS
+      ) {
+        this.entryOffset.value = entryOffset;
+        for (let offset = 0; offset < this.layout.rays; offset += this.dispatchRays) {
+          if (this.disposed || cancelled())
+            throw new DOMException('GPU stock calculation cancelled', 'AbortError');
+          this.rayOffset.value = offset;
+          recordGpuDiagnostic(this.device, 'compute-submit', {
+            offset,
+            entryOffset,
+            rays: Math.min(this.dispatchRays, this.layout.rays - offset),
+            elapsedMs: Math.round(performance.now() - started),
+          });
+          const context: { builder?: NodeBuilder } = {};
+          const submitStarted = performance.now();
+          const previous = this.renderer.debug.onNodeBuilderCreated;
+          this.renderer.debug.onNodeBuilderCreated = (builder, object) => {
+            previous?.(builder, object);
+            if (object === this.computeNode) context.builder = builder;
+          };
+          try {
+            await this.renderer.compute(
+              this.computeNode,
+              Math.min(this.dispatchRays, this.layout.rays - offset),
+            );
+          } finally {
+            this.renderer.debug.onNodeBuilderCreated = previous;
+            const builder = context.builder;
+            if (builder && 'computeShader' in builder && typeof builder.computeShader === 'string')
+              this.computeShader = builder.computeShader;
+          }
+          const submitCpuMs = Math.round(performance.now() - submitStarted);
+          const queueStarted = performance.now();
+          const completion = await Promise.race([lost, this.device.queue.onSubmittedWorkDone()]);
+          if (completion instanceof Error) throw completion;
+          const queueWaitMs = Math.round(performance.now() - queueStarted);
+          const timing = {
+            offset,
+            entryOffset,
+            submitCpuMs,
+            queueWaitMs,
+            intervalCapacity: this.layout.intervalCapacity,
+          };
+          recordGpuDiagnostic(this.device, 'compute-complete', timing);
+          if (offset === 0 && entryOffset === 0) {
+            recordGpuDiagnostic(this.device, 'compute-first-complete', timing);
+            if (submitCpuMs + queueWaitMs > 500)
+              console.info(
+                '[NC-Edit7 GPU] Slow first compute submission ' + JSON.stringify(timing),
+              );
+          }
+        }
         if (this.disposed || cancelled())
           throw new DOMException('GPU stock calculation cancelled', 'AbortError');
-        this.rayOffset.value = offset;
-        const context: { builder?: NodeBuilder } = {};
-        const previous = this.renderer.debug.onNodeBuilderCreated;
-        this.renderer.debug.onNodeBuilderCreated = (builder, object) => {
-          previous?.(builder, object);
-          if (object === this.computeNode) context.builder = builder;
-        };
-        try {
-          await this.renderer.compute(
-            this.computeNode,
-            Math.min(DEXEL_DISPATCH_RAYS, this.layout.rays - offset),
+        const header = await Promise.race([
+          lost,
+          this.renderer.getArrayBufferAsync(this.errorAttribute),
+        ]);
+        if (header instanceof Error) throw header;
+        const flags = new Uint32Array(header)[0];
+        if (flags & 2)
+          throw new SimulationCapabilityError(
+            'GPU cutter ray intersection is uncertain or exceeds bounded capacity; use CPU simulation',
           );
-        } finally {
-          this.renderer.debug.onNodeBuilderCreated = previous;
-          const builder = context.builder;
-          if (builder && 'computeShader' in builder && typeof builder.computeShader === 'string')
-            this.computeShader = builder.computeShader;
-        }
-        const completion = await Promise.race([lost, this.device.queue.onSubmittedWorkDone()]);
-        if (completion instanceof Error) throw completion;
+        if (flags & 4)
+          throw new SimulationCapabilityError(
+            'GPU cutter intersection exceeded Float32 numerical range; use CPU simulation',
+          );
+        if (flags & 1) throw new GpuDexelIntervalOverflowError(this.layout.intervalCapacity);
       }
-      if (this.disposed || cancelled())
-        throw new DOMException('GPU stock calculation cancelled', 'AbortError');
-      const header = await Promise.race([
-        lost,
-        this.renderer.getArrayBufferAsync(this.errorAttribute),
-      ]);
-      if (header instanceof Error) throw header;
-      const flags = new Uint32Array(header)[0];
-      if (flags & 1)
-        throw new SimulationCapabilityError(
-          `GPU stock exceeds ${DEXEL_INTERVALS} material intervals on a ray; use CPU simulation`,
-        );
-      if (flags & 2)
-        throw new SimulationCapabilityError(
-          'GPU cutter ray intersection is uncertain or exceeds bounded capacity; use CPU simulation',
-        );
-      if (flags & 4)
-        throw new SimulationCapabilityError(
-          'GPU cutter intersection exceeded Float32 numerical range; use CPU simulation',
-        );
     } catch (error) {
+      recordGpuDiagnostic(this.device, 'compute-error', {
+        message: error instanceof Error ? error.message : String(error),
+      });
       failure = error;
     } finally {
       try {
@@ -500,7 +717,20 @@ export class GpuDexelStock {
     }
     if (failure !== undefined) throw failure;
     if (this.disposed) throw new DOMException('GPU stock disposed', 'AbortError');
-    return performance.now() - started;
+    this.calculated = true;
+    const elapsedMs = performance.now() - started;
+    recordGpuDiagnostic(this.device, 'compute-finished', { elapsedMs: Math.round(elapsedMs) });
+    console.debug(
+      '[NC-Edit7 GPU] Stock calculation finished ' +
+        JSON.stringify({
+          pitchMm: this.layout.pitchMm,
+          sweeps: sweepCount,
+          rays: this.layout.rays,
+          dispatchRays: this.dispatchRays,
+          elapsedMs: Math.round(elapsedMs),
+        }),
+    );
+    return elapsedMs;
   }
 
   dispose(): void {

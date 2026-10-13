@@ -2,7 +2,7 @@ import type { CustomVariable, MachineProfile, PlotMetadata, ToolPathMode, ToolVa
 import type { ProgramToolSnapshot } from './ProgramToolService';
 import type { DeepReadonly } from './SimulationMetadata';
 import type { MaterialRemovalPreparation } from './MaterialRemovalPreparation';
-import type { StockBinding } from '../simulation/SimulationTypes';
+import type { StockBinding } from '../simulation/shared/SimulationTypes';
 
 export interface PlotRunInput {
   snapshot: ProgramToolSnapshot;

@@ -44,6 +44,14 @@ export class NCMachineSelector extends HTMLElement {
 
   private updateSelection(machineName: string) {
       if (!this.shadowRoot) return;
+      if (this.machineService.getMachines().some(machine => machine.machineName === machineName) &&
+          !this.getFilteredMachines().some(machine => machine.machineName === machineName)) {
+          this.machineTypeFilter = 'all';
+          this.controlTypeFilter = 'all';
+          this.updateActiveFilterButton('[data-machine-type]', 'machineType', 'all');
+          this.updateActiveFilterButton('[data-control-type]', 'controlType', 'all');
+          this.updateOptions();
+      }
       const selector = this.shadowRoot.getElementById('selector') as HTMLSelectElement;
       if (selector) {
           selector.value = machineName;

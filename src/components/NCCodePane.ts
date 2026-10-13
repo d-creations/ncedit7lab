@@ -716,7 +716,7 @@ export class NCCodePane extends HTMLElement {
       this.setValue(nextText);
       this.syncEditorValue(nextText);
       result = { requestId: request.requestId, channelId: this.channelId, success: true,
-        message: 'Applied raw material setup to the program' };
+        message: 'Applied machine and material setup to the program' };
     } catch (cause) {
       result = { requestId: request.requestId, channelId: this.channelId, success: false,
         message: cause instanceof Error ? cause.message : String(cause) };

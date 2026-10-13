@@ -86,10 +86,16 @@ export class VsCodeFileManagerService implements IFileManagerService {
         for (const [ch, content] of Object.entries(channelsObj)) {
             this.updateChannelFromHost(ch, content);
         }
+        const contents = Object.values(channelsObj);
+        this.stateService.restoreProgramMachine(
+            contents.find(content => content.includes('BEGIN SETUP'))
+                ?? contents.find(content => content.trim()) ?? ''
+        );
     }
 
     private updateChannelFromHost(channelId: string, content: string) {
         const normalized = content.replace(/\r\n/g, '\n');
+        this.stateService.restoreProgramMachine(normalized);
         let activeProgram = this.baseManager.getActiveProgram(channelId);
         
         // If channel doesn't exist, create it

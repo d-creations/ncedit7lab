@@ -2,6 +2,7 @@
 
 import type { ChannelId, ChannelState, MachineProfile, MachineType, ToolPathMode } from '@core/types';
 import { EventBus, EVENT_NAMES } from './EventBus';
+import { SimulationCommentCodec, type SimulationCommentSyntax } from './tools/SimulationCommentCodec';
 
 export interface AppState {
   machines: MachineProfile[];
@@ -31,6 +32,8 @@ export class StateService {
   private readonly MAX_HISTORY = 50;
 
   private eventBus: EventBus;
+  private machinesLoaded = false;
+  private pendingProgramMachine?: { text: string; fallback?: MachineType };
 
   constructor(eventBus: EventBus, private useLocalStorage: boolean = true) {
     this.eventBus = eventBus;
@@ -204,8 +207,53 @@ export class StateService {
 
   setMachines(machines: MachineProfile[]): void {
     this.state.machines = machines;
+    this.machinesLoaded = true;
+    const pending = this.pendingProgramMachine;
+    this.pendingProgramMachine = undefined;
+    if (pending) this.restoreProgramMachine(pending.text, pending.fallback);
     this.persistState();
     this.eventBus.publish(EVENT_NAMES.STATE_CHANGED, { machines });
+  }
+
+  restoreProgramMachine(text: string, fallback?: MachineType): void {
+    if (!this.machinesLoaded) {
+      this.pendingProgramMachine = { text, fallback };
+      return;
+    }
+
+    // Read the managed comment envelope, not the currently selected controller's dialect.
+    const syntaxes: SimulationCommentSyntax[] = [
+      { kind: 'line', prefix: ';' },
+      { kind: 'line', prefix: '//' },
+      { kind: 'block', open: '(', close: ')' },
+    ];
+    const codec = new SimulationCommentCodec();
+    const setups = syntaxes.map((syntax) => codec.parse(text, syntax))
+      .filter((parsed) => parsed.blocks.some((block) => block.kind === 'SETUP'));
+    if (setups.some((parsed) => parsed.diagnostics.length) || setups.length > 1) {
+      this.eventBus.publish(EVENT_NAMES.ERROR_OCCURRED, {
+        message: 'Cannot restore program machine: invalid or conflicting setup metadata',
+      });
+      return;
+    }
+    const machineName = setups[0]?.setup?.machineName ?? fallback;
+    if (!machineName) return;
+    const machine = this.state.machines.find((candidate) => candidate.machineName === machineName)
+      ?? this.state.machines[0];
+    if (!machine) {
+      this.eventBus.publish(EVENT_NAMES.ERROR_OCCURRED, {
+        message: `Cannot restore program machine "${machineName}": no machines are available`,
+      });
+      return;
+    }
+    if (machine.machineName !== machineName) {
+      this.eventBus.publish(EVENT_NAMES.ERROR_OCCURRED, {
+        message: `Program machine "${machineName}" is unavailable; using "${machine.machineName}"`,
+      });
+    }
+    if (this.state.globalMachine !== machine.machineName || this.state.activeMachine !== machine) {
+      this.setGlobalMachine(machine.machineName);
+    }
   }
 
   setGlobalMachine(machineType: MachineType): void {

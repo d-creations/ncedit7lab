@@ -4,6 +4,21 @@ CNC NC code editor view with plot interface.
 
 The editor integrates the ACE text editor and enables the plotting of toolpaths with the three.js library.
 
+In the browser, **New** creates a file with an independent blank program in each
+of the three channel memories. Each program becomes active in its channel, so
+code entered there is stored and available to **Plot**. Existing programs remain
+available in **Loaded Programs**; creating or selecting a blank file does not
+change which channels are visible.
+
+**Plot** stores the selected machine in each non-empty plotted program's
+`@NCE-SIM:1` setup comments, preserving existing material and tool definitions.
+Save the edited program as usual to keep this information in the NC file.
+Opening or selecting a program restores its saved machine after the backend
+machine list has loaded. If that machine is unavailable, the first machine in
+the list is selected and an error notification is emitted. Programs without
+setup metadata keep the current selection. Writing setup comments requires the
+selected machine to provide a supported simulation comment syntax.
+
 Licensing note: NC-Edit7 source code is licensed under the MIT License. Some repository variants or releases may also include runtime files 
 . Those  files are proprietary  software, redistributed under redistribution terms, and are not covered by the MIT License.
 
@@ -60,6 +75,4 @@ For USB storage transfer:
 ```
 
 In USB mode, `transferDefaultIp` is interpreted as a filesystem path visible to the backend process. Path 1 uses the selected root folder directly. Optional `PATH2` and `PATH3` subfolders are used when present.
-
-
 

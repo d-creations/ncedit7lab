@@ -584,6 +584,28 @@ additionally compares final removal and zero-cut jumps against ordinary
 simulation using the deterministic uncompressed store; it does not measure
 browser compression or IndexedDB latency.
 
+#### Replay strategy code organization
+
+`src/services/simulation/shared/` contains stock/input/result types, coordinate
+transforms and cutter/turning geometry actually consumed by both calculation
+strategies or the preview/preparation consumers. It does not depend on either
+backend. CPU-only implicit-stock storage, meshing/QEF/adaptation, replay engine,
+worker sessions and disk/surface caches live in `strategies/cpu-hybrid/`; GPU
+session, dexel layout/stock/tile arena, sweep compiler, history and diagnostics
+live in `strategies/gpu-dexel/`. Tests and backend fixtures are colocated.
+
+`replay/MaterialReplayStrategy.ts` defines start/seek/cancel, run identity,
+backend and computing state. Frames discriminate CPU mesh payloads from GPU
+stock payloads. `replay/createReplayStrategy.ts` selects the backend and owns
+startup/seek fallback with explicit reasons, retaining one lifecycle identity
+for the view. It rejects cancellation/stale-request fallback and gates late
+refinement after replacement. Fine-refinement failures still retain coarse
+stock rather than silently switching backend. `NCToolpathPlot` supplies view
+settings/current-run guards and renders frames/progress; it does not instantiate
+replay backends or implement their fallback policy. Worker entrypoints stay in
+`src/workers/`, with worker URLs resolved relative to the relocated CPU sessions.
+No calculation algorithm, pitch, history budget or scheduling interval changes.
+
 #### Experimental progressive WebGPU stock
 
 The plot can select **GPU progressive** when a WebGPU adapter is available.
@@ -884,7 +906,7 @@ not provided by the renderer's WebGL fallback. No universal 0.2-second coarse
 or two-second fine performance guarantee is made.
 
 GPU regression entry point: serve the application locally, then import
-`src/services/simulation/__tests__/GpuBrowserValidation.ts` from a same-origin
+`src/services/simulation/strategies/gpu-dexel/__tests__/GpuBrowserValidation.ts` from a same-origin
 browser page and invoke `runGpuBrowserValidation()`. It checks GPU intervals
 against independent CPU field occupancy for box milling and mixed
 turning/milling/turning at 0.1/0.02 mm, validates actual offscreen rendering and
@@ -1276,7 +1298,7 @@ src/services/__tests__/ExecutedProgramService.test.ts --no-file-parallelism
 --testTimeout=30000` passed 160 tests, with the live benchmark skipped by default.
 With `RUN_STAR_REMOVAL_BENCHMARK=1` and the existing local backend credential in
 `NC_EDIT_BENCHMARK_API_KEY`, `npx vitest run
-src/services/simulation/__tests__/StarMixedRemoval.benchmark.test.ts --silent=false
+src/services/simulation/strategies/cpu-hybrid/__tests__/StarMixedRemoval.benchmark.test.ts --silent=false
 --reporter=verbose` passed the actual-program memory and removed-sample checks.
 A subsequent repeat after adding explicit status/motion-count assertions could
 not connect to the backend (`ECONNREFUSED`); the successful run above already

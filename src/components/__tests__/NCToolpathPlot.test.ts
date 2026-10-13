@@ -3,26 +3,30 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NCToolpathPlot } from '../NCToolpathPlot';
 import * as THREE from 'three';
 import { WebGPURenderer } from 'three/webgpu';
-import { GpuDexelStock } from '@services/simulation/GpuDexelStock';
-import { GpuDexelHistory } from '@services/simulation/GpuDexelHistory';
-import { GPU_SWEEP_STRIDE } from '@services/simulation/GpuSweepCompiler';
-import { GpuMaterialReplaySession } from '@services/simulation/GpuMaterialReplaySession';
-import { SimulationCapabilityError } from '@services/simulation/SimulationTypes';
+import { GpuDexelStock } from '@services/simulation/strategies/gpu-dexel/GpuDexelStock';
+import { GpuDexelHistory } from '@services/simulation/strategies/gpu-dexel/GpuDexelHistory';
+import { GPU_SWEEP_STRIDE } from '@services/simulation/strategies/gpu-dexel/GpuSweepCompiler';
+import { GpuMaterialReplaySession } from '@services/simulation/strategies/gpu-dexel/GpuMaterialReplaySession';
+import { SimulationCapabilityError } from '@services/simulation/shared/SimulationTypes';
+import * as replayStrategyFactory from '@services/simulation/replay/createReplayStrategy';
 import { ServiceRegistry } from '@core/ServiceRegistry';
 import { EVENT_BUS_TOKEN, EXECUTED_PROGRAM_SERVICE_TOKEN, FILE_MANAGER_SERVICE_TOKEN,
-  PLOT_SERVICE_TOKEN, PROGRAM_TOOL_SERVICE_TOKEN, STATE_SERVICE_TOKEN } from '@core/ServiceTokens';
+  PLOT_SERVICE_TOKEN, PROGRAM_TOOL_SERVICE_TOKEN, PROGRAM_METADATA_EDIT_SERVICE_TOKEN, STATE_SERVICE_TOKEN } from '@core/ServiceTokens';
 import { EventBus, EVENT_NAMES } from '@services/EventBus';
 import { ExecutedProgramService } from '@services/ExecutedProgramService';
 import { ProgramToolService, type ProgramSource } from '@services/tools/ProgramToolService';
 import { SimulationCommentCodec } from '@services/tools/SimulationCommentCodec';
+import { ProgramMetadataEditService, type ProgramSetupUpdateRequest } from '@services/tools/ProgramMetadataEditService';
 import type { BackendGateway } from '@services/BackendGateway';
 import type { StateService } from '@services/StateService';
 import type { IFileManagerService } from '@services/IFileManagerService';
 import { PlotService } from '@services/PlotService';
 import type { MachineSimulationConfig, PlotMetadata, PlotResponse } from '@core/types';
-import { MaterialReplayEngine, type ReplayFrame } from '@services/simulation/MaterialReplayEngine';
-import { MaterialReplaySession, type ReplayWorker } from '@services/simulation/MaterialReplaySession';
-import { MemoryReplayTraceStore } from '@services/simulation/ReplayTraceStore';
+import { MaterialReplayEngine, type ReplayFrame } from '@services/simulation/strategies/cpu-hybrid/MaterialReplayEngine';
+import type { ReplayWorker } from '@services/simulation/strategies/cpu-hybrid/MaterialReplaySession';
+import { MemoryReplayTraceStore } from '@services/simulation/strategies/cpu-hybrid/ReplayTraceStore';
+
+const createStrategy = replayStrategyFactory.createReplayStrategy;
 
 // Exercise actual event/action wiring without constructing a browser WebGL renderer.
 interface PlotHarness extends HTMLElement {
@@ -42,7 +46,6 @@ interface PlotHarness extends HTMLElement {
   plotService: PlotService;
   toggleMaterial(): void;
   toggleAxes(): void;
-  createMaterialReplaySession(runId: string): MaterialReplaySession;
 }
 
 // These integration tests execute the real CPU mesher at the production default pitch.
@@ -53,6 +56,8 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
   let tools: ProgramToolService;
   let plot: PlotHarness;
   let source: ProgramSource;
+  let otherSource: ProgramSource;
+  let setupRequests: ProgramSetupUpdateRequest[];
   let requestPlot: ReturnType<typeof vi.fn>;
   let render: ReturnType<typeof vi.spyOn>;
   let selectedMode: 'effective' | 'center' | 'simulation';
@@ -85,9 +90,13 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
     machineSimulation = undefined;
     service = new ExecutedProgramService({ requestPlot } as unknown as BackendGateway, bus);
     source = { identity: { documentId: 'doc', programId: 'one', channelId: '1' }, revision: 0, text: '' };
+    otherSource = { identity: { documentId: 'doc', programId: 'two', channelId: '2' }, revision: 0, text: 'G1 X2' };
+    setupRequests = [];
     registry.register(EVENT_BUS_TOKEN, () => bus);
     registry.register(EXECUTED_PROGRAM_SERVICE_TOKEN, () => service);
     registry.register(PROGRAM_TOOL_SERVICE_TOKEN, () => tools);
+    const metadataEdits = new ProgramMetadataEditService(new SimulationCommentCodec());
+    registry.register(PROGRAM_METADATA_EDIT_SERVICE_TOKEN, () => metadataEdits);
     registry.register(PLOT_SERVICE_TOKEN, () => ({} as PlotService));
     registry.register(FILE_MANAGER_SERVICE_TOKEN, () => ({
       getActiveProgram: () => ({ id: 'one', sourceFileId: 'doc', content: 'STALE FILE TEXT', lastModified: 0 }),
@@ -96,7 +105,10 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
       getState: () => ({
         globalMachine: 'test',
         toolPathMode: selectedMode,
-        activeMachine: { machineName: 'test', simulationCommentSyntax: syntax, simulation: machineSimulation },
+        activeMachine: {
+          machineName: 'test', simulationCommentSyntax: syntax, simulation: machineSimulation,
+          toolSelection: { mode: 'direct', namedTools: true, offsetScope: 'global' },
+        },
       }),
       getActiveChannels: () => [{ id: '1', program: 'STALE STATE TEXT' }, { id: '2', program: 'OTHER' }],
     }) as unknown as StateService);
@@ -104,9 +116,22 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
       const channel = document.createElement('nc-channel-pane');
       channel.dataset.channel = channelId;
       const editor = document.createElement('nc-code-pane') as HTMLElement & { getProgramSource(): ProgramSource };
-      editor.getProgramSource = () => channelId === '1' ? source : {
-        identity: { documentId: 'doc', programId: 'two', channelId }, revision: 0, text: 'G1 X2',
-      };
+      editor.getProgramSource = () => channelId === '1' ? source : otherSource;
+      bus.subscribe(EVENT_NAMES.PROGRAM_SETUP_UPDATE_REQUEST, (request: ProgramSetupUpdateRequest) => {
+        if (request.channelId !== channelId) return;
+        setupRequests.push(request);
+        const current = editor.getProgramSource();
+        expect(request.expectedRevision).toBe(current.revision);
+        expect(request.expectedText).toBe(current.text);
+        const edit = metadataEdits.planSetupUpdate(current.text, request.setup, request.syntax);
+        const text = current.text.slice(0, edit.startOffset) + edit.text + current.text.slice(edit.endOffset);
+        const updated = { ...current, revision: Number(current.revision) + 1, text };
+        if (channelId === '1') source = updated;
+        else otherSource = updated;
+        bus.publish(EVENT_NAMES.PROGRAM_SETUP_UPDATE_RESULT, {
+          requestId: request.requestId, channelId, success: true, message: 'Applied',
+        });
+      });
       channel.append(editor);
       document.body.append(channel);
     }
@@ -121,6 +146,62 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
     document.body.replaceChildren();
     vi.restoreAllMocks();
     await registry.disposeAll();
+  });
+
+  it('stores the selected machine before plotting and captures the updated editor revision', async () => {
+    source.text = 'G1 X10\r\nM30\r\n';
+    await plot.plotNCCode('1');
+    const parsed = new SimulationCommentCodec().parse(source.text, syntax);
+    expect(parsed.setup).toEqual({ machineName: 'test' });
+    expect(source.text.startsWith('G1 X10\r\nM30\r\n')).toBe(true);
+    expect(source.text).toContain('; machineName="test"\r\n');
+    expect(setupRequests).toHaveLength(1);
+    expect(requestPlot.mock.calls[0][0].machinedata[0].program).not.toContain('@NCE-SIM:');
+    const completed = vi.fn();
+    bus.subscribe(EVENT_NAMES.PLOT_RUN_COMPLETED, completed);
+    await plot.plotNCCode('1');
+    expect(setupRequests).toHaveLength(1);
+    expect(source.revision).toBe(1);
+    expect(completed).toHaveBeenCalledOnce();
+    expect(service.getPlotRun(completed.mock.calls[0][0].runId)?.inputs[0].snapshot.revision).toBe(source.revision);
+  });
+
+  it('updates the machine without removing material, tools or offsets', async () => {
+    const codec = new SimulationCommentCodec();
+    const material = { type: 'cylinder', diameter: 20, length: 40 } as const;
+    const tool = codec.encodeTool({ toolNumber: 1, description: 'Drill', R: 0.2 }, syntax);
+    const offsets = codec.encodeOffsets({ offsetScope: 'global', offsets: [{ offsetNumber: 2, rValue: 0.3 }] }, syntax);
+    source.text = `G1 X10\n${tool}\n${offsets}\n` +
+      codec.encodeSetup({ machineName: 'old', material }, syntax);
+    await plot.plotNCCode('1');
+    expect(codec.parse(source.text, syntax).setup).toEqual({ machineName: 'test', material });
+    expect(source.text).toContain(tool);
+    expect(source.text).toContain(offsets);
+    expect(source.text.match(/BEGIN SETUP/g)).toHaveLength(1);
+    expect(requestPlot).toHaveBeenCalledOnce();
+  });
+
+  it('stores the machine independently in every non-empty plotted channel', async () => {
+    source.text = 'G1 X1';
+    await plot.plotNCCode();
+    expect(setupRequests.map(request => request.channelId)).toEqual(['1', '2']);
+    const codec = new SimulationCommentCodec();
+    expect(codec.parse(source.text, syntax).setup?.machineName).toBe('test');
+    expect(codec.parse(otherSource.text, syntax).setup?.machineName).toBe('test');
+    const run = service.getPlotRun('plot-1')!;
+    expect(run.inputs.map(input => input.snapshot.text))
+      .toEqual([source.text, otherSource.text]);
+  });
+
+  it('does not execute when storing the setup fails', async () => {
+    source.text = 'G1 X1';
+    vi.spyOn(registry.get(PROGRAM_METADATA_EDIT_SERVICE_TOKEN), 'planSetupUpdate')
+      .mockImplementation(() => { throw new Error('Setup cannot be written'); });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    await plot.plotNCCode('1');
+    expect(requestPlot).not.toHaveBeenCalled();
+    expect(source.text).toBe('G1 X1');
+    expect(plot.shadowRoot!.getElementById('plot-status')!.textContent).toContain('Setup cannot be written');
   });
 
   function replayWorker(frames: ReplayFrame[] = []): ReplayWorker {
@@ -138,6 +219,10 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
             }));
             expect(plot.shadowRoot!.getElementById('material-removal-status')!.textContent)
               .toContain(`Geometric removal (CPU hybrid): 0/${request.input.motions.length} motions.`);
+            expect(plot.shadowRoot!.getElementById('material-removal-status')!.hidden).toBe(true);
+            const progress = plot.shadowRoot!.querySelector<HTMLProgressElement>('#simulation-progress')!;
+            expect(progress.hidden).toBe(false);
+            expect(progress.value).toBe(0);
           }
         }
         const frame = request.type === 'initialize' && request.prepareFinal
@@ -154,6 +239,7 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
   }
 
   async function readyReplay(gpu = false): Promise<{ worker: ReplayWorker; frames: ReplayFrame[] }> {
+    plot.shadowRoot!.querySelector<HTMLInputElement>('#gpu-stock')!.checked = gpu;
     if (gpu) {
       plot.renderer = new WebGPURenderer();
       vi.spyOn(plot.renderer, 'render').mockImplementation(() => {});
@@ -200,8 +286,8 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
     } } });
     const frames: ReplayFrame[] = [];
     const worker = replayWorker(frames);
-    vi.spyOn(plot, 'createMaterialReplaySession').mockImplementation((runId) =>
-      new MaterialReplaySession(runId, () => worker));
+    vi.spyOn(replayStrategyFactory, 'createReplayStrategy').mockImplementation((options) =>
+      createStrategy({ ...options, createWorker: () => worker }));
     selectedMode = 'simulation';
     plot.scene = new THREE.Scene();
     plot.plotService = new PlotService(bus);
@@ -231,6 +317,47 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
     });
   }
 
+  it('shows only progress for normal replay and keeps single occurrences out of the frontend', async () => {
+    const { worker } = await readyReplay();
+    const progress = plot.shadowRoot!.querySelector<HTMLProgressElement>('#simulation-progress')!;
+    expect(progress.value).toBe(1);
+    expect(plot.shadowRoot!.getElementById('replay-status')!.hidden).toBe(true);
+    expect(plot.shadowRoot!.getElementById('material-removal-status')!.hidden).toBe(true);
+    expect(plot.shadowRoot!.getElementById('plot-status')!.hidden).toBe(true);
+    expect(plot.shadowRoot!.querySelector<HTMLSelectElement>('#plot-occurrence')!.hidden).toBe(true);
+    worker.postMessage = vi.fn();
+    plot.shadowRoot!.querySelector<HTMLButtonElement>('#replay-next')!.click();
+    expect(progress.hidden).toBe(false);
+    expect(progress.hasAttribute('value')).toBe(false);
+    const request = vi.mocked(worker.postMessage).mock.calls[0][0];
+    worker.onmessage?.(new MessageEvent('message', {
+      data: { type: 'progress', requestId: request.requestId, processed: 4, total: 10 },
+    }));
+    expect(progress.value).toBe(0.4);
+    worker.onmessage?.(new MessageEvent('message', {
+      data: { type: 'progress', requestId: request.requestId, processed: 10, total: 10 },
+    }));
+    expect(progress.hasAttribute('value')).toBe(false);
+    plot.clearPlot();
+    expect(progress.hidden).toBe(true);
+  });
+
+  it('shows an error icon and logs details if GPU fine refinement fails', async () => {
+    vi.useFakeTimers();
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(GpuDexelStock.prototype, 'calculate').mockResolvedValueOnce(5)
+      .mockRejectedValueOnce(new Error('Fine stock test failure'));
+    await readyReplay(true);
+    await vi.advanceTimersByTimeAsync(350);
+    const status = plot.shadowRoot!.getElementById('replay-status')!;
+    expect(status.hidden).toBe(false);
+    expect(status.textContent).toBe('\u26d4');
+    expect(status.getAttribute('aria-label')).toBe('Simulation error. See console log for details.');
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('Fine stock test failure'));
+    expect(plot.shadowRoot!.getElementById('simulation-progress')!.hidden).toBe(true);
+    expect(plot.scene!.children.some((child) => child.name === 'gpu-dexel-stock')).toBe(true);
+  });
+
   it('uses the GPU path for the complete coarse part, then installs fine stock after idle', async () => {
     vi.useFakeTimers();
     const calculate = vi.spyOn(GpuDexelStock.prototype, 'calculate').mockImplementation(async () => {
@@ -244,10 +371,21 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
     expect(status.textContent).toContain('0.1 mm ray pitch');
     expect(status.textContent).toContain('16 interval capacity per ray');
     expect(status.textContent).toContain('4/4');
+    expect(status.hidden).toBe(true);
+    expect(plot.shadowRoot!.getElementById('replay-status')!.hidden).toBe(true);
+    expect(plot.shadowRoot!.getElementById('plot-status')!.hidden).toBe(true);
+    const progress = plot.shadowRoot!.querySelector<HTMLProgressElement>('#simulation-progress')!;
+    expect(progress.hidden).toBe(false);
+    expect(progress.value).toBe(1);
+    expect(progress.getAttribute('aria-label')).toBe('Stock ready');
+    expect(plot.shadowRoot!.querySelector<HTMLSelectElement>('#plot-occurrence')!.hidden).toBe(false);
+    expect(plot.shadowRoot!.querySelector<HTMLSelectElement>('#plot-occurrence')!.options).toHaveLength(2);
     expect(plot.scene!.children.some((child) => child.name === 'gpu-dexel-stock')).toBe(true);
     await vi.advanceTimersByTimeAsync(350);
     expect(status.textContent).toContain('GPU tri-dexel fine');
     expect(status.textContent).toContain('0.02 mm ray pitch');
+    expect(status.hidden).toBe(true);
+    expect(progress.value).toBe(1);
     expect(calculate).toHaveBeenCalledTimes(2);
   });
 
@@ -257,10 +395,13 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
     const { worker } = await readyReplay(true);
     calculate.mockRejectedValueOnce(new SimulationCapabilityError('GPU interval overflow'));
     const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
     plot.shadowRoot!.querySelector<HTMLButtonElement>('#replay-start')!.click();
     await vi.advanceTimersByTimeAsync(0);
-    await vi.waitFor(() => expect(plot.shadowRoot!.getElementById('replay-status')!.textContent).toContain('Using CPU simulation'));
-    expect(plot.shadowRoot!.getElementById('replay-status')!.textContent).toContain('GPU interval overflow');
+    await vi.waitFor(() => expect(plot.shadowRoot!.getElementById('replay-status')!.dataset.severity).toBe('warning'));
+    expect(plot.shadowRoot!.getElementById('replay-status')!.textContent).toBe('\u26a0');
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining('GPU interval overflow'));
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining('Using CPU simulation'));
     expect(worker.postMessage).toHaveBeenCalled();
     expect(plot.scene!.children.some((child) => child.name === 'machined-stock')).toBe(true);
     log.mockRestore();
@@ -415,12 +556,18 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
 
   it('reports replay worker failure and retains only the last successfully displayed stock', async () => {
     const { worker } = await readyReplay();
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
     const stock = plot.scene!.children.find((child) => child.name === 'machined-stock')!;
     worker.postMessage = vi.fn();
     plot.shadowRoot!.querySelector<HTMLButtonElement>('#replay-next')!.click();
     worker.onerror?.(new ErrorEvent('error', { message: 'Replay budget exceeded' }));
     await vi.waitFor(() => expect(plot.shadowRoot!.getElementById('replay-status')!.textContent)
-      .toContain('Replay budget exceeded'));
+      .toBe('\u26d4'));
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('Replay budget exceeded'));
+    expect(plot.shadowRoot!.getElementById('replay-status')!.hidden).toBe(false);
+    expect(plot.shadowRoot!.getElementById('replay-status')!.getAttribute('aria-label'))
+      .toBe('Simulation error. See console log for details.');
+    expect(plot.shadowRoot!.getElementById('simulation-progress')!.hidden).toBe(true);
     expect(plot.scene!.children.find((child) => child.name === 'machined-stock')).toBe(stock);
     expect(worker.terminate).toHaveBeenCalledOnce();
     expect(plot.shadowRoot!.querySelector<HTMLButtonElement>('#replay-play')!.disabled).toBe(true);
@@ -489,7 +636,8 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
     const count = vi.mocked(renderer.render).mock.calls.length;
     plot.renderScene();
     expect(renderer.render).toHaveBeenCalledTimes(count);
-    expect(plot.shadowRoot?.querySelector('#replay-status')?.textContent).toContain('device removed');
+    expect(plot.shadowRoot?.querySelector('#replay-status')?.textContent).toBe('\u26d4');
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('device removed'));
     log.mockRestore();
   });
 
@@ -540,11 +688,11 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
     expect(capture).not.toHaveBeenCalled();
     expect(requestPlot).not.toHaveBeenCalled();
     await plot.plotNCCode('1');
-    expect(capture).toHaveBeenCalledTimes(1);
+    expect(capture).toHaveBeenCalledTimes(2);
     expect(requestPlot.mock.calls[0][0].machinedata[0].toolValues).toEqual([{ toolNumber: 0, qValue: 0 }]);
     expect(service.getRunTool('plot-1', 'one', '1', 'DRILL')?.cutting?.[0]).toMatchObject({ length: 45, tipAngle: 118 });
     bus.publish(EVENT_NAMES.EDITOR_CURSOR_MOVED, { channelId: '1', lineNumber: 1, source });
-    expect(capture).toHaveBeenCalledTimes(1);
+    expect(capture).toHaveBeenCalledTimes(2);
     expect(requestPlot).toHaveBeenCalledTimes(1);
   });
 
@@ -598,6 +746,7 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
   });
 
   it('shows and hides captured material in simulation plots', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
     source.text = new SimulationCommentCodec().encodeSetup({
       machineName: 'test',
       material: { type: 'box', width: 100, height: 20, depth: 60 },
@@ -616,8 +765,9 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
     expect(toggle.textContent).toBe('Hide Material');
     const diagnostics = plot.shadowRoot!.querySelector<HTMLElement>('#material-removal-status')!;
     expect(diagnostics.hidden).toBe(false);
-    expect(diagnostics.textContent).toContain('program-coordinate preview');
-    expect(diagnostics.textContent).toContain('spindle operation is not verified');
+    expect(diagnostics.textContent).toBe('\u26d4');
+    expect(errors).toHaveBeenCalledWith(expect.stringContaining('program-coordinate preview'));
+    expect(errors).toHaveBeenCalledWith(expect.stringContaining('spindle operation is not verified'));
     plot.toggleAxes();
     expect(material.visible).toBe(true);
 
@@ -673,8 +823,8 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
       ],
     }] } } });
     const worker = replayWorker();
-    vi.spyOn(plot, 'createMaterialReplaySession').mockImplementation((runId) =>
-      new MaterialReplaySession(runId, () => worker));
+    vi.spyOn(replayStrategyFactory, 'createReplayStrategy').mockImplementation((options) =>
+      createStrategy({ ...options, createWorker: () => worker }));
     selectedMode = 'simulation';
     plot.scene = new THREE.Scene();
     plot.plotService = new PlotService(bus);
@@ -716,8 +866,8 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
       points: [{ x: 0, y: 0, z: 0 }, { x: 1, y: 0, z: 0 }], poses: [pose, pose],
     }] } } });
     const worker = replayWorker();
-    vi.spyOn(plot, 'createMaterialReplaySession').mockImplementation((runId) =>
-      new MaterialReplaySession(runId, () => worker));
+    vi.spyOn(replayStrategyFactory, 'createReplayStrategy').mockImplementation((options) =>
+      createStrategy({ ...options, createWorker: () => worker }));
     selectedMode = 'simulation';
     plot.scene = new THREE.Scene();
     plot.plotService = new PlotService(bus);
@@ -751,6 +901,7 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
   });
 
   it('keeps stock raw and reports a missing backend binding without exposing debug setup', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
     source.text = new SimulationCommentCodec().encodeSetup({
       machineName: 'test', material: { type: 'box', width: 4, height: 4, depth: 4 },
     }, syntax);
@@ -758,10 +909,10 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
     plot.scene = new THREE.Scene();
     plot.plotService = new PlotService(bus);
     render.mockRestore();
-    const create = vi.spyOn(plot, 'createMaterialReplaySession');
+    const create = vi.spyOn(replayStrategyFactory, 'createReplayStrategy');
     await plot.plotNCCode('1');
-    await vi.waitFor(() => expect(plot.shadowRoot!.getElementById('material-removal-status')!.textContent)
-      .toContain('Configure stockBindings in the backend'));
+    await vi.waitFor(() => expect(errors).toHaveBeenCalledWith(expect.stringContaining('Configure stockBindings in the backend')));
+    expect(plot.shadowRoot!.getElementById('material-removal-status')!.textContent).toBe('\u26d4');
     expect(plot.shadowRoot!.querySelector('#removal-setup')).toBeNull();
     expect(plot.shadowRoot!.querySelector<HTMLButtonElement>('#replay-start')!.disabled).toBe(true);
     expect(plot.shadowRoot!.querySelector<HTMLInputElement>('#removal-resolution')!.disabled).toBe(true);
@@ -786,13 +937,14 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
     resolution.value = value;
     resolution.dispatchEvent(new Event('change'));
     expect(plot.shadowRoot!.getElementById('material-removal-status')!.textContent)
-      .toContain('Material removal unavailable');
-    expect(error).toHaveBeenCalled();
+      .toBe('\u26d4');
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('Material removal unavailable'));
     expect(plot.scene!.children.find((child) => child.name === 'machined-stock')).toBe(stock);
     expect(worker.postMessage).toHaveBeenCalledTimes(calls);
   });
 
   it.each([true, false])('renders one shared stock or reports a conflict across channels, equal=%s', async (equal) => {
+    const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => {});
     const firstText = new SimulationCommentCodec().encodeSetup({
       machineName: 'test', material: { type: 'cylinder', diameter: 20, length: 40, zeroVertex: 1 },
     }, syntax);
@@ -817,7 +969,8 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
     expect(materials).toHaveLength(equal ? 1 : 0);
     if (equal) expect(materials[0].children).toHaveLength(1);
     expect(plot.shadowRoot!.getElementById('material-removal-status')!.textContent)
-      .toContain(equal ? 'shared cutting order' : 'definitions conflict');
+      .toBe('\u26d4');
+    expect(diagnostic).toHaveBeenCalledWith(expect.stringContaining(equal ? 'shared cutting order' : 'definitions conflict'));
     expect(requestPlot).toHaveBeenCalledTimes(1);
   });
 

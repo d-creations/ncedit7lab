@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import type { CuttingPart, DeepReadonly } from '@services/tools/SimulationMetadata';
-import { cuttingRadiusAt } from '@services/simulation/CuttingToolModel';
+import { cuttingRadiusAt } from '@services/simulation/shared/CuttingToolModel';
 
 export function createMillingCutterGeometry(
   part: DeepReadonly<Exclude<CuttingPart, { type: 'insert' }>>,

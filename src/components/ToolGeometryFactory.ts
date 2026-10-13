@@ -9,9 +9,9 @@ import type {
 } from '@services/tools/SimulationMetadata';
 import { buildInsertContour } from '@services/tools/InsertOutline';
 import { MaterialGeometryFactory } from './MaterialGeometryFactory';
-import { getInsertQShift } from '@services/simulation/TurningReference';
+import { getInsertQShift } from '@services/simulation/shared/TurningReference';
 import { createMillingCutterGeometry } from './MillingCutterGeometry';
-export { getInsertQShift, TURN_Q_VECTORS } from '@services/simulation/TurningReference';
+export { getInsertQShift, TURN_Q_VECTORS } from '@services/simulation/shared/TurningReference';
 
 const TOOL_COLOR = 0xf4c542;
 const TOOL_MATERIAL = new THREE.MeshStandardMaterial({ color: TOOL_COLOR, metalness: 0.8, roughness: 0.3 });

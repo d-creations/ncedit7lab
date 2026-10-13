@@ -93,9 +93,13 @@ export class NCEditorApp extends HTMLElement {
       if (machines.length > 0) {
         this.stateService.setMachines(machines);
         const initialMachine = machines.find((machine) =>
+          machine.machineName === this.stateService.getState().globalMachine,
+        ) ?? machines.find((machine) =>
           machine.machineName === 'FANUC_STAR_SR20R_IV_B',
         ) ?? machines[0];
-        this.stateService.setGlobalMachine(initialMachine.machineName);
+        if (this.stateService.getState().activeMachine !== initialMachine) {
+          this.stateService.setGlobalMachine(initialMachine.machineName);
+        }
       }
 
       this.normalizeInitialChannels();

@@ -6,7 +6,7 @@ import { SimulationCommentCodec } from '../SimulationCommentCodec';
 import { ProgramToolService } from '../ProgramToolService';
 import { prepareMaterialRemoval } from '../MaterialRemovalPreparation';
 import type { ProgramToolDefinition } from '../SimulationMetadata';
-import type { StockBinding } from '../../simulation/SimulationTypes';
+import type { StockBinding } from '../../simulation/shared/SimulationTypes';
 
 const syntax = { kind: 'line', prefix: ';' } as const;
 const codec = new SimulationCommentCodec();

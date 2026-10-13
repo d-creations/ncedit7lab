@@ -3,11 +3,11 @@ import type { ChannelId, PlotMetadata, PoseSample } from '@core/types';
 import type { PlotRunInput } from './PlotRunSnapshot';
 import type { DeepReadonly, ProgramMaterialDefinition } from './SimulationMetadata';
 import { MetadataValidationError } from './SimulationMetadata';
-import type { SimulationInput, StockBinding, RemovalStop } from '../simulation/SimulationTypes';
-import { validateStockBinding, stockPlacement } from '../simulation/SimulationTransforms';
-import { CuttingToolModel } from '../simulation/CuttingToolModel';
-import { buildTurningEnvelope } from '../simulation/TurningEnvelope';
-import { SimulationCapabilityError } from '../simulation/SimulationTypes';
+import type { SimulationInput, StockBinding, RemovalStop } from '../simulation/shared/SimulationTypes';
+import { validateStockBinding, stockPlacement } from '../simulation/shared/SimulationTransforms';
+import { CuttingToolModel } from '../simulation/shared/CuttingToolModel';
+import { buildTurningEnvelope } from '../simulation/shared/TurningEnvelope';
+import { SimulationCapabilityError } from '../simulation/shared/SimulationTypes';
 
 export interface MaterialRemovalDiagnostic {
   code:

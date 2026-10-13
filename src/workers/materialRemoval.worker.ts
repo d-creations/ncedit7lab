@@ -1,6 +1,6 @@
 /// <reference lib="webworker" />
-import { simulateMaterialRemoval } from '../services/simulation/MaterialRemovalEngine';
-import type { SimulationInput } from '../services/simulation/SimulationTypes';
+import { simulateMaterialRemoval } from '../services/simulation/strategies/cpu-hybrid/MaterialRemovalEngine';
+import type { SimulationInput } from '../services/simulation/shared/SimulationTypes';
 
 declare const self: DedicatedWorkerGlobalScope;
 

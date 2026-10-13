@@ -1,6 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { FileManagerService } from '../FileManagerService';
-import { EventBus } from '../EventBus';
+import { EventBus, EVENT_NAMES } from '../EventBus';
+import { StateService } from '../StateService';
+import { SimulationCommentCodec } from '../tools/SimulationCommentCodec';
+import type { MachineProfile } from '@core/types';
 
 // Mock localStorage
 const localStorageMock = (() => {
@@ -35,6 +38,8 @@ describe('FileManagerService', () => {
     activateChannel: ReturnType<typeof vi.fn>;
     deactivateChannel: ReturnType<typeof vi.fn>;
     setGlobalMachine: ReturnType<typeof vi.fn>;
+    getWorkbenchSelectedChannel: ReturnType<typeof vi.fn>;
+    restoreProgramMachine: ReturnType<typeof vi.fn>;
   };
 
   beforeEach(() => {
@@ -61,8 +66,129 @@ describe('FileManagerService', () => {
       activateChannel: vi.fn(),
       deactivateChannel: vi.fn(),
       setGlobalMachine: vi.fn(),
+      getWorkbenchSelectedChannel: vi.fn(() => '1'),
+      restoreProgramMachine: vi.fn(),
     };
     service = new FileManagerService(mockEventBus, mockStateService as any, false);
+  });
+
+  describe('program machine restoration', () => {
+    const machines: MachineProfile[] = ['FIRST', 'SAVED'].map(machineName => ({
+      machineName, controlType: 'FANUC', axes: [], feedLimits: { min: 0, max: 1 },
+      defaultTools: [], availableChannels: 3,
+    }));
+    const codec = new SimulationCommentCodec();
+    const syntax = { kind: 'line', prefix: ';' } as const;
+
+    beforeEach(() => localStorage.clear());
+
+    it('waits for the backend list before restoring a program opened during startup', async () => {
+      const bus = new EventBus();
+      const state = new StateService(bus, false);
+      const manager = new FileManagerService(bus, state, false);
+      const content = `G1 X1\n${codec.encodeSetup({ machineName: 'SAVED' }, syntax)}`;
+      await manager.openFile(content, 'saved.nc', { parseMultiChannel: false });
+      expect(state.getState().globalMachine).toBeUndefined();
+      state.setMachines(machines);
+      expect(state.getState().globalMachine).toBe('SAVED');
+      expect(manager.getActiveProgram('1')?.content).toBe(content);
+    });
+
+    it('restores the active program after reloading browser storage, not the stale persisted machine list', async () => {
+      const bus = new EventBus();
+      const state = new StateService(bus);
+      const manager = new FileManagerService(bus, state);
+      await manager.openFile(codec.encodeSetup({ machineName: 'SAVED' }, syntax), 'saved.nc', { parseMultiChannel: false });
+      state.setMachines([machines[0]]);
+      expect(state.getState().globalMachine).toBe('FIRST');
+
+      const reloadedBus = new EventBus();
+      const reloadedState = new StateService(reloadedBus);
+      new FileManagerService(reloadedBus, reloadedState);
+      expect(reloadedState.getState().globalMachine).toBe('FIRST');
+      reloadedState.setMachines(machines);
+      expect(reloadedState.getState().globalMachine).toBe('SAVED');
+    });
+
+    it('selects the first machine and emits a notification if the saved machine is unavailable', async () => {
+      const bus = new EventBus();
+      const state = new StateService(bus, false);
+      const manager = new FileManagerService(bus, state, false);
+      const errors = vi.fn();
+      bus.subscribe(EVENT_NAMES.ERROR_OCCURRED, errors);
+      state.setMachines(machines);
+      state.setGlobalMachine('SAVED');
+      const content = codec.encodeSetup({ machineName: 'MISSING' }, syntax);
+      await manager.openFile(content, 'missing.nc', { parseMultiChannel: false });
+      expect(state.getState().globalMachine).toBe('FIRST');
+      expect(errors).toHaveBeenCalledWith({ message: expect.stringContaining('MISSING') });
+      expect(manager.getActiveProgram('1')?.content).toBe(content);
+    });
+
+    it('restores the setup from edited program text when switching files or loaded programs', async () => {
+      const bus = new EventBus();
+      const state = new StateService(bus, false);
+      const manager = new FileManagerService(bus, state, false);
+      state.setMachines(machines);
+      const first = await manager.openFile('G1 X1', 'first.nc', { parseMultiChannel: false });
+      const firstProgram = manager.getActiveProgram('1')!;
+      manager.updateActiveProgramContent('1', codec.encodeSetup({ machineName: 'SAVED' }, syntax));
+      await manager.openFile(codec.encodeSetup({ machineName: 'FIRST' }, syntax), 'second.nc', { parseMultiChannel: false });
+      expect(state.getState().globalMachine).toBe('FIRST');
+      manager.selectFile(first.id);
+      expect(state.getState().globalMachine).toBe('SAVED');
+      state.setGlobalMachine('FIRST');
+      manager.setActiveProgram('1', firstProgram.id);
+      expect(state.getState().globalMachine).toBe('SAVED');
+    });
+
+    it.each([
+      { kind: 'line', prefix: ';' } as const,
+      { kind: 'line', prefix: '//' } as const,
+      { kind: 'block', open: '(', close: ')' } as const,
+    ])('reads the saved comment envelope independently of the current machine: %o', async (commentSyntax) => {
+      const state = new StateService(new EventBus(), false);
+      const manager = new FileManagerService(new EventBus(), state, false);
+      state.setMachines(machines);
+      state.setGlobalMachine('FIRST');
+      await manager.openFile(codec.encodeSetup({ machineName: 'SAVED' }, commentSyntax), 'saved.nc', { parseMultiChannel: false });
+      expect(state.getState().globalMachine).toBe('SAVED');
+    });
+
+    it('leaves the current machine unchanged for plain programs and rejects conflicting setups', () => {
+      const bus = new EventBus();
+      const state = new StateService(bus, false);
+      const errors = vi.fn();
+      bus.subscribe(EVENT_NAMES.ERROR_OCCURRED, errors);
+      state.setMachines(machines);
+      state.setGlobalMachine('SAVED');
+      state.restoreProgramMachine('G1 X1');
+      expect(state.getState().globalMachine).toBe('SAVED');
+      const block = codec.encodeSetup({ machineName: 'FIRST' }, syntax);
+      state.restoreProgramMachine(`${block}\n${block}`);
+      expect(state.getState().globalMachine).toBe('SAVED');
+      expect(errors).toHaveBeenCalledOnce();
+    });
+
+    it('does not restore a stale pending machine after a blank program replaces it during startup', async () => {
+      const bus = new EventBus();
+      const state = new StateService(bus, false);
+      const manager = new FileManagerService(bus, state, false);
+      await manager.openFile(codec.encodeSetup({ machineName: 'SAVED' }, syntax), 'saved.nc', { parseMultiChannel: false });
+      manager.newFile();
+      state.setMachines(machines);
+      expect(state.getState().globalMachine).toBeUndefined();
+    });
+
+    it('retains a setup from an earlier channel when later channels have no setup', async () => {
+      const bus = new EventBus();
+      const state = new StateService(bus, false);
+      const manager = new FileManagerService(bus, state, false);
+      await manager.openFile(`<CH1.MPF>\n${codec.encodeSetup({ machineName: 'SAVED' }, syntax)}\n<CH2.MPF>\nG1 X2`,
+        'multi.nc', { parseMultiChannel: true });
+      state.setMachines(machines);
+      expect(state.getState().globalMachine).toBe('SAVED');
+    });
   });
 
   describe('openFile', () => {
@@ -154,6 +280,81 @@ G0 Y20`;
       expect(mockStateService.activateChannel).toHaveBeenCalledWith('2');
       expect(mockStateService.deactivateChannel).toHaveBeenCalledWith('1');
       expect(mockStateService.deactivateChannel).toHaveBeenCalledWith('3');
+    });
+  });
+
+  describe('newFile', () => {
+    it('creates an active, independently editable program in every channel', () => {
+      service.newFile();
+
+      const file = service.getActiveFile();
+      expect(file).toMatchObject({
+        name: 'Untitled.mpf',
+        content: '',
+        channels: ['', '', ''],
+        isMultiChannel: true,
+      });
+      const programs = ['1', '2', '3'].map(channelId => service.getActiveProgram(channelId));
+      expect(new Set(programs.map(program => program?.id)).size).toBe(3);
+      programs.forEach((program, index) => {
+        const channelId = String(index + 1);
+        expect(program).toMatchObject({
+          channelId,
+          sourceFileId: file?.id,
+          name: `Untitled.mpf (CH${channelId})`,
+          content: '',
+        });
+        expect(service.getPrograms(channelId)).toEqual([program]);
+        expect(mockEventBus.publish).toHaveBeenCalledWith('program:active_changed', { channelId, program });
+        service.updateActiveProgramContent(channelId, `G1 X${index + 1}`);
+      });
+      expect(programs.map(program => program?.content)).toEqual(['G1 X1', 'G1 X2', 'G1 X3']);
+      expect(mockStateService.activateChannel).not.toHaveBeenCalled();
+      expect(mockStateService.deactivateChannel).not.toHaveBeenCalled();
+    });
+
+    it('switches every channel to the new file without discarding previous programs', () => {
+      service.newFile('first.mpf');
+      const previous = ['1', '2', '3'].map(channelId => service.getActiveProgram(channelId));
+      service.updateActiveProgramContent('2', 'G1 X20');
+      service.newFile('second.mpf');
+
+      ['1', '2', '3'].forEach((channelId, index) => {
+        expect(service.getActiveProgram(channelId)?.id).not.toBe(previous[index]?.id);
+        expect(service.getActiveProgram(channelId)?.content).toBe('');
+        expect(service.getPrograms(channelId)).toHaveLength(2);
+      });
+      expect(previous[1]?.content).toBe('G1 X20');
+    });
+
+    it('keeps blank-file programs selectable without deactivating the channels', async () => {
+      service.newFile('blank.mpf');
+      const blank = service.getActiveFile();
+      const programs = ['1', '2', '3'].map(channelId => service.getActiveProgram(channelId));
+      await service.openFile('G1 X10', 'other.mpf', { parseMultiChannel: false });
+      vi.clearAllMocks();
+
+      service.selectFile(blank!.id);
+
+      ['1', '2', '3'].forEach((channelId, index) => {
+        expect(service.getActiveProgram(channelId)).toBe(programs[index]);
+      });
+      expect(mockStateService.activateChannel).not.toHaveBeenCalled();
+      expect(mockStateService.deactivateChannel).not.toHaveBeenCalled();
+    });
+
+    it('persists each channel program and its content for browser reloads', () => {
+      const persistentService = new FileManagerService(mockEventBus, mockStateService as any);
+      persistentService.newFile('saved.mpf');
+      ['1', '2', '3'].forEach(channelId => {
+        persistentService.updateActiveProgramContent(channelId, `G1 X${channelId}0`);
+      });
+
+      const restoredService = new FileManagerService(mockEventBus, mockStateService as any);
+      ['1', '2', '3'].forEach(channelId => {
+        expect(restoredService.getActiveProgram(channelId)).toEqual(persistentService.getActiveProgram(channelId));
+        expect(restoredService.getActiveProgram(channelId)?.content).toBe(`G1 X${channelId}0`);
+      });
     });
   });
 

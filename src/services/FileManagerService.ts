@@ -16,6 +16,12 @@ export class FileManagerService implements IFileManagerService {
     if (this.useLocalStorage) {
       this.loadFromStorage();
     }
+    const activeFile = this.getActiveFile();
+    const activeProgram = this.getActiveProgram(this.stateService?.getWorkbenchSelectedChannel() ?? '1')
+      ?? this.programs.find(program => program.sourceFileId === activeFile?.id && program.content.trim());
+    if (activeProgram) {
+      this.stateService?.restoreProgramMachine(activeProgram.content, activeFile?.machineType);
+    }
     
     // Auto-save the machine type against the active file when it changes globally
     this.eventBus.subscribe('machine:changed', (data: any) => {
@@ -58,6 +64,7 @@ export class FileManagerService implements IFileManagerService {
   public setActiveProgram(channelId: string, programId: string) {
     const program = this.programs.find(p => p.id === programId && p.channelId === channelId);
     if (program) {
+        this.stateService?.restoreProgramMachine(program.content);
         this.stateService?.setActiveProgramId(channelId, programId);
         this.eventBus.publish('program:active_changed', { channelId, program });
         this.saveToStorage();
@@ -96,6 +103,10 @@ export class FileManagerService implements IFileManagerService {
 
   public async openFile(content: string, name: string, options: { parseMultiChannel: boolean, channel?: number }): Promise<NCFile> {
     const parsed = this.parseNCCode(content, options);
+    return this.createFile(content, name, parsed, this.shouldSyncChannelsOnOpen(options));
+  }
+
+  private createFile(content: string, name: string, parsed: string[], syncChannels: boolean): NCFile {
     const globalMachine = this.stateService?.getState().globalMachine;
     
     const file: NCFile = {
@@ -128,8 +139,11 @@ export class FileManagerService implements IFileManagerService {
             this.setActiveProgram(channelId, program.id);
         }
     });
+    const machineSource = parsed.find(channelContent => channelContent.includes('BEGIN SETUP'))
+      ?? parsed.find(channelContent => channelContent.trim()) ?? '';
+    this.stateService?.restoreProgramMachine(machineSource);
 
-        if (this.shouldSyncChannelsOnOpen(options)) {
+        if (syncChannels) {
           this.syncChannelsForFile(parsed);
         }
 
@@ -140,8 +154,7 @@ export class FileManagerService implements IFileManagerService {
   }
 
   public newFile(name: string = "Untitled.mpf") {
-    // Create a new blank file specifically mapped to all 3 channels to start
-    this.openFile("", name, { parseMultiChannel: false });
+    this.createFile("", name, ["", "", ""], false);
   }
 
   public newProgram(channelId: string, name: string = "New Program") {
@@ -169,10 +182,6 @@ export class FileManagerService implements IFileManagerService {
     if (file) {
       this.stateService?.setActiveFileId(id);
       
-      if (file.machineType && this.stateService) {
-         this.stateService.setGlobalMachine(file.machineType as any);
-      }
-      
       // Auto-switch channels to the newly selected file's programs
       ['1', '2', '3'].forEach(channelId => {
           const program = this.programs.find(p => p.sourceFileId === file.id && p.channelId === channelId);
@@ -180,8 +189,11 @@ export class FileManagerService implements IFileManagerService {
               this.setActiveProgram(channelId, program.id);
           }
       });
+      const program = this.programs.find(p => p.sourceFileId === file.id && p.content.includes('BEGIN SETUP'))
+        ?? this.programs.find(p => p.sourceFileId === file.id && p.content.trim());
+      this.stateService?.restoreProgramMachine(program?.content ?? '', file.machineType);
 
-      if (file.isMultiChannel || file.channels.length > 1) {
+      if ((file.isMultiChannel || file.channels.length > 1) && file.content.trim() !== '') {
         this.syncChannelsForFile(file.channels);
       }
 

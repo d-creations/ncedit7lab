@@ -1,5 +1,5 @@
 import type { SimulationCommentSyntax } from '../services/tools/SimulationCommentCodec';
-import type { StockBinding } from '../services/simulation/SimulationTypes';
+import type { StockBinding } from '../services/simulation/shared/SimulationTypes';
 
 export interface BackendFeatures {
   transfer_enabled: boolean;

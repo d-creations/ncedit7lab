@@ -2,8 +2,8 @@
 import {
   MaterialReplayEngine,
   type ReplayWorkerRequest,
-} from '../services/simulation/MaterialReplayEngine';
-import { openReplayTraceStore } from '../services/simulation/ReplayTraceStore';
+} from '../services/simulation/strategies/cpu-hybrid/MaterialReplayEngine';
+import { openReplayTraceStore } from '../services/simulation/strategies/cpu-hybrid/ReplayTraceStore';
 
 declare const self: DedicatedWorkerGlobalScope;
 

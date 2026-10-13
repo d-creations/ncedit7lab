@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import type { DeepReadonly, ProgramMaterialDefinition } from '@services/tools/SimulationMetadata';
-import { materialPlacement } from '@services/simulation/SimulationTransforms';
+import { materialPlacement } from '@services/simulation/shared/SimulationTransforms';
 
 const STOCK_MATERIAL = new THREE.MeshStandardMaterial({ color: 0xd9c7a6, metalness: 0.25, roughness: 0.8 });
 

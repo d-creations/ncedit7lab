@@ -16,6 +16,7 @@ import {
   GPU_SWEEP_WGSL,
   GPU_SWEEP_RAY_WGSL,
   usesAnalyticalFlatRayCuts,
+  usesAnalyticalProfileRayCuts,
   type CompiledGpuSweep,
 } from '../GpuSweepCompiler';
 import { rotationQuaternion, stockPlacement } from '../SimulationTransforms';
@@ -443,6 +444,7 @@ describe('bounded GPU ray sweep intervals', () => {
       expect(result[i][0]).toBeLessThanOrEqual(result[i][1]);
       if (i > 0) expect(result[i][0]).toBeGreaterThan(result[i - 1][1]);
     }
+
     for (let i = 0; i <= 300; i++) {
       const t = limits[0] + ((limits[1] - limits[0]) * i) / 300;
       const point = origin.clone().addScaledVector(direction, t);
@@ -453,6 +455,55 @@ describe('bounded GPU ray sweep intervals', () => {
     }
     return result;
   }
+
+  it('uses direct profile clipping for axial drills and stationary balls but retains other solvers', () => {
+    expect(
+      usesAnalyticalProfileRayCuts(compileGpuSweeps(input([motion(drill, v(), v(0, 0, -3))]))[0]),
+    ).toBe(true);
+    expect(usesAnalyticalProfileRayCuts(compileGpuSweeps(input([motion(ball, v(), v())]))[0])).toBe(
+      true,
+    );
+    expect(
+      usesAnalyticalProfileRayCuts(compileGpuSweeps(input([motion(drill, v(), v(1, 0, 0))]))[0]),
+    ).toBe(false);
+    expect(
+      usesAnalyticalProfileRayCuts(compileGpuSweeps(input([motion(ball, v(), v(0, 0, 1))]))[0]),
+    ).toBe(false);
+    expect(GPU_SWEEP_RAY_WGSL).toContain('return gpuProfileRayCuts');
+  });
+  it('clips axial drill caps, conical side and stationary ball hemisphere at known roots', () => {
+    const bore = compileGpuSweeps(input([motion(drill, v(), v(0, 0, -2))]))[0];
+    const caps = intervals(bore, v(), v(0, 0, 1));
+    expect(caps[0][0]).toBeCloseTo(-2, 4);
+    expect(caps[0][1]).toBeCloseTo(4, 4);
+    const side = intervals(bore, v(0.5, 0, 0), v(0, 0, 1));
+    expect(side[0][0]).toBeCloseTo(-2 + 0.5 / Math.tan(THREE.MathUtils.degToRad(59)), 4);
+    const stationary = compileGpuSweeps(input([motion(ball, v(), v())]))[0];
+    const sphere = intervals(stationary, v(0, 0, 0.5), v(1, 0, 0));
+    expect(sphere[0][0]).toBeCloseTo(-Math.sqrt(0.75), 4);
+    expect(sphere[0][1]).toBeCloseTo(Math.sqrt(0.75), 4);
+  });
+  it('preserves profile occupancy across rotated stock/tools and oblique or reversed rays', () => {
+    const rotation = rotationQuaternion([23, -35, 41]);
+    for (const cutter of [drill, ball]) {
+      const end = cutter === drill ? v(0, 0, -2).applyQuaternion(rotation) : v();
+      const cut = motion(cutter, v(), end);
+      cut.start.orientation = rotation.toArray();
+      cut.end.orientation = rotation.toArray();
+      const config = input([cut]);
+      config.binding.position = [0.3, -0.2, 0.4];
+      config.stock.rotation = [12, 7, -18];
+      const sweep = compileGpuSweeps(config)[0];
+      expect(usesAnalyticalProfileRayCuts(sweep)).toBe(true);
+      const next = random();
+      for (let i = 0; i < 30; i++) {
+        const origin = v(next() * 2 - 1, next() * 2 - 1, next() * 4 - 1);
+        const direction = v(next() - 0.5, next() - 0.5, next() - 0.5).normalize();
+        intervals(sweep, origin, direction);
+        intervals(sweep, origin, direction.negate());
+      }
+    }
+  });
 
   it('exports the bounded ray helper with unchanged record stride', () => {
     expect(GPU_SWEEP_RAY_WGSL).toContain(
@@ -652,6 +703,22 @@ describe('bounded GPU ray sweep intervals', () => {
         intervals(sweep, origin, v(0, 0, 1));
       }
     }
+  });
+
+  it('clips constant-radius turning rays and axial-only planes directly without changing annular material', () => {
+    const sweep = sectionSweep([
+      new THREE.Vector2(1, -1),
+      new THREE.Vector2(3, -1),
+      new THREE.Vector2(3, 1),
+      new THREE.Vector2(1, 1),
+    ]);
+    const axial = intervals(sweep, v(2, 0, 0), v(0, 0, 1));
+    expect(axial).toHaveLength(1);
+    expect(axial[0][0]).toBeCloseTo(-1, 4);
+    expect(axial[0][1]).toBeCloseTo(1, 4);
+    expect(intervals(sweep, v(), v(0, 0, 1))).toEqual([]);
+    expect(intervals(sweep, v(0, 0, 2), v(1))).toEqual([]);
+    expect(GPU_SWEEP_RAY_WGSL).toContain('if (a == 0.0 || A == 0.0)');
   });
 
   it('clips turned inserts with offset/reversed spindle in transformed stock coordinates', () => {

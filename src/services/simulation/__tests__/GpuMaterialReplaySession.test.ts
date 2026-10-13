@@ -10,10 +10,13 @@ import {
   type DexelIntervalCapacity,
 } from '../DexelLayout';
 import type { SimulationInput } from '../SimulationTypes';
+import { GpuDexelHistory } from '../GpuDexelHistory';
 
-const { calculate, copyFrom, created } = vi.hoisted(() => ({
+const { calculate, copyFrom, restoreHistory, takeHistory, created } = vi.hoisted(() => ({
   calculate: vi.fn(),
   copyFrom: vi.fn(),
+  restoreHistory: vi.fn(),
+  takeHistory: vi.fn(),
   created: [] as {
     group: THREE.Group;
     dispose: ReturnType<typeof vi.fn>;
@@ -29,21 +32,37 @@ vi.mock('../GpuDexelStock', async () => {
       group = new THREE.Group();
       estimatedBytes: number;
       layout: ReturnType<typeof createDexelLayout>;
+      tileSlots: Uint32Array;
       dispose = vi.fn();
       calculate = calculate;
       copyFrom = copyFrom;
+      restoreHistory = restoreHistory;
+      takeHistory = takeHistory;
+      releasePreparation = vi.fn();
       constructor(
         _renderer: unknown,
         _device: unknown,
         size: THREE.Vector3,
         public pitch: number,
         _cylinder: boolean,
-        _sweeps: unknown,
+        _sweeps: readonly sweepCompiler.CompiledGpuSweep[],
         _placement: THREE.Matrix4,
         public intervalCapacity: DexelIntervalCapacity = 16,
+        sparse?: { retainedTiles?: Uint32Array },
       ) {
-        this.layout = createDexelLayout(size, pitch, intervalCapacity);
+        this.layout = createDexelLayout(
+          size,
+          pitch,
+          intervalCapacity,
+          sparse
+            ? { bounds: _sweeps.map((sweep) => sweep.bounds), retainedTiles: sparse.retainedTiles }
+            : undefined,
+        );
         this.estimatedBytes = this.layout.estimatedBytes;
+        this.tileSlots = new Uint32Array(this.layout.tiles).fill(0xffffffff);
+        this.layout.storedTiles.forEach((tile, slot) => {
+          this.tileSlots[tile] = slot;
+        });
         created.push(this);
       }
     },
@@ -81,6 +100,8 @@ describe('progressive GPU replay lifecycle', () => {
     vi.useFakeTimers();
     calculate.mockReset().mockResolvedValue(5);
     copyFrom.mockReset().mockResolvedValue(3);
+    restoreHistory.mockReset().mockResolvedValue(2);
+    takeHistory.mockReset();
     created.length = 0;
     refined.mockClear();
     failed.mockClear();
@@ -125,8 +146,13 @@ describe('progressive GPU replay lifecycle', () => {
   });
   it('keeps coarse stock and surfaces a fine allocation failure without reducing requested detail', async () => {
     const replay = session();
-    const huge = { ...input, stock: { type: 'box' as const, width: 50, height: 50, depth: 50 } };
-    expect(() => createDexelLayout(new THREE.Vector3(50, 50, 50), 0.02)).toThrow();
+    const huge = {
+      ...input,
+      stock: { type: 'box' as const, width: 1000, height: 1000, depth: 1000 },
+    };
+    expect(() =>
+      createDexelLayout(new THREE.Vector3(1000, 1000, 1000), 0.02, 16, { bounds: [] }),
+    ).toThrow();
     await replay.start(huge, [0], () => {}, true);
     const log = vi.spyOn(console, 'error').mockImplementation(() => {});
     await vi.advanceTimersByTimeAsync(350);
@@ -200,7 +226,7 @@ describe('progressive GPU replay lifecycle', () => {
     await vi.advanceTimersByTimeAsync(350);
     expect(refined.mock.calls[0][0].position).toBe(1);
   });
-  it('uses certified sweep batches without including a future occurrence', async () => {
+  it('reuses compiled sweeps while preserving every execution boundary and excluding future cuts', async () => {
     const compile = vi.spyOn(sweepCompiler, 'compileGpuSweeps');
     const pose = (z: number) => ({
       position: [0, 0, z] as const,
@@ -223,14 +249,14 @@ describe('progressive GPU replay lifecycle', () => {
     const replay = session();
     const final = await replay.start(setup, [1, 2], () => {}, true);
     expect(final.processedMotions).toBe(2);
-    expect(calculate.mock.calls[0][0]).toBe(1);
+    expect(calculate.mock.calls[0][0]).toBe(2);
     expect(compile).toHaveBeenCalledTimes(1);
-    expect(compile.mock.calls[0][0].motions).toHaveLength(1);
+    expect(compile.mock.calls[0][0].motions).toHaveLength(2);
     const first = await replay.seek(1);
     expect(first.processedMotions).toBe(1);
     expect(first.executionStep).toBe(1);
     expect(calculate.mock.calls[1][0]).toBe(1);
-    expect(compile).toHaveBeenCalledTimes(2);
+    expect(compile).toHaveBeenCalledTimes(1);
     compile.mockRestore();
   });
   it('immediately reuses a retained fine state rather than downgrading it on a warm jump', async () => {
@@ -273,6 +299,137 @@ describe('progressive GPU replay lifecycle', () => {
       })),
     };
   }
+  function recordedHistory(pitch = 0.1): GpuDexelHistory {
+    const spans = new Uint32Array(new Float32Array([-0.25, 0.25]).buffer);
+    const sweeps = sweepCompiler.compileGpuSweeps(cuttingInput());
+    const layout = createDexelLayout(new THREE.Vector3(2, 2, 2), pitch);
+    return new GpuDexelHistory(
+      new Uint32Array([0, 0, ...spans, 1024, 4, ...spans]),
+      layout.rays,
+      sweeps,
+    );
+  }
+  it('captures history with final stock and restores an uncached backward prefix without cutter calculation', async () => {
+    const replay = session();
+    const history = recordedHistory();
+    takeHistory.mockReturnValueOnce(history);
+    const final = await replay.start(cuttingInput(), [1, 2, 3], () => {}, true);
+    expect(final.historyThrough).toBe(3);
+    const backward = await replay.seek(1);
+    expect(backward).toMatchObject({ historyHit: true, newMotions: 0, historyThrough: 3 });
+    expect(calculate).toHaveBeenCalledOnce();
+    expect(copyFrom).not.toHaveBeenCalled();
+    expect(restoreHistory.mock.calls[0]).toEqual([history, 1, expect.any(Function), -1]);
+    const forward = await replay.seek(2);
+    expect(forward).toMatchObject({ historyHit: true, reusedPosition: 1, newMotions: 0 });
+    expect(restoreHistory.mock.calls[1][3]).toBe(1);
+    expect(calculate).toHaveBeenCalledOnce();
+    replay.cancel();
+  });
+  it('prepares removal-work checkpoints including early positions without cutter work or progress resets', async () => {
+    const replay = session();
+    const progress = vi.fn();
+    const history = recordedHistory();
+    takeHistory.mockReturnValueOnce(history);
+    const final = await replay.start(
+      cuttingInput(),
+      Array.from({ length: 96 }, (_, i) => i + 1),
+      progress,
+      true,
+    );
+    expect(final.position).toBe(96);
+    expect(calculate).toHaveBeenCalledOnce();
+    expect(restoreHistory).toHaveBeenCalledTimes(2);
+    expect(restoreHistory.mock.calls.map(([, step]) => step)).toEqual([1, 2]);
+    expect(progress.mock.calls).toEqual([
+      [0, 3],
+      [3, 3],
+    ]);
+    expect((await replay.seek(1)).cacheHit).toBe(true);
+    expect((await replay.seek(2)).cacheHit).toBe(true);
+    const dispose = vi.spyOn(history, 'dispose');
+    replay.cancel();
+    expect(dispose).toHaveBeenCalledOnce();
+  });
+  it('counts a shared reserved arena only once across resident stocks', async () => {
+    const replay = session();
+    const first = await replay.start(input, [1, 2], () => {}, true);
+    const second = await replay.seek(0);
+    const resident = Reflect.get(replay, 'residentBytes') as () => number;
+    const before = resident.call(replay);
+    const arena = { estimatedBytes: 16384 };
+    for (const stock of [first.stock, second.stock]) {
+      Reflect.set(stock, 'tileArena', arena);
+      stock.estimatedBytes += arena.estimatedBytes;
+    }
+    expect(resident.call(replay)).toBe(before + arena.estimatedBytes);
+  });
+  it('prefers retaining an early workload checkpoint over ordinary frames and later checkpoints', async () => {
+    const replay = session();
+    takeHistory.mockReturnValueOnce(recordedHistory());
+    const final = await replay.start(
+      cuttingInput(),
+      Array.from({ length: 96 }, (_, i) => i + 1),
+      () => {},
+      true,
+    );
+    const scene = new THREE.Group();
+    scene.add(final.stock.group);
+    try {
+      await replay.seek(30);
+      await replay.seek(40);
+      await replay.seek(50);
+      const early = await replay.seek(1);
+      expect(early.cacheHit).toBe(true);
+      expect(final.stock.dispose).not.toHaveBeenCalled();
+    } finally {
+      scene.remove(final.stock.group);
+    }
+  });
+  it('keeps fine history independent from coarse history and restores at the requested fine pitch', async () => {
+    const replay = session();
+    const coarseHistory = recordedHistory();
+    takeHistory.mockReturnValueOnce(coarseHistory);
+    await replay.start(cuttingInput(), [1, 2, 3], () => {}, true);
+    const fineHistory = recordedHistory(0.02);
+    takeHistory.mockReturnValueOnce(fineHistory);
+    await vi.advanceTimersByTimeAsync(350);
+    const frame = await replay.seek(1);
+    await vi.advanceTimersByTimeAsync(350);
+    expect(restoreHistory.mock.calls.map(([history]) => history)).toEqual([fineHistory]);
+    expect(frame).toMatchObject({
+      phase: 'fine',
+      position: 1,
+      pitchMm: 0.02,
+      historyHit: true,
+      newMotions: 0,
+    });
+    expect(refined).toHaveBeenCalledOnce();
+    expect(calculate).toHaveBeenCalledTimes(2);
+  });
+  it('rejects obsolete history restoration without damaging its retained history', async () => {
+    const replay = session();
+    const history = recordedHistory();
+    const dispose = vi.spyOn(history, 'dispose');
+    takeHistory.mockReturnValueOnce(history);
+    await replay.start(cuttingInput(), [1, 2, 3], () => {}, true);
+    let complete!: (ms: number) => void;
+    restoreHistory.mockImplementationOnce(
+      () =>
+        new Promise<number>((resolve) => {
+          complete = resolve;
+        }),
+    );
+    const earlier = replay.seek(1);
+    const rejection = expect(earlier).rejects.toMatchObject({ name: 'AbortError' });
+    const latest = replay.seek(2);
+    complete(2);
+    await rejection;
+    expect((await latest).historyHit).toBe(true);
+    expect(dispose).not.toHaveBeenCalled();
+    replay.cancel();
+    expect(dispose).toHaveBeenCalledOnce();
+  });
   it('copies the nearest earlier coarse stock and compiles only newly executed motions', async () => {
     const compile = vi.spyOn(sweepCompiler, 'compileGpuSweeps');
     try {
@@ -283,15 +440,12 @@ describe('progressive GPU replay lifecycle', () => {
       expect(second).toMatchObject({ processedMotions: 2, newMotions: 1, reusedPosition: 1 });
       expect(second.stock).not.toBe(first.stock);
       expect(copyFrom.mock.calls.at(-1)?.[0]).toBe(first.stock);
-      expect(compile.mock.calls.at(-1)?.[0].motions.map((motion) => motion.executionStep)).toEqual([
-        2,
-      ]);
+      expect(calculate.mock.calls.at(-1)?.[0]).toBe(1);
       const third = await replay.seek(3);
       expect(third).toMatchObject({ processedMotions: 3, newMotions: 1, reusedPosition: 2 });
       expect(copyFrom.mock.calls.at(-1)?.[0]).toBe(second.stock);
-      expect(compile.mock.calls.at(-1)?.[0].motions.map((motion) => motion.executionStep)).toEqual([
-        3,
-      ]);
+      expect(calculate.mock.calls.at(-1)?.[0]).toBe(1);
+      expect(compile).toHaveBeenCalledOnce();
     } finally {
       compile.mockRestore();
     }
@@ -317,7 +471,8 @@ describe('progressive GPU replay lifecycle', () => {
       await replay.seek(6787);
       const next = await replay.seek(6788);
       expect(next).toMatchObject({ processedMotions: 6788, reusedPosition: 6787, newMotions: 1 });
-      expect(compile.mock.calls.at(-1)?.[0].motions).toHaveLength(1);
+      expect(calculate.mock.calls.at(-1)?.[0]).toBe(1);
+      expect(compile).toHaveBeenCalledOnce();
       expect(copyFrom).toHaveBeenCalledOnce();
     } finally {
       compile.mockRestore();
@@ -497,7 +652,23 @@ describe('progressive GPU replay lifecycle', () => {
   });
   it('enforces the memory budget before an adaptive retry allocation', async () => {
     const replay = session();
-    const large = { ...input, stock: { type: 'box' as const, width: 56, height: 56, depth: 56 } };
+    const large: SimulationInput = {
+      ...cuttingInput(),
+      stock: { type: 'box', width: 56, height: 56, depth: 56 },
+    };
+    large.motions = [
+      {
+        ...large.motions[0],
+        executionStep: 0,
+        tool: {
+          toolNumber: 1,
+          description: 'Full stock cutter',
+          cutting: [{ type: 'endMill', diameter: 120, length: 120 }],
+        },
+        start: { ...large.motions[0].start, position: [0, 0, -60] },
+        end: { ...large.motions[0].end, position: [0, 0, -60] },
+      },
+    ];
     calculate.mockRejectedValueOnce(new GpuDexelIntervalOverflowError(16));
     await expect(replay.start(large, [0], () => {}, true)).rejects.toThrow(/larger pitch|256 MiB/);
     expect(created).toHaveLength(1);

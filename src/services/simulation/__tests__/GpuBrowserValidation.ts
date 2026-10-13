@@ -2,10 +2,51 @@ import * as THREE from 'three';
 import { RenderTarget, WebGPURenderer, type NodeBuilder } from 'three/webgpu';
 import { DEXEL_PASS_SWEEPS, GpuDexelStock } from '../GpuDexelStock';
 import { compileGpuSweeps, evaluateGpuSweep } from '../GpuSweepCompiler';
-import { type DexelIntervalCapacity } from '../DexelLayout';
+import { dexelTilesForBounds, originalDexelSpan, type DexelIntervalCapacity } from '../DexelLayout';
 import type { RemovalMotion, SimulationInput } from '../SimulationTypes';
 import { stockPlacement } from '../SimulationTransforms';
 import type { ProgramToolDefinition } from '../../tools/SimulationMetadata';
+
+async function assertSameMaterial(
+  renderer: WebGPURenderer,
+  expected: GpuDexelStock,
+  actual: GpuDexelStock,
+  cylinder: boolean,
+): Promise<void> {
+  const snapshots = await Promise.all(
+    [expected, actual].map(async (stock) => ({
+      counts: new Uint32Array(await renderer.getArrayBufferAsync(stock.countAttribute)),
+      intervals: new Float32Array(await renderer.getArrayBufferAsync(stock.intervalAttribute)),
+    })),
+  );
+  for (let ray = 0; ray < expected.layout.rays; ray++) {
+    const spans = snapshots.map((snapshot, index) => {
+      const stock = index ? actual : expected,
+        slot = stock.tileSlots[Math.floor(ray / 1024)];
+      if (slot === 0xffffffff) {
+        const original = originalDexelSpan(stock.layout, ray, cylinder);
+        return original ? [original] : [];
+      }
+      const storageRay = slot * 1024 + (ray % 1024);
+      return Array.from({ length: snapshot.counts[storageRay] }, (_, i) => {
+        const start = (storageRay * stock.layout.intervalCapacity + i) * 2;
+        return [snapshot.intervals[start], snapshot.intervals[start + 1]] as const;
+      });
+    });
+    if (spans[0].length !== spans[1].length)
+      throw new Error(`Sparse/history material count mismatch: ray=${ray}`);
+    const implicit =
+      expected.tileSlots[Math.floor(ray / 1024)] === 0xffffffff ||
+      actual.tileSlots[Math.floor(ray / 1024)] === 0xffffffff;
+    const tolerance = implicit ? expected.layout.size.length() * 2e-6 : 0;
+    for (let i = 0; i < spans[0].length; i++)
+      for (let end = 0; end < 2; end++)
+        if (Math.abs(spans[0][i][end] - spans[1][i][end]) > tolerance)
+          throw new Error(
+            `Sparse/history material endpoint mismatch: ray=${ray}, interval=${i}, endpoint=${end}`,
+          );
+  }
+}
 
 export async function runGpuCylinderShadingValidation(drilled = false): Promise<object> {
   if (!navigator.gpu) throw new Error('WebGPU is unavailable');
@@ -251,6 +292,116 @@ export async function runGpuBrowserValidation(
         stocks.push(stock);
         const ms = await stock.calculate(sweeps.length);
         const warmMs = await stock.calculate(sweeps.length);
+        const sparse = new GpuDexelStock(
+          renderer,
+          device,
+          stock.layout.size.clone(),
+          pitch,
+          mixed,
+          sweeps,
+          stockPlacement(input.stock, input.binding),
+          intervalCapacity,
+          { historyEvents: 1048576 },
+        );
+        stocks.push(sparse);
+        const sparseStarted = performance.now();
+        let sparseMs = 0,
+          historyEvents = 0;
+        const jumpMeasurements: object[] = [];
+        try {
+          sparseMs = await sparse.calculate(sweeps.length);
+          await assertSameMaterial(renderer, stock, sparse, mixed);
+          const history = sparse.takeHistory();
+          if (!history)
+            throw new Error(sparse.historyUnavailable ?? 'GPU history was not captured');
+          historyEvents = history.count;
+          try {
+            for (const step of [
+              0,
+              ...new Set(referenceSweeps.map((sweep) => sweep.executionStep)),
+            ]) {
+              const prefixSweeps = sweeps.filter((sweep) => sweep.executionStep <= step);
+              const reference = new GpuDexelStock(
+                renderer,
+                device,
+                stock.layout.size.clone(),
+                pitch,
+                mixed,
+                prefixSweeps,
+                stockPlacement(input.stock, input.binding),
+                intervalCapacity,
+              );
+              stocks.push(reference);
+              let target: RenderTarget | undefined;
+              try {
+                await reference.calculate(prefixSweeps.length);
+                const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 20 * scale);
+                camera.position.set(3 * scale, 3 * scale, 4 * scale);
+                camera.lookAt(0, 0, 0);
+                target = new RenderTarget(96, 96);
+                const scene = new THREE.Scene();
+                scene.add(reference.group);
+                renderer.setRenderTarget(target);
+                renderer.render(scene, camera);
+                const pixels = await renderer.readRenderTargetPixelsAsync(target, 0, 0, 96, 96);
+                scene.remove(reference.group);
+                const start = performance.now();
+                const restored = new GpuDexelStock(
+                  renderer,
+                  device,
+                  stock.layout.size.clone(),
+                  pitch,
+                  mixed,
+                  [],
+                  stockPlacement(input.stock, input.binding),
+                  intervalCapacity < 32 ? 32 : 64,
+                  { retainedTiles: history.tiles(step) },
+                );
+                stocks.push(restored);
+                try {
+                  await restored.restoreHistory(history, step);
+                  scene.add(restored.group);
+                  renderer.render(scene, camera);
+                  await device.queue.onSubmittedWorkDone();
+                  const readinessMs = performance.now() - start;
+                  const restoredPixels = await renderer.readRenderTargetPixelsAsync(
+                    target,
+                    0,
+                    0,
+                    96,
+                    96,
+                  );
+                  if (
+                    restoredPixels.length !== pixels.length ||
+                    restoredPixels.some((value, i) => Math.abs(value - pixels[i]) > 1)
+                  )
+                    throw new Error(
+                      `Sparse/history rendering changed at execution step ${step}, pitch=${pitch}, cylinder=${mixed}`,
+                    );
+                  await assertSameMaterial(renderer, reference, restored, mixed);
+                  jumpMeasurements.push({
+                    step,
+                    readinessMs: Math.round(readinessMs),
+                    targetMs: 1000,
+                    belowTarget: readinessMs < 1000,
+                  });
+                } finally {
+                  scene.remove(restored.group);
+                  renderer.setRenderTarget(null);
+                  restored.dispose();
+                }
+              } finally {
+                renderer.setRenderTarget(null);
+                target?.dispose();
+                reference.dispose();
+              }
+            }
+          } finally {
+            history.dispose();
+          }
+        } finally {
+          sparse.dispose();
+        }
         const counts = new Uint32Array(await renderer.getArrayBufferAsync(stock.countAttribute));
         const intervals = new Float32Array(
           await renderer.getArrayBufferAsync(stock.intervalAttribute),
@@ -266,6 +417,10 @@ export async function runGpuBrowserValidation(
           sweeps.slice(0, 1),
           stockPlacement(input.stock, input.binding),
           intervalCapacity,
+          {
+            retainedTiles: stock.layout.storedTiles,
+            arenaTiles: stock.layout.storedTiles.length * 2,
+          },
         );
         stocks.push(prefix);
         const continued = new GpuDexelStock(
@@ -283,6 +438,63 @@ export async function runGpuBrowserValidation(
           deltaMs = 0;
         try {
           await prefix.calculate(1);
+          prefix.releasePreparation();
+          const beforeCounts = new Uint32Array(
+            await renderer.getArrayBufferAsync(prefix.countAttribute),
+          );
+          const beforeIntervals = new Float32Array(
+            await renderer.getArrayBufferAsync(prefix.intervalAttribute),
+          );
+          const shared = new GpuDexelStock(
+            renderer,
+            device,
+            stock.layout.size.clone(),
+            pitch,
+            mixed,
+            sweeps.slice(1),
+            stockPlacement(input.stock, input.binding),
+            intervalCapacity,
+            {
+              retainedTiles: prefix.layout.storedTiles,
+              source: prefix,
+              changedTiles: Uint32Array.from(
+                new Set(
+                  sweeps
+                    .slice(1)
+                    .flatMap((sweep) => dexelTilesForBounds(prefix.layout, sweep.bounds)),
+                ),
+              ),
+            },
+          );
+          stocks.push(shared);
+          try {
+            if (shared.tileArena !== prefix.tileArena)
+              throw new Error('GPU sharing fixture fell back to copying');
+            await shared.copyFrom(prefix);
+            await shared.calculate(sweeps.length - 1);
+            await assertSameMaterial(renderer, stock, shared, mixed);
+            const afterCounts = new Uint32Array(
+              await renderer.getArrayBufferAsync(prefix.countAttribute),
+            );
+            const afterIntervals = new Float32Array(
+              await renderer.getArrayBufferAsync(prefix.intervalAttribute),
+            );
+            for (const tile of prefix.layout.storedTiles) {
+              const slot = prefix.tileSlots[tile];
+              for (let ray = slot * 1024; ray < (slot + 1) * 1024; ray++) {
+                if (beforeCounts[ray] !== afterCounts[ray])
+                  throw new Error('Copy-on-write changed source count');
+                for (let i = 0; i < beforeCounts[ray] * 2; i++)
+                  if (
+                    beforeIntervals[ray * intervalCapacity * 2 + i] !==
+                    afterIntervals[ray * intervalCapacity * 2 + i]
+                  )
+                    throw new Error('Copy-on-write changed source interval');
+              }
+            }
+          } finally {
+            shared.dispose();
+          }
           copyMs = await continued.copyFrom(prefix);
           deltaMs = await continued.calculate(sweeps.length - 1);
           const copiedCounts = new Uint32Array(
@@ -392,6 +604,12 @@ export async function runGpuBrowserValidation(
             estimatedMiB: +(stock.estimatedBytes / 1048576).toFixed(2),
             intervalCapacity,
             denseCutters,
+            sparseComputeMs: Math.round(sparseMs),
+            sparseValidationMs: Math.round(performance.now() - sparseStarted),
+            storedTiles: sparse.layout.storedTiles.length,
+            totalTiles: sparse.layout.tiles,
+            historyEvents,
+            historyJumps: jumpMeasurements,
           });
         } finally {
           renderer.setRenderTarget(null);

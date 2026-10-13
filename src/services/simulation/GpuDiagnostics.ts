@@ -25,6 +25,10 @@ export function recordGpuDiagnostic(
       'compute-error',
       'frame-preparation',
       'replay-preparation',
+      'history-restored',
+      'history-restore-start',
+      'stock-copy-start',
+      'stock-copy-finished',
     ].includes(phase)
   ) {
     const context = contexts.get(device) ?? new Map<string, GpuDiagnosticEvent>();

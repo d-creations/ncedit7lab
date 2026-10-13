@@ -4,6 +4,9 @@ import { NCToolpathPlot } from '../NCToolpathPlot';
 import * as THREE from 'three';
 import { WebGPURenderer } from 'three/webgpu';
 import { GpuDexelStock } from '@services/simulation/GpuDexelStock';
+import { GpuDexelHistory } from '@services/simulation/GpuDexelHistory';
+import { GPU_SWEEP_STRIDE } from '@services/simulation/GpuSweepCompiler';
+import { GpuMaterialReplaySession } from '@services/simulation/GpuMaterialReplaySession';
 import { SimulationCapabilityError } from '@services/simulation/SimulationTypes';
 import { ServiceRegistry } from '@core/ServiceRegistry';
 import { EVENT_BUS_TOKEN, EXECUTED_PROGRAM_SERVICE_TOKEN, FILE_MANAGER_SERVICE_TOKEN,
@@ -42,7 +45,8 @@ interface PlotHarness extends HTMLElement {
   createMaterialReplaySession(runId: string): MaterialReplaySession;
 }
 
-describe('editor Plot actions', () => {
+// These integration tests execute the real CPU mesher at the production default pitch.
+describe('editor Plot actions', { timeout: 60000 }, () => {
   const registry = ServiceRegistry.getInstance();
   let bus: EventBus;
   let service: ExecutedProgramService;
@@ -281,6 +285,28 @@ describe('editor Plot actions', () => {
     expect(worker.postMessage).not.toHaveBeenCalled();
   });
 
+  it('shows prepared GPU history coverage and restores a backward jump without cutter work', async () => {
+    vi.useFakeTimers();
+    const calculate = vi.spyOn(GpuDexelStock.prototype, 'calculate').mockResolvedValue(5);
+    const restore = vi.spyOn(GpuDexelStock.prototype, 'restoreHistory').mockResolvedValue(2);
+    vi.spyOn(GpuDexelStock.prototype, 'copyFrom').mockResolvedValue(3);
+    const spans = new Uint32Array(new Float32Array([-0.25, 0.25]).buffer);
+    vi.spyOn(GpuDexelStock.prototype, 'takeHistory').mockImplementationOnce(function (this: GpuDexelStock) {
+      return new GpuDexelHistory(new Uint32Array([0, 0, ...spans]), this.layout.rays, [{
+        executionStep: 1, motionIndex: 0, bounds: new THREE.Box3(), data: new Float32Array(GPU_SWEEP_STRIDE),
+      }], this.historyKey);
+    });
+    const { worker } = await readyReplay(true);
+    const status = plot.shadowRoot!.getElementById('material-removal-status')!;
+    expect(status.textContent).toContain('Replay history prepared through occurrence 4');
+    plot.shadowRoot!.querySelector<HTMLButtonElement>('#replay-start')!.click();
+    await vi.waitFor(() => expect(status.textContent).toContain('0/4'));
+    expect(status.textContent).toContain('Recorded removal changes restored; no cutter intersections');
+    expect(calculate).toHaveBeenCalledOnce();
+    expect(restore).toHaveBeenCalledOnce();
+    expect(worker.postMessage).not.toHaveBeenCalled();
+  });
+
   it('shows mesh phases and first-visit/cache-hit diagnostics without stale timings', async () => {
     await readyReplay();
     const status = plot.shadowRoot!.getElementById('replay-status')!;
@@ -465,6 +491,31 @@ describe('editor Plot actions', () => {
     expect(renderer.render).toHaveBeenCalledTimes(count);
     expect(plot.shadowRoot?.querySelector('#replay-status')?.textContent).toContain('device removed');
     log.mockRestore();
+  });
+
+  it('throttles completed render submissions only while GPU removal is computing', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(GpuDexelStock.prototype, 'calculate').mockResolvedValue(5);
+    await readyReplay(true);
+    plot.camera = new THREE.PerspectiveCamera();
+    vi.spyOn(document, 'hidden', 'get').mockReturnValue(false);
+    const computing = vi.spyOn(GpuMaterialReplaySession.prototype, 'computing', 'get').mockReturnValue(true);
+    const renderer = plot.renderer!;
+    vi.mocked(renderer.render).mockClear();
+    plot.renderScene();
+    await vi.advanceTimersByTimeAsync(0);
+    plot.renderScene();
+    expect(renderer.render).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(99);
+    plot.renderScene();
+    expect(renderer.render).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+    plot.renderScene();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(renderer.render).toHaveBeenCalledTimes(2);
+    computing.mockReturnValue(false);
+    plot.renderScene();
+    expect(renderer.render).toHaveBeenCalledTimes(3);
   });
 
   it.each(['1', undefined])('renders once from the completed run for channel/global Plot %s', async (channelId) => {

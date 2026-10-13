@@ -622,7 +622,8 @@ at or above 0.1 mm needs no separate refinement.
 A custom Three.js node material renders GPU-resident dexel intervals directly
 inside the stock bounding box, with surface depth and estimated normals.
 Tools, toolpaths, cameras and controls stay in the same scene. Production
-calculation reads only a small GPU error header, not the stock/triangle buffers.
+calculation reads a small GPU error header and bounded removed-interval history
+batches, not the stock/triangle buffers.
 Display normals use derivatives of bilinearly interpolated entry/exit endpoints
 on neighbouring rays, matched by proximity and endpoint direction rather than
 total interval count. Ambiguous matches and distances above four transverse
@@ -657,7 +658,12 @@ completion between submissions. Batch size also scales down with the maximum
 tile cutter count, targeting at most 65,536 ray/cutter pairs (minimum one
 64-ray workgroup). Each ray processes at most 256 tile-list entries per pass;
 later passes restore its previously subtracted intervals rather than resetting
-stock. This bounds dense lists even when the workgroup minimum prevents further
+stock. Dispatch ranges exclude tiles without relevant cutter entries in that pass.
+Both coarse and fine stock allocate counts and intervals only for conservatively
+touched projected tiles; untouched rays use the original box/cylinder analytically
+at the requested grid pitch. No coarse samples are promoted to fine geometry.
+Copies visit stored tiles, not the whole ray grid, and initialize newly touched
+tiles from original stock. This bounds dense lists even when the workgroup minimum prevents further
 ray batching. Conservative cutter bounds wholly outside remaining ray material
 skip the expensive intersection calculation. Capacity/error flags are checked
 after each cutter pass so an overflowing stock can be retried promptly.
@@ -674,15 +680,22 @@ The active arithmetic allowance remains the existing `1e-6` geometry/ray-scale
 allowance, transformed by the packed affine Lipschitz bound. This replaces up to
 155 field evaluations per intersecting ray/cutter pair; it does not change pitch,
 sample the depth axis, enlarge the allowance or approximate diagonal travel.
-Near-parallel diagonal flat travel and ball/drill/rounded cutters retain their existing bounded
-solver, and turning remains analytical. Readiness summaries include
-`analyticalFlatSweeps` so coverage can be measured on the actual program.
+Axial/stationary drills and stationary ball mills also use direct profile
+quadratics and slab clipping. Turning planes with constant radial distance along
+the ray, or zero radial coefficient, use linear clipping instead of quadratic
+root partitioning. Other turning rays remain analytical; near-parallel diagonal
+flat travel, moving ball mills, non-axial drills and rounded cutters retain their
+existing bounded solver. Readiness summaries include `analyticalFlatSweeps` and
+`analyticalProfileSweeps` so coverage can be measured on the actual program.
 Reference tests check known interval endpoints and independent continuous-field
 occupancy on transformed, oblique and reversed rays. Actual program timing and
 hardware validation of this fast path remain to be measured.
 WebGPU plot rendering permits only one outstanding frame, including explicit
 theme/highlight renders, skips background-tab frames and stops after queue
-failure or device loss. Sampling pitch and drawing-buffer resolution are
+failure or device loss. During replay/refinement computation, drawing is limited
+to ten submissions per second to reduce competition with removal work; controls
+still update each animation frame and normal rendering resumes after calculation.
+Sampling pitch and drawing-buffer resolution are
 unchanged.
 
 GPU diagnostics retain the last 24 events per device without NC source text.
@@ -695,7 +708,11 @@ cannot evict them. Enable Debug/Verbose console messages to see calculation
 summaries; copy the complete device-loss text when reporting a hang. Removal
 readiness also emits an Info-level `Replay stock ready` JSON summary for each
 new coarse/fine state, including elapsed retries, pitch and successful interval
-capacity, newly applied motion count and any reused occurrence. Cached seeks do not repeat this summary. Removal
+capacity, newly applied motion count and any reused occurrence. They also report
+stored/total tiles, submissions/rays, copy/compute time, request preparation time,
+history coverage/hits and checkpoint status. Request readiness excludes the first
+displayed frame and startup compilation (reported separately).
+Cached seeks do not repeat this summary. Removal
 progress explicitly labels GPU dexel versus CPU hybrid and includes any GPU
 fallback reason during CPU work. These records show pending work, not proof that
 a particular shader caused a driver reset. Cancellation and obsolete navigation are
@@ -710,16 +727,117 @@ reloaded; a lost WebGPU renderer cannot display CPU geometry either.
 Visited coarse states and recent fine states are retained within a 256 MiB
 combined CPU/GPU buffer estimate; storage attributes have both allocations.
 Each phase retains up to four recent states when memory permits. On an uncached
-seek, the closest retained earlier state at the same pitch is copied into a new
-GPU stock, then only newly executed motions are compiled and subtracted.
-Copying uses a separate bounded GPU kernel, with no stock readback or additional
-snapshot buffers. Displayed/source stock remains immutable; cancellation discards
+seek, the closest retained earlier state at the same pitch seeds a new
+GPU stock, then only newly executed motions are subtracted.
+Immutable unchanged tiles share physical interval/count slots in a fixed,
+reference-counted arena. Only changed tiles receive private slots and a bounded
+GPU copy; newly touched tiles initialize from exact original geometry. The stock's
+tile map also drives rendering, so shared tiles expose actual source material,
+not zero-filled destination buffers. Geometric replay uses conservative cutter
+tile bounds; history replay uses its exact requested event window.
+Each arena reserves at most four initial stored-tile sets, further limited by
+available budget and the 128 MiB binding limit. Its CPU/GPU allocations are counted
+once across resident stocks, including reserved free slots; arenas never resize
+or re-upload CPU zeros over GPU results. Subtraction still uses eight storage
+bindings. The shared-copy kernel binds each arena buffer only once read/write,
+avoiding invalid overlapping read/write WebGPU bindings.
+Exhausted arenas or different interval capacities use the existing independent
+copy path; coarse/fine grids never share slots. Shared writes are rejected, and
+slot/buffer release waits for active copy/compute operations to settle. Displayed/source stock remains immutable; cancellation discards
 the target, and the source is protected from eviction during preparation.
 Fine states never reuse coarse intervals. Exact cached seeks require no subtraction;
-non-cutting forward occurrences need only a copy. Initial final preparation,
-cold fine calculation and backward jumps without an earlier retained state still
-replay the selected prefix from original stock. This does not guarantee realtime
-cold jumps or a one-second final calculation.
+non-cutting forward occurrences can share all tiles without a GPU stock copy.
+
+The startup compiler retains unbatched, execution-aware sweeps once for both
+phases; tool models are shared within compilation by tool identity and executed Q.
+Cross-occurrence batching is not used for this path because it would lose exact
+intermediate removal timestamps. During cold calculation, an eighth storage
+binding records cutter intervals that actually change a ray. Parallel append
+output is sorted by ray and cutter/cut order, with exact execution-step ranks.
+Overlapping later removals do not erase the earlier history. Only covered prefixes
+at the same pitch may use this history.
+
+Capture has a bounded GPU staging buffer of at most 1,048,576 events. It is drained
+at cutter-pass boundaries before filling when possible; retained history is capped
+at 4,194,304 events and usually less by the shared 256 MiB estimate, including
+sorting/readback staging. A single overfull capture batch or exhausted retention
+budget explicitly disables that incomplete history without invalidating finished
+stock. It never publishes a truncated replay as complete.
+History ray indices are sparse too. Published stock releases cutter, error and
+capture buffers and becomes immutable, retaining only interval/count/display
+index buffers. This leaves more room for fine history and checkpoints.
+
+Covered fine history is selected immediately, without a coarse downgrade or idle
+refinement delay. Covered jumps restore original material or a retained earlier checkpoint and apply
+recorded removed intervals, without compiling or intersecting cutters again.
+The restoration kernel uses binary search to skip changes already represented by
+an earlier checkpoint. CPU range indexing also binary-searches each stored ray,
+dispatching only tiles with events between the source and target occurrences.
+Batch workload uses the actual maximum new event count per ray, not the 256-cutter
+pass cap. Selecting stored tiles uses precomputed first-removal ranks rather than
+scanning millions of events on every seek.
+For prefixes with at least 64 occurrences, at most three distributed
+checkpoints are prepared from history during initial preparation when memory
+permits; the final stock is pinned throughout. Checkpoint work does not reset user
+progress. Placement follows cumulative recorded removed-interval counts at
+1/16, 1/3 and 2/3 of removal work, not timeline thirds; the first position is
+capped at one eighth of the timeline to cover early backward jumps. Duplicate
+execution positions are merged. Eviction prefers ordinary recent frames, then
+later checkpoints, preserving early coverage where the four-state/budget limits
+allow it. Optional checkpoints stop on replay-budget exhaustion.
+Cancellation discards unpublished targets, never the displayed stock.
+Initial final preparation, cold fine calculation and jumps without covered history
+still require geometric replay. Covered jumps without an earlier retained stock
+restore original geometry and their history prefix.
+Readiness diagnostics include copied/shared tile counts. Reserving an arena may
+increase initial upload work; synchronous checkpoint preparation still delays
+initial readiness. No universal sub-second claim is made. Unit tests and generated
+WGSL validate ownership/bindings; the extended GPU equivalence fixture has not been
+executed because browser launch permission was denied.
+
+### GPU speed-up implementation and validation
+
+- **A -- forward stepping:** compact affected-tile dispatch, sparse GPU-only
+  copies, immutable source states and separate workload/timing counters. In-place
+  modification of displayed stock is intentionally avoided to preserve cancellation.
+- **B -- jumps:** execution-aware streamed removal history, sparse history indices,
+  same-pitch restoration and bounded checkpoints prepared with the initial stock.
+- **C -- calculations:** sparse fine storage guided by conservative toolpath bounds,
+  direct profile/linear-turning intersections and retained compiled cutters.
+  Refinement still selects the requested occurrence after idle; there is no mixed
+  coarse/fine camera-prioritized tile display.
+- **D -- overhead/reliability:** release calculation-only buffers after publication,
+  reuse compiled/tool data and retain queue backpressure and device-loss checks.
+  More outstanding GPU submissions are not enabled without watchdog measurements.
+- **E -- evidence:** unit regressions cover sparse work, exact prefixes, streamed
+  history, overflow, ownership, cancellation and independent intersection occupancy.
+  The browser harness compares sparse/history-restored intervals and pixels against
+  full replay at both pitches and reports allocation/restore/render queue readiness
+  against a 1,000 ms target. It is not a benchmark of the user's actual program.
+
+An Intel Gen-12LP user log on 2026-10-13 reported coarse history checkpoints ready
+in 158/171 ms and uncached coarse jumps ready in 286/363 ms, with zero cutter work.
+Full coarse compute plus history recording took 8.84 seconds (9.24 seconds request
+preparation including checkpoints), versus an earlier 7.12-second coarse compute.
+Nearly full fine compute was 33.84 seconds versus an earlier 52.48 seconds, but
+fine history exhausted its then-fixed capture capacity. Streamed capture and
+preparation-buffer release were added subsequently and require a new real-program
+measurement. These logs do not measure the first displayed frame, certify accuracy,
+or establish a universal sub-second jump/one-second final-part guarantee.
+
+A subsequent real-program log retained full fine history, but fine jumps still
+took 4.03--5.20 seconds because every historical tile was dispatched regardless
+of the requested delta. Full coarse/fine request preparation was 13.62/42.58
+seconds including checkpoint work. Requested-range tile/workload selection and
+compute-time render throttling were added after this log; no new hardware timing
+has yet verified their speed-up.
+
+The component integration suite runs the real CPU mesher at the default 0.05 mm
+pitch and has a scoped 60-second test timeout. Run the focused suite with
+`node node_modules/vitest/vitest.mjs run src/components/__tests__/NCToolpathPlot.test.ts --no-file-parallelism`.
+Other suites keep the default timeout. The extended GPU regression suite passed
+without a command-line timeout override; hardware sparse/history equivalence
+validation remains outstanding (the browser launch was declined).
 
 Cold coarse/fine stock starts with sixteen disjoint material intervals per ray;
 incremental targets start at their source's successful capacity.
@@ -738,9 +856,9 @@ per-storage-buffer cap is respected. Cutter compilation has a 32 MiB staging
 limit, and conservative cutter/index staging is preflighted before stock
 allocation. Fine allocation failures retain coarse
 stock and explicitly identify that the requested fine result is unavailable.
-Large stock requiring excessive uniform fine-ray storage must use a larger
-pitch or the CPU solver. Tiling currently provides spatial cutter culling,
-not out-of-core stock or independently adaptive per-tile resolutions.
+Large stock exceeding even sparse fine storage or projected tile metadata must use
+a larger pitch or the CPU solver. Tiling does not provide out-of-core stock or
+independently varying fine pitches within one state.
 
 All capacities share identical compute and display shader source: the active
 capacity/interval stride is a named uniform, while function-local scratch arrays

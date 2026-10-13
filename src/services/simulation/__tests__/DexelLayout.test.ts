@@ -6,11 +6,62 @@ import {
   DEXEL_MEMORY_BYTES,
   type DexelIntervalCapacity,
   indexDexelTiles,
+  dexelTilesForBounds,
+  originalDexelSpan,
   subtractDexelInterval,
 } from '../DexelLayout';
 import type { CompiledGpuSweep } from '../GpuSweepCompiler';
 
 describe('bounded tiled tri-dexel layout', () => {
+  it('reconstructs untouched box/cylinder rays consistently on all axes, including padded and empty rays', () => {
+    const layout = createDexelLayout(new THREE.Vector3(2, 2, 2), 0.1, 16, { bounds: [] });
+    expect(originalDexelSpan(layout, 0, false)).toEqual([-1, 1]);
+    expect(originalDexelSpan(layout, 1024, false)).toEqual([-1, 1]);
+    expect(originalDexelSpan(layout, 2048, false)).toEqual([-1, 1]);
+    const span = originalDexelSpan(layout, 0, true)!;
+    expect(span[0]).toBeCloseTo(-Math.sqrt(1 - 0.95 ** 2), 12);
+    expect(span[1]).toBeCloseTo(Math.sqrt(1 - 0.95 ** 2), 12);
+    expect(originalDexelSpan(layout, 2048, true)).toBeUndefined();
+    expect(originalDexelSpan(layout, 2048 + 9 + 9 * 32, true)).toEqual([-1, 1]);
+    expect(originalDexelSpan(layout, 31, false)).toBeUndefined();
+    expect(() => originalDexelSpan(layout, layout.rays, false)).toThrow(/Invalid GPU dexel ray/);
+  });
+  it('allocates intervals only for conservatively touched tiles without changing the fine ray grid', () => {
+    const size = new THREE.Vector3(20, 20, 20);
+    const bounds = new THREE.Box3(
+      new THREE.Vector3(-0.1, -0.1, -0.1),
+      new THREE.Vector3(0.1, 0.1, 0.1),
+    );
+    const dense = createDexelLayout(size, 0.02, 4);
+    const sparse = createDexelLayout(size, 0.02, 16, { bounds: [bounds] });
+    expect(sparse.dimensions.equals(dense.dimensions)).toBe(true);
+    expect(sparse.rays).toBe(dense.rays);
+    expect(sparse.storedTiles.length).toBeLessThan(dense.tiles / 100);
+    expect(sparse.intervalBytes).toBe(sparse.storageRays * 16 * 8);
+    expect(sparse.estimatedBytes).toBeLessThan(dense.estimatedBytes / 4);
+    expect([...sparse.storedTiles]).toEqual(
+      dexelTilesForBounds(sparse, bounds).sort((a, b) => a - b),
+    );
+    const extended = createDexelLayout(size, 0.02, 32, {
+      retainedTiles: sparse.storedTiles,
+      bounds: [new THREE.Box3(new THREE.Vector3(9, 9, 9), new THREE.Vector3(10, 10, 10))],
+    });
+    for (const tile of sparse.storedTiles) expect(extended.storedTiles).toContain(tile);
+  });
+  it('keeps untouched stock implicit but still bounds full ray metadata', () => {
+    const empty = createDexelLayout(new THREE.Vector3(20, 20, 20), 0.02, 64, { bounds: [] });
+    expect(empty.storageRays).toBe(0);
+    expect(empty.intervalBytes).toBe(64 * 8);
+    expect(() =>
+      createDexelLayout(new THREE.Vector3(100, 100, 100), 0.001, 16, { bounds: [] }),
+    ).toThrow(/metadata/);
+    expect(() =>
+      createDexelLayout(new THREE.Vector3(2, 2, 2), 0.1, 16, {
+        bounds: [],
+        retainedTiles: new Uint32Array([99]),
+      }),
+    ).toThrow(/Invalid retained GPU tile/);
+  });
   it.each([4, 8, 16, 32, 64] as DexelIntervalCapacity[])(
     'accounts for %i intervals without changing pitch or ray dimensions',
     (capacity) => {

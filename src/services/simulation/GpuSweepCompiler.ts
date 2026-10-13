@@ -29,6 +29,11 @@ export function usesAnalyticalFlatRayCuts(sweep: CompiledGpuSweep): boolean {
   );
 }
 
+export function usesAnalyticalProfileRayCuts(sweep: CompiledGpuSweep): boolean {
+  const d = sweep.data;
+  return (d[0] === 3 && d[31] !== 0) || (d[0] === 2 && d[4] === 0 && d[5] === 0 && d[6] === 0);
+}
+
 /**
  * Record layout (vec4 indices):
  * 0: kind (flat=1, ball=2, drill=3, rounded=4, turning=5), radius, length, corner
@@ -63,6 +68,7 @@ export function compileGpuSweeps(input: DeepReadonly<SimulationInput>): Compiled
   const spindleAxis = new THREE.Vector3(...input.binding.spindleAxis).transformDirection(
     workpieceToStock,
   );
+  const cutters = new WeakMap<object, Map<number | undefined, CuttingToolModel>>();
   return input.motions.map((motion, motionIndex) => {
     const fail = (message: string): never => {
       throw new SimulationCapabilityError(`GPU sweep ${motionIndex}: ${message}`);
@@ -99,7 +105,16 @@ export function compileGpuSweeps(input: DeepReadonly<SimulationInput>): Compiled
         );
     const start = poseMatrix(motion.start.position);
     const end = poseMatrix(motion.end.position);
-    const cutter = new CuttingToolModel(motion.tool, motion.executedQ);
+    let variants = cutters.get(motion.tool);
+    if (!variants) {
+      variants = new Map();
+      cutters.set(motion.tool, variants);
+    }
+    let cutter = variants.get(motion.executedQ);
+    if (!cutter) {
+      cutter = new CuttingToolModel(motion.tool, motion.executedQ);
+      variants.set(motion.executedQ, cutter);
+    }
     const data = new Float32Array(GPU_SWEEP_STRIDE);
     let bounds: THREE.Box3;
     if (motion.mode === 'turning') {
@@ -501,6 +516,85 @@ export function evaluateGpuSweepRayCuts(
       limits[0] + low * (limits[1] - limits[0]),
       limits[0] + high * (limits[1] - limits[0]),
     ]);
+  if (usesAnalyticalProfileRayCuts(sweep)) {
+    const p = new THREE.Vector3(
+      data[8] * first.x + data[9] * first.y + data[10] * first.z + data[11],
+      data[12] * first.x + data[13] * first.y + data[14] * first.z + data[15],
+      data[16] * first.x + data[17] * first.y + data[18] * first.z + data[19],
+    );
+    const d = new THREE.Vector3(
+      data[8] * travel.x + data[9] * travel.y + data[10] * travel.z,
+      data[12] * travel.x + data[13] * travel.y + data[14] * travel.z,
+      data[16] * travel.x + data[17] * travel.y + data[18] * travel.z,
+    );
+    const allowance = epsilon * data[30];
+    if (
+      [...p.toArray(), ...d.toArray(), allowance].some(
+        (x) => !Number.isFinite(x) || Math.abs(x) >= 1e14,
+      )
+    )
+      return 99;
+    const low = data[0] === 3 ? Math.min(0, data[6]) : 0;
+    p.z -= low;
+    const top = data[2] + (data[0] === 3 ? Math.max(0, data[6]) - low : 0);
+    const roots = [0, 1];
+    const radius = data[1] + allowance;
+    const radial = [d.x ** 2 + d.y ** 2, 2 * (p.x * d.x + p.y * d.y), p.x ** 2 + p.y ** 2] as const;
+    quadratic(radial[0], radial[1], radial[2] - radius ** 2, (t) => {
+      if (t > 0 && t < 1) roots.push(t);
+    });
+    if (d.z) {
+      for (const z of [-allowance, top + allowance, data[1]]) {
+        const t = (z - p.z) / d.z;
+        if (t > 0 && t < 1) roots.push(t);
+      }
+    }
+    if (data[0] === 3) {
+      const q = p.z * data[29] + allowance,
+        slope = d.z * data[29],
+        c = data[7] ** 2;
+      quadratic(
+        c * radial[0] - slope ** 2,
+        c * radial[1] - 2 * q * slope,
+        c * radial[2] - q ** 2,
+        (t) => {
+          if (t > 0 && t < 1) roots.push(t);
+        },
+      );
+    } else {
+      const centered = p.clone();
+      centered.z -= data[1];
+      quadratic(d.lengthSq(), 2 * centered.dot(d), centered.lengthSq() - radius ** 2, (t) => {
+        if (t > 0 && t < 1) roots.push(t);
+      });
+    }
+    roots.sort((a, b) => a - b);
+    const inside = (t: number) => {
+      const x = p.x + d.x * t,
+        y = p.y + d.y * t,
+        z = p.z + d.z * t;
+      const r = Math.hypot(x, y);
+      return (
+        z <= top + allowance &&
+        (data[0] === 3
+          ? z >= -allowance && r <= radius && r * data[7] <= z * data[29] + allowance
+          : Math.hypot(r, Math.min(z - data[1], 0)) <= radius)
+      );
+    };
+    let entry = 1,
+      exit = 0;
+    for (let i = 0; i < roots.length; i++) {
+      if (inside(roots[i])) {
+        entry = Math.min(entry, roots[i]);
+        exit = Math.max(exit, roots[i]);
+      }
+      if (i && inside((roots[i - 1] + roots[i]) / 2)) {
+        entry = Math.min(entry, roots[i - 1]);
+        exit = Math.max(exit, roots[i]);
+      }
+    }
+    return entry <= exit ? convert([[entry, exit]]) : [];
+  }
   if (usesAnalyticalFlatRayCuts(sweep)) {
     const p = new THREE.Vector3(
       data[8] * first.x + data[9] * first.y + data[10] * first.z + data[11],
@@ -732,6 +826,21 @@ export function evaluateGpuSweepRayCuts(
       const c = data[offset + 2] - epsilon * Math.max(1, Math.hypot(a, b));
       const q0 = b * z0 + c,
         qd = b * zd;
+      if (a === 0 || A === 0) {
+        const value = q0 + a * Math.sqrt(C);
+        if (qd === 0) {
+          if (value > 0) intervals = [];
+        } else {
+          const root = -value / qd;
+          intervals = intervals
+            .map(([lo, hi]): [number, number] =>
+              qd > 0 ? [lo, Math.min(hi, root)] : [Math.max(lo, root), hi],
+            )
+            .filter(([lo, hi]) => lo <= hi);
+        }
+        if (!intervals.length) break;
+        continue;
+      }
       const breaks = [0, 1];
       const root = (t: number) => {
         if (t > 0 && t < 1 && Number.isFinite(t)) breaks.push(t);
@@ -977,6 +1086,72 @@ fn gpuFlatRayCuts(first: vec3f, travel: vec3f, limits: vec2f, base: u32, epsilon
   return 1u;
 }
 
+fn gpuProfileInside(p: vec3f, shape: vec4f, angle: vec2f, allowance: f32, top: f32) -> bool {
+  if (p.z > top + allowance) { return false; }
+  let radius = shape.y + allowance;
+  let radial = length(p.xy);
+  if (shape.x == 3.0) {
+    return p.z >= -allowance && radial <= radius && radial * angle.x <= p.z * angle.y + allowance;
+  }
+  return length(vec2f(radial, min(p.z - shape.y, 0.0))) <= radius;
+}
+
+fn gpuProfileRayCuts(first: vec3f, travel: vec3f, limits: vec2f, base: u32, epsilon: f32,
+                     cuts: ptr<function, array<vec2f, 4>>) -> u32 {
+  let shape = dexelRecords.value[base]; let motion = dexelRecords.value[base + 1u];
+  let info = dexelRecords.value[base + 7u]; let angle = vec2f(motion.w, info.y);
+  let h = vec4f(first, 1.0); let vector = vec4f(travel, 0.0);
+  var p = vec3f(dot(dexelRecords.value[base + 2u], h), dot(dexelRecords.value[base + 3u], h), dot(dexelRecords.value[base + 4u], h));
+  let d = vec3f(dot(dexelRecords.value[base + 2u], vector), dot(dexelRecords.value[base + 3u], vector), dot(dexelRecords.value[base + 4u], vector));
+  let allowance = epsilon * info.z;
+  let low = select(0.0, min(0.0, motion.z), shape.x == 3.0);
+  p.z -= low;
+  let top = shape.z + select(0.0, max(0.0, motion.z) - low, shape.x == 3.0);
+  let radius = shape.y + allowance;
+  if (!all(abs(p) < vec3f(1e14)) || !all(abs(d) < vec3f(1e14)) ||
+      !all(abs(vec3f(top, radius, allowance)) < vec3f(1e14))) { return 99u; }
+  var roots: array<f32, 10>; roots[0] = 0.0; roots[1] = 1.0; var count = 2u;
+  var extra: array<f32, 5>;
+  let radial = vec3f(dot(d.xy, d.xy), 2.0 * dot(p.xy, d.xy), dot(p.xy, p.xy));
+  var extraCount = gpuRayQuadratic(radial - vec3f(0.0, 0.0, radius * radius), &extra, 0u);
+  for (var i = 0u; i < extraCount; i++) { roots[count] = extra[i]; count++; }
+  count = gpuFlatBreakpoint(vec2f(p.z + allowance, d.z), &roots, count);
+  count = gpuFlatBreakpoint(vec2f(p.z - top - allowance, d.z), &roots, count);
+  count = gpuFlatBreakpoint(vec2f(p.z - shape.y, d.z), &roots, count);
+  var coeff: vec3f;
+  if (shape.x == 3.0) {
+    let q = p.z * angle.y + allowance; let slope = d.z * angle.y;
+    coeff = angle.x * angle.x * radial - vec3f(slope * slope, 2.0 * q * slope, q * q);
+  } else {
+    let centered = p - vec3f(0.0, 0.0, shape.y);
+    coeff = vec3f(dot(d, d), 2.0 * dot(centered, d), dot(centered, centered) - radius * radius);
+  }
+  extraCount = gpuRayQuadratic(coeff, &extra, 0u);
+  for (var i = 0u; i < extraCount; i++) { roots[count] = extra[i]; count++; }
+  for (var i = 1u; i < count; i++) {
+    var j = i;
+    loop {
+      if (j == 0u) { break; }
+      if (roots[j - 1u] <= roots[j]) { break; }
+      let saved = roots[j - 1u]; roots[j - 1u] = roots[j]; roots[j] = saved; j--;
+    }
+  }
+  var entry = 1.0; var exit = 0.0;
+  for (var i = 0u; i < count; i++) {
+    if (gpuProfileInside(p + roots[i] * d, shape, angle, allowance, top)) {
+      entry = min(entry, roots[i]); exit = max(exit, roots[i]);
+    }
+    if (i > 0u) {
+      if (gpuProfileInside(p + ((roots[i - 1u] + roots[i]) * 0.5) * d, shape, angle, allowance, top)) {
+        entry = min(entry, roots[i - 1u]); exit = max(exit, roots[i]);
+      }
+    }
+  }
+  if (entry > exit) { return 0u; }
+  (*cuts)[0] = vec2f(limits.x) + vec2f(entry, exit) * (limits.y - limits.x);
+  return 1u;
+}
+
 fn gpuSweepRayCuts(origin:vec3f,direction:vec3f,limits:vec2f,sweep:u32,cuts:ptr<function,array<vec2f,4>>) -> u32 {
   if (!all(abs(origin) < vec3f(1e29)) || !all(abs(direction) < vec3f(1e29)) ||
       !all(abs(limits) < vec2f(1e29)) || dot(direction,direction) == 0.0 || limits.x > limits.y ||
@@ -994,6 +1169,10 @@ fn gpuSweepRayCuts(origin:vec3f,direction:vec3f,limits:vec2f,sweep:u32,cuts:ptr<
   let coordinates = max(abs(first),abs(finish));
   let epsilon = 1e-6 * max(max(1.0,max(shape.y,shape.z)),max(length(travel),max(coordinates.x,max(coordinates.y,coordinates.z))));
   let motion = dexelRecords.value[base + 1u];
+  if ((shape.x == 3.0 && sweepInfo.w != 0.0) ||
+      (shape.x == 2.0 && all(motion.xyz == vec3f(0.0)))) {
+    return gpuProfileRayCuts(first, travel, limits, base, epsilon, cuts);
+  }
   if (shape.x == 1.0 && (sweepInfo.w != 0.0 || motion.z == 0.0 ||
       (dot(motion.xy, motion.xy) >= 1e-8 && abs(motion.z) >= 1e-4 * max(1.0, length(motion.xyz))))) {
     return gpuFlatRayCuts(first, travel, limits, base, epsilon, cuts);
@@ -1072,6 +1251,23 @@ fn gpuSweepRayCuts(origin:vec3f,direction:vec3f,limits:vec2f,sweep:u32,cuts:ptr<
       let a = radialSign*plane.x;
       let q0 = plane.y*z0+plane.z-epsilon*max(1.0,length(plane.xy));
       let qd = plane.y*zd;
+      if (a == 0.0 || A == 0.0) {
+        let value = q0 + a * sqrt(C);
+        if (qd == 0.0) {
+          if (value > 0.0) { intervalCount = 0u; }
+        } else {
+          let root = -value / qd; var nextCount = 0u;
+          for (var i = 0u; i < intervalCount; i++) {
+            var clipped = intervals[i];
+            if (qd > 0.0) { clipped.y = min(clipped.y, root); }
+            else { clipped.x = max(clipped.x, root); }
+            if (clipped.x <= clipped.y) { intervals[nextCount] = clipped; nextCount++; }
+          }
+          intervalCount = nextCount;
+        }
+        if (intervalCount == 0u) { break; }
+        continue;
+      }
       var roots: array<f32,5>;
       roots[0]=0.0;
       roots[1]=1.0;

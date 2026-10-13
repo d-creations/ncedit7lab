@@ -84,6 +84,7 @@ export class NCToolpathPlot extends HTMLElement {
   private removalGeneration = 0;
   private removalPreparation?: DeepReadonly<MaterialRemovalPreparation>;
   private materialReplay?: MaterialReplaySession | GpuMaterialReplaySession;
+  private lastGpuRenderMs = -Infinity;
   private replayTimeline?: PlotReplayTimeline;
   private replayPosition = 0;
   private replayRequestedPosition = 0;
@@ -732,7 +733,11 @@ export class NCToolpathPlot extends HTMLElement {
       const occurrence = this.replayTimeline?.occurrences[frame.position - 1];
       const stopped = frame.stop ? ` Stopped before unsupported step ${frame.stop.executionStep ?? '?'}: ${frame.stop.message}.` : '';
       const reuse = frame.reusedPosition !== undefined ? ` GPU stock copied from occurrence ${frame.reusedPosition}; ${frame.newMotions} new cutting motions.` : '';
-      const text = `GPU tri-dexel ${frame.phase}: ${frame.pitchMm} mm ray pitch, ${frame.position}/${frame.total}, line ${occurrence?.lineNumber ?? '?'}; ${frame.processedMotions} completed cutting motions; ${frame.cacheHit ? 'cached GPU state' : `${frame.elapsedMs.toFixed(0)} ms compute/readiness`}; ${(frame.estimatedBytes / 1048576).toFixed(1)} MiB estimated CPU/GPU buffers; ${frame.stock.layout.intervalCapacity} interval capacity per ray.${reuse}${stopped} Sampling pitch is not a certified surface tolerance. Magenta pixels indicate a display traversal limit; increase pitch. Feed cutting is assumed; spindle operation is not verified.`;
+      const history = frame.historyHit ? ' Recorded removal changes restored; no cutter intersections.' : '';
+      const coverage = frame.historyThrough !== undefined ? ` Replay history prepared through occurrence ${frame.historyThrough}.` : '';
+      const unavailable = frame.historyUnavailable ? ` ${frame.historyUnavailable}` : '';
+      const tiles = ` ${frame.stock.layout.storedTiles.length}/${frame.stock.layout.tiles} tiles store material intervals.`;
+      const text = `GPU tri-dexel ${frame.phase}: ${frame.pitchMm} mm ray pitch, ${frame.position}/${frame.total}, line ${occurrence?.lineNumber ?? '?'}; ${frame.processedMotions} completed cutting motions; ${frame.cacheHit ? 'cached GPU state' : `${frame.elapsedMs.toFixed(0)} ms compute/readiness, ${(frame.readinessMs ?? frame.elapsedMs).toFixed(0)} ms request preparation`}; ${(frame.estimatedBytes / 1048576).toFixed(1)} MiB estimated CPU/GPU buffers; ${frame.stock.layout.intervalCapacity} interval capacity per ray.${tiles}${reuse}${history}${coverage}${unavailable}${stopped} Sampling pitch is not a certified surface tolerance. Magenta pixels indicate a display traversal limit; increase pitch. Feed cutting is assumed; spindle operation is not verified.`;
       this.replayStatus(text);
       const status = this.shadowRoot?.getElementById('material-removal-status');
       if (status) { status.hidden = false; status.textContent = text; }
@@ -1546,6 +1551,10 @@ export class NCToolpathPlot extends HTMLElement {
       return;
     }
     if (this.gpuRenderPending || document.hidden) return;
+    const now = performance.now();
+    if (this.materialReplay instanceof GpuMaterialReplaySession &&
+      this.materialReplay.computing && now - this.lastGpuRenderMs < 100) return;
+    this.lastGpuRenderMs = now;
     const device = this.gpuDevice;
     this.gpuRenderPending = true;
     const started = performance.now();

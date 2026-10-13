@@ -3,14 +3,17 @@ import type { WebGPURenderer } from 'three/webgpu';
 import type { DeepReadonly } from '../tools/SimulationMetadata';
 import { compileGpuSweeps, GPU_SWEEP_STRIDE, type CompiledGpuSweep } from './GpuSweepCompiler';
 import { recordGpuDiagnostic } from './GpuDiagnostics';
-import { batchRemovalMotions } from './MaterialRemovalEngine';
+import { GpuDexelHistory } from './GpuDexelHistory';
 import { GpuDexelStock } from './GpuDexelStock';
 import {
   createDexelLayout,
   DEXEL_MEMORY_BYTES,
+  DEXEL_BINDING_BYTES,
   DEXEL_INTERVALS,
   DEXEL_MAX_INTERVALS,
   GpuDexelIntervalOverflowError,
+  indexDexelTiles,
+  dexelTilesForBounds,
   type DexelIntervalCapacity,
 } from './DexelLayout';
 import { materialSize, stockPlacement } from './SimulationTransforms';
@@ -19,6 +22,8 @@ import {
   type RemovalStop,
   type SimulationInput,
 } from './SimulationTypes';
+
+class GpuReplayBudgetError extends SimulationCapabilityError {}
 
 export interface GpuReplayFrame {
   backend: 'webgpu-dexel';
@@ -36,6 +41,11 @@ export interface GpuReplayFrame {
   estimatedBytes: number;
   cacheHit: boolean;
   stock: GpuDexelStock;
+  historyHit?: boolean;
+  historyThrough?: number;
+  historyUnavailable?: string;
+  preparationMs?: number;
+  readinessMs?: number;
 }
 
 export interface GpuReplayOptions {
@@ -67,6 +77,13 @@ export class GpuMaterialReplaySession {
   private readonly fine = new Map<number, GpuDexelStock>();
   private readonly owned = new Set<GpuDexelStock>();
   private initialSweeps?: { position: number; sweeps: CompiledGpuSweep[] };
+  private compiledSweeps: CompiledGpuSweep[] = [];
+  private readonly histories = new Map<
+    'coarse' | 'fine',
+    { history: GpuDexelHistory; through: number }
+  >();
+  private readonly pinned = new Set<GpuDexelStock>();
+  private readonly checkpointStocks = new Set<GpuDexelStock>();
   private progress: (processed: number, total: number) => void = () => {};
 
   constructor(
@@ -89,6 +106,10 @@ export class GpuMaterialReplaySession {
         'GPU fine pitch must be between 0.001 and 5 mm and the idle delay must be nonnegative',
       );
     }
+  }
+
+  get computing(): boolean {
+    return this.running && !this.cancelled;
   }
 
   start(
@@ -133,14 +154,12 @@ export class GpuMaterialReplaySession {
           'GPU cutter compilation exceeds its 32 MiB staging budget; use CPU simulation',
         );
       const preparationStarted = performance.now();
+      this.compiledSweeps = compileGpuSweeps(input);
       if (prepareFinal && !input.stop) {
-        const merged = batchRemovalMotions(input.motions).map((batch) => batch.motion);
         this.initialSweeps = {
           position: steps.length,
-          sweeps: compileGpuSweeps({ ...input, motions: merged }),
+          sweeps: this.compiledSweeps,
         };
-      } else {
-        compileGpuSweeps(input);
       }
       recordGpuDiagnostic(this.device, 'replay-preparation', {
         motions: input.motions.length,
@@ -150,6 +169,8 @@ export class GpuMaterialReplaySession {
       createDexelLayout(
         new THREE.Vector3(...materialSize(input.stock)),
         Math.max(0.1, this.options.finePitchMm),
+        DEXEL_INTERVALS,
+        { bounds: this.compiledSweeps.map((sweep) => sweep.bounds) },
       );
       return this.seek(prepareFinal ? steps.length : 0);
     } catch (error) {
@@ -185,7 +206,9 @@ export class GpuMaterialReplaySession {
     const epoch = this.epoch;
     try {
       const target = Math.min(pending.position, this.safePosition);
-      const frame = await this.frame(pending.position, this.fine.has(target) ? 'fine' : 'coarse');
+      const preparedFine =
+        this.fine.has(target) || (this.histories.get('fine')?.through ?? -1) >= target;
+      const frame = await this.frame(pending.position, preparedFine ? 'fine' : 'coarse');
       if (this.cancelled || epoch !== this.epoch)
         throw new DOMException('GPU replay seek superseded', 'AbortError');
       pending.resolve(frame);
@@ -234,7 +257,9 @@ export class GpuMaterialReplaySession {
   private async frame(
     requestedPosition: number,
     phase: 'coarse' | 'fine',
+    checkpoint = false,
   ): Promise<GpuReplayFrame> {
+    const readinessStarted = performance.now();
     const input = this.input!;
     const position = Math.min(requestedPosition, this.safePosition);
     const step = position ? this.steps[position - 1] : -1;
@@ -247,6 +272,11 @@ export class GpuMaterialReplaySession {
     const cacheHit = !!stock;
     let newMotions = 0;
     let reusedPosition: number | undefined;
+    let preparationMs = 0;
+    const retainedHistory = this.histories.get(phase);
+    const history =
+      retainedHistory && position <= retainedHistory.through ? retainedHistory.history : undefined;
+    let capturedHistory = false;
     if (!stock) {
       let source: GpuDexelStock | undefined;
       for (const [candidatePosition, candidate] of cache) {
@@ -263,19 +293,20 @@ export class GpuMaterialReplaySession {
       const motions = input.motions.filter(
         (motion) => motion.executionStep <= step && (!source || motion.executionStep > sourceStep),
       );
-      newMotions = motions.length;
+      newMotions = history ? 0 : motions.length;
       const preparationStarted = performance.now();
       const prepared =
         !source && this.initialSweeps?.position === position
           ? this.initialSweeps.sweeps
           : undefined;
       this.initialSweeps = undefined;
-      const sweeps =
-        prepared ??
-        compileGpuSweeps({
-          ...input,
-          motions: batchRemovalMotions(motions).map((batch) => batch.motion),
-        });
+      const sweeps = history
+        ? []
+        : (prepared ??
+          this.compiledSweeps.filter(
+            (sweep) => sweep.executionStep <= step && (!source || sweep.executionStep > sourceStep),
+          ));
+      preparationMs = performance.now() - preparationStarted;
       recordGpuDiagnostic(this.device, 'frame-preparation', {
         position,
         phase,
@@ -295,11 +326,77 @@ export class GpuMaterialReplaySession {
         retry = false;
         if (this.cancelled || calculationEpoch !== this.epoch)
           throw new DOMException('GPU replay cancelled', 'AbortError');
-        const layout = createDexelLayout(size, pitch, intervalCapacity);
-        const indexEntries = Math.max(1, layout.tiles * sweeps.length);
-        const staging = layout.tiles * 96 + indexEntries * 16;
+        const retainedTiles = history
+          ? Uint32Array.from(
+              new Set([...history.tiles(step), ...(source?.layout.storedTiles ?? [])]),
+            )
+          : source?.layout.storedTiles;
+        const layout = createDexelLayout(size, pitch, intervalCapacity, {
+          bounds: sweeps.map((sweep) => sweep.bounds),
+          retainedTiles,
+        });
+        const index = indexDexelTiles(layout, sweeps);
+        const staging = layout.tiles * 96 + index.sweeps.length * 16;
         const records = sweeps.length * (GPU_SWEEP_STRIDE * 12 + 320);
-        this.makeRoom(layout.estimatedBytes + staging + records + 4096, source);
+        const changedTiles = history
+          ? Uint32Array.from(
+              history.work(source ? sourceStep : -1, step).reduce<number[]>((tiles, count, i) => {
+                if (i % 2 && count) tiles.push(Math.floor(i / 2));
+                return tiles;
+              }, []),
+            )
+          : Uint32Array.from(
+              new Set(sweeps.flatMap((sweep) => dexelTilesForBounds(layout, sweep.bounds))),
+            );
+        const arenaProvider =
+          source?.layout.intervalCapacity === intervalCapacity
+            ? source
+            : [...cache.values()].find(
+                (candidate) => candidate.layout.intervalCapacity === intervalCapacity,
+              );
+        const privateTiles =
+          source?.layout.intervalCapacity === intervalCapacity
+            ? new Set([
+                ...changedTiles,
+                ...layout.storedTiles.filter((tile) => source.tileSlots[tile] === 0xffffffff),
+              ]).size
+            : layout.storedTiles.length;
+        const arena =
+          arenaProvider?.tileArena && arenaProvider.tileArena.available >= privateTiles
+            ? arenaProvider.tileArena
+            : undefined;
+        const baseBytes =
+          layout.estimatedBytes +
+          staging +
+          records +
+          4096 -
+          (arena ? 2 * (layout.intervalBytes + Math.max(1, layout.storageRays) * 4) : 0);
+        this.makeRoom(baseBytes, source ?? (arena ? arenaProvider : undefined));
+        const capture = !history && (!source || reusedPosition === 0) && motionCount > 0;
+        const tileBytes = 2 * 1024 * (intervalCapacity * 8 + 4) + 12;
+        const spare = Math.max(0, DEXEL_MEMORY_BYTES - this.residentBytes() - baseBytes);
+        // Reserve a bounded atlas, leaving most spare memory for streamed history.
+        const arenaTiles = !arena
+          ? Math.min(
+              layout.storedTiles.length * 4,
+              layout.storedTiles.length + Math.floor(spare / 3 / tileBytes),
+              Math.floor(DEXEL_BINDING_BYTES / (1024 * intervalCapacity * 8)),
+            )
+          : layout.storedTiles.length;
+        const arenaExtra = !arena ? (arenaTiles - layout.storedTiles.length) * tileBytes : 0;
+        const available = spare - arenaExtra;
+        // Reserve capture, sorted upload, ray index and temporary sorting/readback storage together.
+        const historyLimit = capture
+          ? Math.max(
+              0,
+              Math.min(
+                4194304,
+                index.sweeps.length * 4096,
+                Math.floor((available - layout.storageRays * 24 - layout.tiles * 24) / 96),
+              ),
+            )
+          : 0;
+        const historyEvents = Math.min(1048576, historyLimit);
         stock = new GpuDexelStock(
           this.renderer,
           this.device,
@@ -309,21 +406,57 @@ export class GpuMaterialReplaySession {
           sweeps,
           stockPlacement(input.stock, input.binding),
           intervalCapacity,
+          {
+            retainedTiles,
+            historyEvents,
+            historyLimit,
+            source,
+            arena,
+            arenaTiles,
+            changedTiles,
+          },
         );
         const attemptStarted = performance.now();
         try {
-          this.makeRoom(stock.estimatedBytes, source);
           this.owned.add(stock);
+          this.pinned.add(stock);
+          try {
+            this.makeRoom(0, source);
+          } finally {
+            this.pinned.delete(stock);
+          }
           const cancelled = () => this.cancelled || calculationEpoch !== this.epoch;
-          this.progress(motionCount - newMotions, motionCount);
+          if (!checkpoint) this.progress(motionCount - newMotions, motionCount);
           const copyMs = source ? await stock.copyFrom(source, cancelled) : 0;
-          const computeMs =
-            sweeps.length || !source ? await stock.calculate(sweeps.length, cancelled) : 0;
+          const computeMs = history
+            ? await stock.restoreHistory(history, step, cancelled, source ? sourceStep : -1)
+            : sweeps.length || !source
+              ? await stock.calculate(sweeps.length, cancelled)
+              : 0;
           elapsedMs += copyMs + computeMs;
           if (this.cancelled || calculationEpoch !== this.epoch)
             throw new DOMException('GPU replay cancelled', 'AbortError');
-          this.progress(motionCount, motionCount);
+          if (!checkpoint) this.progress(motionCount, motionCount);
           cache.set(position, stock);
+          if (checkpoint) this.checkpointStocks.add(stock);
+          const recorded = stock.takeHistory();
+          stock.releasePreparation();
+          if (recorded) {
+            if (this.residentBytes() + recorded.estimatedBytes <= DEXEL_MEMORY_BYTES) {
+              this.histories.get(phase)?.history.dispose();
+              this.histories.set(phase, { history: recorded, through: position });
+              capturedHistory = true;
+            } else {
+              recorded.dispose();
+              stock.historyUnavailable =
+                'Removal history exceeds the replay memory budget; uncached jumps use geometric replay.';
+              console.warn('[NC-Edit7 GPU] ' + stock.historyUnavailable);
+            }
+          } else if (capture && !historyEvents) {
+            stock.historyUnavailable =
+              'No memory available for removal history; uncached jumps use geometric replay.';
+            console.warn('[NC-Edit7 GPU] ' + stock.historyUnavailable);
+          }
           stock.group.userData.releaseGpuStock = () => {
             if (this.cancelled) {
               cache.delete(position);
@@ -367,6 +500,29 @@ export class GpuMaterialReplaySession {
       cache.delete(position);
       cache.set(position, stock);
     }
+    if (capturedHistory && position >= 64) {
+      this.pinned.add(stock);
+      try {
+        for (const checkpoint of this.histories
+          .get(phase)!
+          .history.checkpointPositions(this.steps, position)) {
+          if (cache.has(checkpoint)) continue;
+          if (
+            this.residentBytes() + stock.estimatedBytes - (stock.tileArena?.estimatedBytes ?? 0) >
+            DEXEL_MEMORY_BYTES
+          )
+            break;
+          try {
+            await this.frame(checkpoint, phase, true);
+          } catch (error) {
+            if (!(error instanceof GpuReplayBudgetError)) throw error;
+            break;
+          }
+        }
+      } finally {
+        this.pinned.delete(stock);
+      }
+    }
     if (!cacheHit)
       console.info(
         '[NC-Edit7 GPU] Replay stock ready ' +
@@ -377,10 +533,25 @@ export class GpuMaterialReplaySession {
             pitchMm: pitch,
             intervalCapacity: stock.layout.intervalCapacity,
             analyticalFlatSweeps: stock.analyticalFlatSweeps,
+            analyticalProfileSweeps: stock.analyticalProfileSweeps,
+            checkpoint,
             motions: motionCount,
             newMotions,
             reusedPosition,
             elapsedMs: Math.round(elapsedMs),
+            preparationMs: Math.round(preparationMs),
+            readinessMs: Math.round(performance.now() - readinessStarted),
+            historyHit: !!history && !cacheHit,
+            historyThrough: this.histories.get(phase)?.through,
+            historyUnavailable: stock.historyUnavailable,
+            storedTiles: stock.layout.storedTiles.length,
+            totalTiles: stock.layout.tiles,
+            copyMs: Math.round(stock.timings?.copyMs ?? 0),
+            copiedTiles: stock.timings?.copiedTiles ?? 0,
+            sharedTiles: stock.timings?.sharedTiles ?? 0,
+            computeMs: Math.round(stock.timings?.computeMs ?? 0),
+            submittedRays: stock.timings?.submittedRays ?? 0,
+            submissions: stock.timings?.submissions ?? 0,
             estimatedMiB: Math.round(stock.estimatedBytes / 1048576),
           }),
       );
@@ -402,30 +573,37 @@ export class GpuMaterialReplaySession {
       elapsedMs,
       cacheHit,
       stock,
-      estimatedBytes: [...this.owned].reduce(
-        (sum, entry) => sum + entry.estimatedBytes,
-        this.options.residentBytes ?? 0,
-      ),
+      historyHit: !!history && !cacheHit,
+      historyThrough: this.histories.get(phase)?.through,
+      historyUnavailable: stock.historyUnavailable,
+      preparationMs,
+      readinessMs: performance.now() - readinessStarted,
+      estimatedBytes: this.residentBytes(),
     };
   }
 
   private makeRoom(extra: number, protectedStock?: GpuDexelStock): void {
-    let bytes = [...this.owned].reduce(
-      (sum, stock) => sum + stock.estimatedBytes,
-      this.options.residentBytes ?? 0,
-    );
+    let bytes = this.residentBytes();
     for (const cache of [this.fine, this.coarse]) {
-      for (const [position, stock] of cache) {
+      const candidates = [...cache].sort(([aPosition, a], [bPosition, b]) => {
+        const aCheckpoint = this.checkpointStocks.has(a),
+          bCheckpoint = this.checkpointStocks.has(b);
+        return (
+          Number(aCheckpoint) - Number(bCheckpoint) || (aCheckpoint ? bPosition - aPosition : 0)
+        );
+      });
+      for (const [position, stock] of candidates) {
         if (bytes + extra <= DEXEL_MEMORY_BYTES && cache.size < 4) break;
-        if (stock.group.parent || stock === protectedStock) continue;
+        if (stock.group.parent || stock === protectedStock || this.pinned.has(stock)) continue;
         cache.delete(position);
         this.owned.delete(stock);
-        bytes -= stock.estimatedBytes;
+        this.checkpointStocks.delete(stock);
         stock.dispose();
+        bytes = this.residentBytes();
       }
     }
     if (bytes + extra > DEXEL_MEMORY_BYTES)
-      throw new SimulationCapabilityError(
+      throw new GpuReplayBudgetError(
         'GPU replay/refinement cannot coexist with displayed stock within the 256 MiB CPU/GPU buffer estimate. Coarse stock is retained; choose a larger fine pitch.',
       );
   }
@@ -441,6 +619,19 @@ export class GpuMaterialReplaySession {
     if (!this.running) this.releaseUnattached();
   }
 
+  private residentBytes(): number {
+    const arenas = new Set([...this.owned].map((stock) => stock.tileArena).filter(Boolean));
+    return (
+      [...this.owned].reduce(
+        (sum, stock) => sum + stock.estimatedBytes - (stock.tileArena?.estimatedBytes ?? 0),
+        this.options.residentBytes ?? 0,
+      ) +
+      [...arenas].reduce((sum, arena) => sum + arena.estimatedBytes, 0) +
+      [...this.histories.values()].reduce((sum, entry) => sum + entry.history.estimatedBytes, 0) +
+      this.compiledSweeps.reduce((sum, sweep) => sum + sweep.data.byteLength + 256, 0)
+    );
+  }
+
   private releaseUnattached(): void {
     for (const stock of this.owned)
       if (!stock.group.parent) {
@@ -449,5 +640,9 @@ export class GpuMaterialReplaySession {
       }
     this.coarse.clear();
     this.fine.clear();
+    this.checkpointStocks.clear();
+    for (const entry of this.histories.values()) entry.history.dispose();
+    this.histories.clear();
+    this.compiledSweeps = [];
   }
 }

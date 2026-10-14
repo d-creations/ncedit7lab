@@ -1,7 +1,7 @@
 import type { WebGLRenderer } from 'three';
 import { WebGPURenderer } from 'three/webgpu';
 import type { DeepReadonly } from '@services/tools/SimulationMetadata';
-import type { SimulationInput } from '../shared/SimulationTypes';
+import { SimulationCapabilityError, type SimulationInput } from '../shared/SimulationTypes';
 import {
   MaterialReplaySession,
   type ReplayWorker,
@@ -41,7 +41,14 @@ export function createReplayStrategy(options: ReplayStrategyOptions): MaterialRe
   let steps: readonly number[] = [];
   const current = () => !cancelled && options.isCurrent(strategy);
   const fallback = (error: unknown, operation: 'start' | 'seek', token: number) => {
-    if (selected.backend !== 'webgpu-dexel' || isAbort(error) || !current() || token !== request)
+    if (
+      selected.backend !== 'hybrid-turning' ||
+      isAbort(error) ||
+      !(error instanceof SimulationCapabilityError) ||
+      (input && options.finePitchMm < input.resolutionMm) ||
+      !current() ||
+      token !== request
+    )
       throw error;
     const reason =
       error instanceof Error
@@ -67,6 +74,14 @@ export function createReplayStrategy(options: ReplayStrategyOptions): MaterialRe
       if (cancelled) throw new DOMException('Material replay cancelled', 'AbortError');
       input = captured;
       steps = [...timeline];
+      if (
+        options.gpuEnabled &&
+        selected.backend === 'cpu-hybrid' &&
+        options.finePitchMm < captured.resolutionMm
+      )
+        throw new SimulationCapabilityError(
+          `Requested ${options.finePitchMm} mm detail cannot use the ${captured.resolutionMm} mm CPU fallback; requested detail is not reduced`,
+        );
       const token = ++request;
       try {
         return await selected.start(captured, steps, progress, prepareFinal);

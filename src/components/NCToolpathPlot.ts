@@ -361,12 +361,12 @@ export class NCToolpathPlot extends HTMLElement {
         if (generation !== this.removalGeneration || !status) return;
         this.updateSimulationProgress(processed, total);
         status.hidden = true;
-        const backend = this.materialReplay?.backend === 'webgpu-dexel' ? 'GPU dexel' : 'CPU hybrid';
+        const backend = this.materialReplay?.backend === 'hybrid-turning' ? 'hybrid turning / GPU dexel' : 'CPU hybrid';
         status.textContent = `Geometric removal (${backend}): ${processed}/${total} motions.${this.gpuFallbackReason ? ` GPU unavailable: ${this.gpuFallbackReason}. Using CPU simulation.` : ''} Feed cutting is assumed; spindle operation is not verified.`;
         if (this.gpuFallbackReason) this.replayStatus('', true);
       }, true);
       if (generation !== this.removalGeneration || this.stale || session.runId !== this.displayedRunId) return;
-      if (frame.backend === 'webgpu-dexel') {
+      if (frame.backend === 'webgpu-dexel' || frame.backend === 'hybrid-turning') {
         this.replayPrepared = true;
         this.installReplayFrame(frame);
         return;
@@ -773,19 +773,21 @@ export class NCToolpathPlot extends HTMLElement {
   }
 
   private installReplayFrame(frame: MaterialReplayFrame): void {
-    if (frame.backend === 'webgpu-dexel') {
+    if (frame.backend === 'webgpu-dexel' || frame.backend === 'hybrid-turning') {
       if (this.materialObject !== frame.stock.group) this.replaceMaterialObject(frame.stock.group);
       this.replayPosition = frame.position;
       this.replayRequestedPosition = frame.requestedPosition;
       this.selectReplayFrame(frame);
       const occurrence = this.replayTimeline?.occurrences[frame.position - 1];
       const stopped = frame.stop ? ` Stopped before unsupported step ${frame.stop.executionStep ?? '?'}: ${frame.stop.message}.` : '';
-      const reuse = frame.reusedPosition !== undefined ? ` GPU stock copied from occurrence ${frame.reusedPosition}; ${frame.newMotions} new cutting motions.` : '';
+      const reuse = frame.reusedPosition !== undefined ? ` ${frame.backend === 'hybrid-turning' ? 'Meridian stock reused' : 'GPU stock copied'} from occurrence ${frame.reusedPosition}; ${frame.newMotions} new cutting motions.` : '';
       const history = frame.historyHit ? ' Recorded removal changes restored; no cutter intersections.' : '';
       const coverage = frame.historyThrough !== undefined ? ` Replay history prepared through occurrence ${frame.historyThrough}.` : '';
       const unavailable = frame.historyUnavailable ? ` ${frame.historyUnavailable}` : '';
-      const tiles = ` ${frame.stock.layout.storedTiles.length}/${frame.stock.layout.tiles} tiles store material intervals.`;
-      const text = `GPU tri-dexel ${frame.phase}: ${frame.pitchMm} mm ray pitch, ${frame.position}/${frame.total}, line ${occurrence?.lineNumber ?? '?'}; ${frame.processedMotions} completed cutting motions; ${frame.cacheHit ? 'cached GPU state' : `${frame.elapsedMs.toFixed(0)} ms compute/readiness, ${(frame.readinessMs ?? frame.elapsedMs).toFixed(0)} ms request preparation`}; ${(frame.estimatedBytes / 1048576).toFixed(1)} MiB estimated CPU/GPU buffers; ${frame.stock.layout.intervalCapacity} interval capacity per ray.${tiles}${reuse}${history}${coverage}${unavailable}${stopped} Sampling pitch is not a certified surface tolerance. Magenta pixels indicate a display traversal limit; increase pitch. Feed cutting is assumed; spindle operation is not verified.`;
+      const representation = frame.backend === 'hybrid-turning'
+        ? `Hybrid turning ${frame.phase}: exact radius–axial bands, compact revolved display at ${frame.pitchMm} mm chord-detail pitch; no 3D rays allocated. The first milling/drilling cut transitions to 3D; subsequent turning never restores axial symmetry.`
+        : `GPU tri-dexel ${frame.phase}: ${frame.pitchMm} mm ray pitch; ${frame.stock.layout.intervalCapacity} interval capacity per ray; ${frame.stock.layout.storedTiles.length}/${frame.stock.layout.tiles} tiles store material intervals. Sampling pitch is not a certified surface tolerance. Magenta pixels indicate a display traversal limit; increase pitch.`;
+      const text = `${representation} ${frame.position}/${frame.total}, line ${occurrence?.lineNumber ?? '?'}; ${frame.processedMotions} completed cutting motions; ${frame.cacheHit ? 'cached stock state' : `${frame.elapsedMs.toFixed(0)} ms compute/readiness, ${(frame.readinessMs ?? frame.elapsedMs).toFixed(0)} ms request preparation`}; ${(frame.estimatedBytes / 1048576).toFixed(1)} MiB estimated CPU/GPU buffers.${reuse}${history}${coverage}${unavailable}${stopped} Feed cutting is assumed; spindle operation is not verified.`;
       this.replayStatus(text, true);
       const status = this.shadowRoot?.getElementById('material-removal-status');
       if (status) { status.hidden = true; status.textContent = text; }
@@ -1674,7 +1676,7 @@ export class NCToolpathPlot extends HTMLElement {
     }
     if (this.gpuRenderPending || document.hidden) return;
     const now = performance.now();
-    if (this.materialReplay?.backend === 'webgpu-dexel' &&
+    if (this.materialReplay?.backend === 'hybrid-turning' &&
       this.materialReplay.computing && now - this.lastGpuRenderMs < 100) return;
     this.lastGpuRenderMs = now;
     const device = this.gpuDevice;

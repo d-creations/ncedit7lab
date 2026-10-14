@@ -6,6 +6,8 @@ import { compileGpuSweeps, GPU_SWEEP_STRIDE, type CompiledGpuSweep } from './Gpu
 import { recordGpuDiagnostic } from './GpuDiagnostics';
 import { GpuDexelHistory } from './GpuDexelHistory';
 import { GpuDexelStock } from './GpuDexelStock';
+import { RevolvedStock } from './RevolvedStock';
+import { RotationalProfile } from '../cpu-hybrid/RotationalProfile';
 import {
   createDexelLayout,
   DEXEL_MEMORY_BYTES,
@@ -26,7 +28,7 @@ import {
 
 class GpuReplayBudgetError extends SimulationCapabilityError {}
 
-export interface GpuReplayFrame {
+export interface GpuDexelReplayFrame {
   backend: 'webgpu-dexel';
   position: number;
   requestedPosition: number;
@@ -49,6 +51,13 @@ export interface GpuReplayFrame {
   readinessMs?: number;
 }
 
+export interface RotationalReplayFrame extends Omit<GpuDexelReplayFrame, 'backend' | 'stock'> {
+  backend: 'hybrid-turning';
+  stock: RevolvedStock;
+}
+
+export type GpuReplayFrame = GpuDexelReplayFrame | RotationalReplayFrame;
+
 export interface GpuReplayOptions {
   finePitchMm: number;
   refinementDelayMs?: number;
@@ -65,7 +74,7 @@ interface PendingSeek {
 
 /** Navigation always selects an executed prefix; refinement replays that prefix at a new pitch. */
 export class GpuMaterialReplaySession implements MaterialReplayStrategy {
-  readonly backend = 'webgpu-dexel';
+  readonly backend = 'hybrid-turning';
   private input?: DeepReadonly<SimulationInput>;
   private steps: readonly number[] = [];
   private safePosition = 0;
@@ -77,6 +86,12 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
   private readonly coarse = new Map<number, GpuDexelStock>();
   private readonly fine = new Map<number, GpuDexelStock>();
   private readonly owned = new Set<GpuDexelStock>();
+  private readonly revolved = new Map<
+    string,
+    { position: number; motions: number; stock: RevolvedStock }
+  >();
+  private readonly ownedRevolved = new Set<RevolvedStock>();
+  private rotationalThrough = -1;
   private initialSweeps?: { position: number; sweeps: CompiledGpuSweep[] };
   private compiledSweeps: CompiledGpuSweep[] = [];
   private readonly histories = new Map<
@@ -156,6 +171,28 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
         );
       const preparationStarted = performance.now();
       this.compiledSweeps = compileGpuSweeps(input);
+      if (
+        this.compiledSweeps.reduce(
+          (bytes, sweep) =>
+            bytes +
+            sweep.data.byteLength +
+            256 +
+            (sweep.turningVolume?.rotationalSection?.polygon.length ?? 0) * 256,
+          0,
+        ) >
+        32 * 1024 * 1024
+      )
+        throw new SimulationCapabilityError(
+          'Hybrid cutter compilation exceeds its 32 MiB staging budget',
+        );
+      if (input.stock.type === 'cylinder' && input.rotationalProfile !== false) {
+        const profile = new RotationalProfile(input.stock.diameter / 2, input.stock.length);
+        this.rotationalThrough = 0;
+        for (const sweep of this.compiledSweeps) {
+          if (!sweep.turningVolume || !profile.canApply(sweep.turningVolume)) break;
+          this.rotationalThrough++;
+        }
+      }
       if (prepareFinal && !input.stop) {
         this.initialSweeps = {
           position: steps.length,
@@ -167,15 +204,10 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
         compiledSweeps: this.initialSweeps?.sweeps.length ?? input.motions.length,
         elapsedMs: Math.round(performance.now() - preparationStarted),
       });
-      createDexelLayout(
-        new THREE.Vector3(...materialSize(input.stock)),
-        Math.max(0.1, this.options.finePitchMm),
-        DEXEL_INTERVALS,
-        { bounds: this.compiledSweeps.map((sweep) => sweep.bounds) },
-      );
       return this.seek(prepareFinal ? steps.length : 0);
     } catch (error) {
       this.initialSweeps = undefined;
+      this.compiledSweeps = [];
       return Promise.reject(error);
     }
   }
@@ -208,7 +240,9 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
     try {
       const target = Math.min(pending.position, this.safePosition);
       const preparedFine =
-        this.fine.has(target) || (this.histories.get('fine')?.through ?? -1) >= target;
+        this.fine.has(target) ||
+        this.revolved.has(`fine:${target}`) ||
+        (this.histories.get('fine')?.through ?? -1) >= target;
       const frame = await this.frame(pending.position, preparedFine ? 'fine' : 'coarse');
       if (this.cancelled || epoch !== this.epoch)
         throw new DOMException('GPU replay seek superseded', 'AbortError');
@@ -265,6 +299,10 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
     const position = Math.min(requestedPosition, this.safePosition);
     const step = position ? this.steps[position - 1] : -1;
     const motionCount = input.motions.filter((motion) => motion.executionStep <= step).length;
+    // Eligibility is an executed-prefix frontier, never a property of the latest displayed stock.
+    // A cold 3D frame below replays every preceding turning sweep at its own requested pitch.
+    if (motionCount <= this.rotationalThrough)
+      return this.rotationalFrame(requestedPosition, phase, motionCount);
     const pitch =
       phase === 'fine' ? this.options.finePitchMm : Math.max(0.1, this.options.finePitchMm);
     const cache = phase === 'fine' ? this.fine : this.coarse;
@@ -583,8 +621,123 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
     };
   }
 
-  private makeRoom(extra: number, protectedStock?: GpuDexelStock): void {
+  private async rotationalFrame(
+    requestedPosition: number,
+    phase: 'coarse' | 'fine',
+    motionCount: number,
+  ): Promise<RotationalReplayFrame> {
+    const started = performance.now();
+    const input = this.input!;
+    if (input.stock.type !== 'cylinder') throw new Error('Rotational stock requires a cylinder');
+    const position = Math.min(requestedPosition, this.safePosition);
+    const key = `${phase}:${position}`;
+    const pitch =
+      phase === 'fine' ? this.options.finePitchMm : Math.max(0.1, this.options.finePitchMm);
+    const epoch = this.epoch;
+    let entry = this.revolved.get(key);
+    const cacheHit = !!entry;
+    let reusedPosition: number | undefined;
+    let newMotions = 0;
+    if (!entry) {
+      // Profiles are pitch-independent and immutable once a display frame owns them.
+      let source: { position: number; motions: number; stock: RevolvedStock } | undefined;
+      for (const candidate of this.revolved.values())
+        if (candidate.position <= position && (!source || candidate.position > source.position))
+          source = candidate;
+      if (source) this.makeRoom(source.stock.profile.allocatedBytes, source.stock);
+      const profile = source
+        ? source.stock.profile.fork()
+        : new RotationalProfile(input.stock.diameter / 2, input.stock.length);
+      const from = source?.motions ?? 0;
+      reusedPosition = source?.position;
+      source = undefined;
+      newMotions = motionCount - from;
+      const reserve = (bytes: number) => {
+        if (this.cancelled || epoch !== this.epoch)
+          throw new DOMException('Turning replay superseded', 'AbortError');
+        this.makeRoom(bytes);
+      };
+      this.progress(from, motionCount);
+      for (let i = from; i < motionCount; i++) {
+        if (i > from && (i - from) % 16 === 0)
+          await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        reserve(profile.allocatedBytes);
+        profile.apply(this.compiledSweeps[i].turningVolume!, reserve);
+        this.progress(i + 1, motionCount);
+      }
+      reserve(profile.allocatedBytes);
+      const stock = new RevolvedStock(
+        profile,
+        pitch,
+        stockPlacement(input.stock, input.binding),
+        reserve,
+      );
+      entry = { position, motions: motionCount, stock };
+      this.ownedRevolved.add(stock);
+      this.revolved.set(key, entry);
+      stock.group.userData.releaseGpuStock = () => {
+        if (this.cancelled) {
+          this.revolved.delete(key);
+          this.ownedRevolved.delete(stock);
+          stock.dispose();
+        }
+      };
+      try {
+        this.makeRoom(0, stock);
+      } catch (error) {
+        this.revolved.delete(key);
+        this.ownedRevolved.delete(stock);
+        stock.dispose();
+        throw error;
+      }
+      console.info(
+        '[NC-Edit7 simulation] Rotational stock ready ' +
+          JSON.stringify({
+            position,
+            phase,
+            pitchMm: pitch,
+            motions: motionCount,
+            newMotions,
+            reusedPosition,
+            slabs: profile.meridianSlabs.length,
+            elapsedMs: Math.round(performance.now() - started),
+            estimatedMiB: Math.round(this.residentBytes() / 1048576),
+          }),
+      );
+    }
+    return {
+      backend: 'hybrid-turning',
+      position,
+      requestedPosition,
+      total: this.steps.length,
+      executionStep: position ? this.steps[position - 1] : undefined,
+      processedMotions: motionCount,
+      newMotions,
+      reusedPosition,
+      stop:
+        requestedPosition > this.safePosition || position === this.steps.length
+          ? input.stop
+          : undefined,
+      phase,
+      pitchMm: pitch,
+      elapsedMs: performance.now() - started,
+      estimatedBytes: this.residentBytes(),
+      cacheHit,
+      stock: entry.stock,
+      readinessMs: performance.now() - started,
+    };
+  }
+
+  private makeRoom(extra: number, protectedStock?: GpuDexelStock | RevolvedStock): void {
     let bytes = this.residentBytes();
+    for (const [key, entry] of this.revolved) {
+      if (bytes + extra <= DEXEL_MEMORY_BYTES && this.revolved.size < 4) break;
+      if (entry.stock.group.parent || entry.stock === protectedStock) continue;
+      this.revolved.delete(key);
+      this.ownedRevolved.delete(entry.stock);
+      entry.stock.dispose();
+      bytes = this.residentBytes();
+    }
     for (const cache of [this.fine, this.coarse]) {
       const candidates = [...cache].sort(([aPosition, a], [bPosition, b]) => {
         const aCheckpoint = this.checkpointStocks.has(a),
@@ -605,7 +758,7 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
     }
     if (bytes + extra > DEXEL_MEMORY_BYTES)
       throw new GpuReplayBudgetError(
-        'GPU replay/refinement cannot coexist with displayed stock within the 256 MiB CPU/GPU buffer estimate. Coarse stock is retained; choose a larger fine pitch.',
+        'Hybrid replay/refinement exceeds the 256 MiB CPU/GPU buffer budget alongside displayed stock. Requested pitch is not reduced.',
       );
   }
 
@@ -629,7 +782,15 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
       ) +
       [...arenas].reduce((sum, arena) => sum + arena.estimatedBytes, 0) +
       [...this.histories.values()].reduce((sum, entry) => sum + entry.history.estimatedBytes, 0) +
-      this.compiledSweeps.reduce((sum, sweep) => sum + sweep.data.byteLength + 256, 0)
+      [...this.ownedRevolved].reduce((sum, stock) => sum + stock.estimatedBytes, 0) +
+      this.compiledSweeps.reduce(
+        (sum, sweep) =>
+          sum +
+          sweep.data.byteLength +
+          256 +
+          (sweep.turningVolume?.rotationalSection?.polygon.length ?? 0) * 256,
+        0,
+      )
     );
   }
 
@@ -642,8 +803,17 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
     this.coarse.clear();
     this.fine.clear();
     this.checkpointStocks.clear();
+    for (const stock of this.ownedRevolved)
+      if (!stock.group.parent) {
+        this.ownedRevolved.delete(stock);
+        stock.dispose();
+      }
+    this.revolved.clear();
     for (const entry of this.histories.values()) entry.history.dispose();
     this.histories.clear();
     this.compiledSweeps = [];
+    this.input = undefined;
+    this.steps = [];
+    this.progress = () => {};
   }
 }

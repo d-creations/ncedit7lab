@@ -5,7 +5,7 @@ import type {
   GpuReplayFrame,
   GpuReplayOptions,
 } from '../../strategies/gpu-dexel/GpuMaterialReplaySession';
-import type { SimulationInput } from '../../shared/SimulationTypes';
+import { SimulationCapabilityError, type SimulationInput } from '../../shared/SimulationTypes';
 import type { MaterialReplayStrategy } from '../MaterialReplayStrategy';
 import { createReplayStrategy, type ReplayStrategyOptions } from '../createReplayStrategy';
 
@@ -35,7 +35,7 @@ vi.mock('../../strategies/cpu-hybrid/MaterialReplaySession', () => ({
 }));
 vi.mock('../../strategies/gpu-dexel/GpuMaterialReplaySession', () => ({
   GpuMaterialReplaySession: class {
-    readonly backend = 'webgpu-dexel';
+    readonly backend = 'hybrid-turning';
     readonly computing = true;
     constructor(
       readonly runId: string,
@@ -166,8 +166,8 @@ describe('replay strategy selection and fallback ownership', () => {
   });
 
   it('replaces failed GPU startup inside the retained lifecycle identity', async () => {
-    const config = options();
-    const failure = new Error('GPU capacity exceeded');
+    const config = { ...options(), finePitchMm: 0.1 };
+    const failure = new SimulationCapabilityError('GPU capacity exceeded');
     lifecycle.gpuStart.mockRejectedValue(failure);
     const strategy = createReplayStrategy(config);
     const progress = vi.fn();
@@ -180,10 +180,10 @@ describe('replay strategy selection and fallback ownership', () => {
   });
 
   it('initializes CPU from the original run then seeks after GPU/device failure', async () => {
-    const config = options();
+    const config = { ...options(), finePitchMm: 0.1 };
     const strategy = createReplayStrategy(config);
     await strategy.start(input, [0, 1, 2], vi.fn(), true);
-    lifecycle.gpuSeek.mockRejectedValue(new Error('GPU device lost'));
+    lifecycle.gpuSeek.mockRejectedValue(new SimulationCapabilityError('GPU device lost'));
     await expect(strategy.seek(2)).resolves.toBe(cpuFrame);
     expect(lifecycle.cpuConstruct).toHaveBeenCalledWith(config.runId);
     expect(lifecycle.cpuStart).toHaveBeenCalledWith(input, [0, 1, 2]);
@@ -276,9 +276,9 @@ describe('replay strategy selection and fallback ownership', () => {
   });
 
   it('does not install an obsolete target after CPU fallback initialization', async () => {
-    const strategy = createReplayStrategy(options());
+    const strategy = createReplayStrategy({ ...options(), finePitchMm: 0.1 });
     await strategy.start(input, [0, 1, 2]);
-    lifecycle.gpuSeek.mockRejectedValue(new Error('GPU device lost'));
+    lifecycle.gpuSeek.mockRejectedValue(new SimulationCapabilityError('GPU device lost'));
     let finish: (frame: ReplayFrame) => void = () => {};
     lifecycle.cpuStart.mockImplementationOnce(
       () =>
@@ -303,5 +303,39 @@ describe('replay strategy selection and fallback ownership', () => {
     await expect(strategy.start(input, [0, 1, 2])).rejects.toBe(failure);
     expect(config.onFallback).not.toHaveBeenCalled();
     expect(lifecycle.cpuConstruct).toHaveBeenCalledOnce();
+  });
+
+  it.each(['start', 'seek'] as const)(
+    'never reduces requested detail on %s failure',
+    async (operation) => {
+      const config = options();
+      const strategy = createReplayStrategy(config);
+      const failure = new SimulationCapabilityError('3D transition exceeds memory');
+      if (operation === 'seek') {
+        await strategy.start(input, [0, 1, 2]);
+        lifecycle.gpuSeek.mockRejectedValue(failure);
+      } else lifecycle.gpuStart.mockRejectedValue(failure);
+      await expect(
+        operation === 'start' ? strategy.start(input, [0, 1, 2]) : strategy.seek(2),
+      ).rejects.toBe(failure);
+      expect(lifecycle.cpuConstruct).not.toHaveBeenCalled();
+      expect(config.onFallback).not.toHaveBeenCalled();
+    },
+  );
+
+  it('reports unavailable fine detail instead of starting a coarser CPU run', async () => {
+    const config = { ...options(), device: undefined };
+    const strategy = createReplayStrategy(config);
+    await expect(strategy.start(input, [0])).rejects.toThrow('requested detail is not reduced');
+    expect(lifecycle.cpuStart).not.toHaveBeenCalled();
+  });
+
+  it('does not hide unexpected programming errors behind CPU fallback', async () => {
+    const config = { ...options(), finePitchMm: 0.1 };
+    lifecycle.gpuStart.mockRejectedValue(new TypeError('broken lifecycle'));
+    const strategy = createReplayStrategy(config);
+    await expect(strategy.start(input, [0])).rejects.toThrow('broken lifecycle');
+    expect(config.onFallback).not.toHaveBeenCalled();
+    expect(lifecycle.cpuConstruct).not.toHaveBeenCalled();
   });
 });

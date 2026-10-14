@@ -238,7 +238,7 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
     return worker;
   }
 
-  async function readyReplay(gpu = false): Promise<{ worker: ReplayWorker; frames: ReplayFrame[] }> {
+  async function readyReplay(gpu = false, turning = false): Promise<{ worker: ReplayWorker; frames: ReplayFrame[] }> {
     plot.shadowRoot!.querySelector<HTMLInputElement>('#gpu-stock')!.checked = gpu;
     if (gpu) {
       plot.renderer = new WebGPURenderer();
@@ -258,19 +258,25 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
     configureStock('workpiece:replay');
     const codec = new SimulationCommentCodec();
     source.text = codec.encodeSetup({
-      machineName: 'test', material: { type: 'box', width: 4, height: 4, depth: 4 },
+      machineName: 'test', material: turning
+        ? { type: 'cylinder', diameter: 4, length: 6 }
+        : { type: 'box', width: 4, height: 4, depth: 4 },
     }, syntax) + '\n' + codec.encodeTool({
-      toolNumber: 1, description: 'replay mill',
-      cutting: [{ type: 'endMill', diameter: 0.8, length: 2 }],
+      toolNumber: 1, description: 'replay cutter',
+      ...(turning ? { Q: 3 } : {}),
+      cutting: turning
+        ? [{ type: 'insert', shape: 'V', ic: 4.7625, thickness: 1.59, noseRadius: 0.2,
+          clearanceAngle: 7, zeroVertex: 0, rotation: [0, 18, 0] }]
+        : [{ type: 'endMill', diameter: 0.8, length: 2 }],
     }, syntax);
     const pose = (position: [number, number, number]) => ({
       position, orientation: [0, 0, 0, 1] as const,
-      reference: 'millingTip' as const, frameId: 'workpiece:replay',
+      reference: turning ? 'turningVirtualTip' as const : 'millingTip' as const, frameId: 'workpiece:replay',
     });
     const move = (executionStep: number, lineNumber: number, start: [number, number, number],
       end: [number, number, number], traversal = 'FEED') => ({
       geometry: 'LINEAR', traversal, sourceCode: traversal === 'RAPID' ? 'G0' : 'G1',
-      machiningMode: 'milling' as const, toolNumber: 1, lineNumber, executionStep,
+      machiningMode: turning ? 'turning' as const : 'milling' as const, toolNumber: 1, lineNumber, executionStep,
       points: [start, end].map(([x, y, z]) => ({ x, y, z })), poses: [pose(start), pose(end)],
     });
     requestPlot.mockResolvedValue({ canal: { '1': {
@@ -279,9 +285,9 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
         { executionStep: 2, lineNumber: 3 }, { executionStep: 3, lineNumber: 2 },
       ],
       segments: [
-        move(1, 2, [-1, 0, -1], [1, 0, -1]),
+        turning ? move(1, 2, [1.7, 0, -2], [1.7, 0, 2]) : move(1, 2, [-1, 0, -1], [1, 0, -1]),
         move(2, 3, [1, 0, -1], [3, 0, -1], 'RAPID'),
-        move(3, 2, [1, -1, -1], [-1, -1, -1]),
+        turning ? move(3, 2, [1.5, 0, 2], [1.5, 0, -2]) : move(3, 2, [1, -1, -1], [-1, -1, -1]),
       ],
     } } });
     const frames: ReplayFrame[] = [];
@@ -295,7 +301,7 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
     await plot.plotNCCode('1');
     const button = plot.shadowRoot!.querySelector<HTMLButtonElement>('#replay-start')!;
     if (gpu) {
-      await vi.waitFor(() => expect(plot.shadowRoot!.getElementById('material-removal-status')!.textContent).toContain('GPU tri-dexel coarse'));
+      await vi.waitFor(() => expect(plot.shadowRoot!.getElementById('material-removal-status')!.textContent).toContain(turning ? 'Hybrid turning coarse' : 'GPU tri-dexel coarse'));
       expect(button.disabled).toBe(false);
       return { worker, frames };
     }
@@ -362,7 +368,7 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
     vi.useFakeTimers();
     const calculate = vi.spyOn(GpuDexelStock.prototype, 'calculate').mockImplementation(async () => {
       expect(plot.shadowRoot!.getElementById('material-removal-status')!.textContent)
-        .toContain('Geometric removal (GPU dexel): 0/');
+        .toContain('Geometric removal (hybrid turning / GPU dexel): 0/');
       return 5;
     });
     const { worker } = await readyReplay(true);
@@ -391,6 +397,7 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
 
   it('falls back explicitly to CPU replay when a GPU seek cannot represent a cut', async () => {
     vi.useFakeTimers();
+    plot.shadowRoot!.querySelector<HTMLInputElement>('#gpu-fine-resolution')!.value = '0.05';
     const calculate = vi.spyOn(GpuDexelStock.prototype, 'calculate').mockResolvedValue(5);
     const { worker } = await readyReplay(true);
     calculate.mockRejectedValueOnce(new SimulationCapabilityError('GPU interval overflow'));
@@ -405,6 +412,31 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
     expect(worker.postMessage).toHaveBeenCalled();
     expect(plot.scene!.children.some((child) => child.name === 'machined-stock')).toBe(true);
     log.mockRestore();
+  });
+
+  it('renders compact hybrid turning frames with progress-only feedback through coarse/fine replay', async () => {
+    vi.useFakeTimers();
+    const calculate = vi.spyOn(GpuDexelStock.prototype, 'calculate');
+    const { worker } = await readyReplay(true, true);
+    const progress = plot.shadowRoot!.querySelector<HTMLProgressElement>('#simulation-progress')!;
+    const status = plot.shadowRoot!.getElementById('material-removal-status')!;
+    expect(status.textContent).toContain('exact radius–axial bands');
+    expect(status.textContent).toContain('no 3D rays allocated');
+    expect(status.hidden).toBe(true);
+    expect(plot.shadowRoot!.getElementById('replay-status')!.hidden).toBe(true);
+    expect(progress.value).toBe(1);
+    expect(plot.scene!.children.filter((child) => child.name === 'revolved-stock')).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(350);
+    expect(status.textContent).toContain('Hybrid turning fine');
+    expect(status.textContent).toContain('0.02 mm chord-detail pitch');
+    expect(progress.value).toBe(1);
+    plot.shadowRoot!.querySelector<HTMLButtonElement>('#replay-start')!.click();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(status.textContent).toContain('0/4');
+    expect(calculate).not.toHaveBeenCalled();
+    expect(worker.postMessage).not.toHaveBeenCalled();
+    plot.clearPlot();
+    expect(progress.hidden).toBe(true);
   });
 
   it('reports reused GPU occurrences and newly applied cuts when stepping forward', async () => {

@@ -3,10 +3,11 @@ import { cylinderVolume, type ImplicitVolume } from '../../shared/ImplicitGeomet
 import { SIMULATION_LIMITS } from '../../shared/SimulationTypes';
 import { turningSectionVolume } from '../../shared/TurningEnvelope';
 
-interface Line {
+export interface ProfileLine {
   slope: number;
   offset: number;
 }
+type Line = ProfileLine;
 interface Interval {
   lower: Line;
   upper: Line;
@@ -105,6 +106,18 @@ export class RotationalProfile {
       this.slabs.reduce((bytes, slab) => bytes + 128 + slab.intervals.length * 192, 0) +
       this.countCacheBytes
     );
+  }
+
+  /** Exact linear meridian bands, including disconnected annuli and cutoff gaps. */
+  get meridianSlabs(): readonly {
+    readonly lower: number;
+    readonly upper: number;
+    readonly intervals: readonly {
+      readonly lower: Readonly<ProfileLine>;
+      readonly upper: Readonly<ProfileLine>;
+    }[];
+  }[] {
+    return this.slabs;
   }
 
   fork(): RotationalProfile {

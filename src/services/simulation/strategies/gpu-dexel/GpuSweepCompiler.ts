@@ -4,6 +4,7 @@ import { CuttingToolModel } from '../../shared/CuttingToolModel';
 import { stockPlacement } from '../../shared/SimulationTransforms';
 import { SimulationCapabilityError, type SimulationInput } from '../../shared/SimulationTypes';
 import { buildTurningSweep } from '../../shared/TurningEnvelope';
+import type { ImplicitVolume } from '../../shared/ImplicitGeometry';
 
 export interface CompiledGpuSweep {
   executionStep: number;
@@ -11,6 +12,8 @@ export interface CompiledGpuSweep {
   /** Stock-local, conservative bounds, including float32 packing roundoff. */
   bounds: THREE.Box3;
   data: Float32Array;
+  /** Double-precision source section shared by compact turning and 3D replay. */
+  turningVolume?: ImplicitVolume;
 }
 
 export const GPU_SWEEP_MAX_PLANES = 64;
@@ -117,8 +120,10 @@ export function compileGpuSweeps(input: DeepReadonly<SimulationInput>): Compiled
     }
     const data = new Float32Array(GPU_SWEEP_STRIDE);
     let bounds: THREE.Box3;
+    let turningVolume: ImplicitVolume | undefined;
     if (motion.mode === 'turning') {
       const volume = buildTurningSweep(cutter, start, end, spindleOrigin, spindleAxis);
+      turningVolume = volume;
       const section = volume.rotationalSection;
       if (!section?.planes?.length) fail('turning requires a validated convex meridian section');
       const planes = section!.planes!;
@@ -203,7 +208,7 @@ export function compileGpuSweeps(input: DeepReadonly<SimulationInput>): Compiled
       ...bounds.max.toArray().map(Math.abs),
     );
     bounds.expandByScalar(magnitude * 2 ** -19);
-    return { executionStep: motion.executionStep, motionIndex, bounds, data };
+    return { executionStep: motion.executionStep, motionIndex, bounds, data, turningVolume };
   });
 }
 

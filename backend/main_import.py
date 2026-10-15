@@ -496,6 +496,9 @@ def build_execution_occurrences(control: Any, canal_number: int, segments: List[
         line = getattr(node, "nc_code_line_nr", None)
         if line is not None:
             occurrence["lineNumber"] = line
+        words = getattr(node, "command_parameter", {})
+        if any(str(word).upper() == "T" for word in words):
+            occurrence["toolSelection"] = True
         occurrences.append(occurrence)
     for segment in segments:
         step = segment.get("executionStep")
@@ -509,7 +512,43 @@ def build_execution_occurrences(control: Any, canal_number: int, segments: List[
             or occurrences[step].get("lineNumber") != segment.get("lineNumber")
         ):
             raise ValueError("Engine command history does not match motion execution occurrences")
+        if segment.get("recordKind") == "state":
+            occurrences[step]["toolState"] = {
+                key: segment[key] for key in ("toolNumber", "motionContext", "poses")
+                if key in segment
+            }
     return occurrences
+
+
+def expand_stationary_linear_motion(segment: Dict[str, Any]) -> None:
+    """Expose both endpoints only when the engine proves a stationary feed pose."""
+    if (segment.get("geometry") != "LINEAR" or segment.get("traversal") != "FEED"
+            or segment.get("sourceCode") not in {"G1", "G01"}):
+        return
+    points, poses = segment.get("points"), segment.get("poses")
+    context = segment.get("motionContext") or {}
+    start, end = context.get("startAxes"), context.get("endAxes")
+    suffix = str(context.get("channelId") or "")
+    complete_axes = {f"{axis}{suffix}" for axis in ("X", "Y", "Z")}
+    if (not isinstance(points, list) or len(points) != 1
+            or not isinstance(poses, list) or len(poses) != 1
+            or not isinstance(start, dict) or not start or start != end
+            or not complete_axes.issubset(start)
+            or any(type(value) not in (int, float) or not math.isfinite(value) for value in start.values())):
+        return
+    pose = poses[0]
+    position = [points[0].get(axis) for axis in ("x", "y", "z")]
+    orientation = pose.get("orientation")
+    if (pose.get("position") != position
+            or any(type(value) not in (int, float) or not math.isfinite(value) for value in position)
+            or not isinstance(orientation, list) or len(orientation) != 4
+            or any(type(value) not in (int, float) or not math.isfinite(value) for value in orientation)
+            or abs(math.hypot(*orientation) - 1) > 1e-6
+            or not pose.get("frameId")
+            or pose.get("reference") not in {"millingTip", "turningVirtualTip"}):
+        return
+    segment["points"] = [points[0], dict(points[0])]
+    segment["poses"] = [pose, {**pose, "position": list(position), "orientation": list(orientation)}]
 
 
 def annotate_execution_record_kinds(control: Any, canal_number: int, segments: List[Dict[str, Any]]) -> None:
@@ -542,6 +581,7 @@ def annotate_execution_record_kinds(control: Any, canal_number: int, segments: L
     for segment in segments:
         if any(segment.get(key) is not None for key in ("geometry", "traversal", "sourceCode")):
             segment["recordKind"] = "motion"
+            expand_stationary_linear_motion(segment)
             continue
         segment["recordKind"] = "unknown"
         step = segment.get("executionStep")
@@ -559,7 +599,12 @@ def annotate_execution_record_kinds(control: Any, canal_number: int, segments: L
         # A parsed assignment cannot contain axis/modal words. Never infer state from point count.
         assignment = variable is not None and not codes and words.keys() <= {"N"}
         setup = codes == {"G266"} and words.keys() <= {"N"}
-        command = bool(words.keys() & {"T", "M", "S"}) and codes <= {"G0", "G00", "G96", "G97"}
+        # Modal plane/feed/unit setup on a certified stationary spindle/tool block
+        # is not missing cutter geometry (e.g. G0 G18 G99 G97 ... M3 T11).
+        command = bool(words.keys() & {"T", "M", "S"}) and codes <= {
+            "G0", "G00", "G17", "G18", "G19", "G20", "G21",
+            "G40", "G96", "G97", "G98", "G99",
+        }
         if "M" in words:
             try:
                 command = command and float(words["M"]) in {3, 4, 5, 6, 8, 9}

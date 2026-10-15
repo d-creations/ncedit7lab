@@ -7,11 +7,15 @@ import {
   DEXEL_PASS_SWEEPS,
   dexelDispatchRays,
   dexelDispatchRanges,
+  dexelHistorySubmission,
   GpuDexelStock,
 } from '../GpuDexelStock';
 import { GPU_SWEEP_STRIDE, type CompiledGpuSweep } from '../GpuSweepCompiler';
 import { GpuDexelIntervalOverflowError, type DexelIntervalCapacity } from '../DexelLayout';
 import { GpuDexelHistory } from '../GpuDexelHistory';
+import { RotationalProfile } from '../../cpu-hybrid/RotationalProfile';
+import { RotationalDexelBase } from '../RotationalDexelBase';
+import { turningSectionVolume } from '../../../shared/TurningEnvelope';
 
 function fixture(
   size = 10,
@@ -62,6 +66,13 @@ function generateShader(
 }
 
 describe('bounded GPU dexel submissions', () => {
+  it('bounds the worst-case four events per sweep before a staging submission', () => {
+    for (const capacity of [4, 16, 4096, 262144, 1048576])
+      for (const sweeps of [1, 20, 200, 256, 10000]) {
+        const batch = dexelHistorySubmission(capacity, sweeps, 16384);
+        expect(batch.rays * batch.sweeps * 4).toBeLessThanOrEqual(capacity);
+      }
+  });
   it('compacts only touched tiles and excludes tiles with no remaining cutter entries', () => {
     const ranges = new Uint32Array([0, 0, 0, 4, 4, 1, 5, 0, 5, 300]);
     expect(dexelDispatchRanges(ranges, 0)).toEqual([
@@ -116,14 +127,15 @@ describe('bounded GPU dexel submissions', () => {
       }
     });
     it('captures append output once, preserves original execution steps and transfers ownership', async () => {
-      const f = fixture(1, [sweep], 16, { historyEvents: 8 });
+      const f = fixture(1, [sweep], 16, { historyEvents: 16384 });
       const span = new Uint32Array(new Float32Array([-0.25, 0.25]).buffer);
       const raw = new Uint32Array([0, 0, ...span, 1024, 0, ...span]);
       try {
+        let headers = 0;
         f.read.mockImplementation(async (attribute) =>
           attribute === Reflect.get(f.stock, 'captureAttribute')
             ? raw.buffer
-            : new Uint32Array([0, 0, 2, 0]).buffer,
+            : new Uint32Array([0, 0, headers++ === 0 ? 2 : 0, 0]).buffer,
         );
         await f.stock.calculate(1);
         const history = f.stock.takeHistory()!;
@@ -152,24 +164,25 @@ describe('bounded GPU dexel submissions', () => {
         f.stock.dispose();
       }
     });
-    it('drains the bounded capture buffer between passes and retains a history larger than that buffer', async () => {
+    it('drains capture between actual submissions, including within one cutter pass', async () => {
       const sweeps = Array.from({ length: DEXEL_PASS_SWEEPS + 1 }, (_, i) => ({
         ...sweep,
         motionIndex: i,
         executionStep: i,
       }));
-      const f = fixture(1, sweeps, 16, { historyEvents: 4, historyLimit: 4 });
+      const f = fixture(1, sweeps, 16, { historyEvents: 4096, historyLimit: 8192 });
       const span = new Uint32Array(new Float32Array([-0.25, 0.25]).buffer);
       const chunks = [
         new Uint32Array([0, 0, ...span, 1024, 4, ...span]),
         new Uint32Array([0, 1024, ...span, 1024, 1025, ...span]),
       ];
-      let read = 0;
+      let read = 0,
+        headers = 0;
       try {
         f.read.mockImplementation(async (attribute) =>
           attribute === Reflect.get(f.stock, 'captureAttribute')
             ? chunks[read++].buffer
-            : new Uint32Array([0, 0, 2, 0]).buffer,
+            : new Uint32Array([0, 0, headers++ < 2 ? 2 : 0, 0]).buffer,
         );
         await f.stock.calculate(sweeps.length);
         const history = f.stock.takeHistory()!;
@@ -179,7 +192,8 @@ describe('bounded GPU dexel submissions', () => {
         expect(Array.from(history.events.array).filter((_, i) => i % 4 === 1)).toEqual([
           1, 257, 2, 257,
         ]);
-        expect(f.read).toHaveBeenCalledTimes(4);
+        expect(f.read.mock.calls.length).toBe(f.compute.mock.calls.length + 2);
+        expect(f.compute.mock.calls.slice(0, 2).every(([, rays]) => Number(rays) <= 4)).toBe(true);
         history.dispose();
       } finally {
         f.stock.dispose();
@@ -191,14 +205,15 @@ describe('bounded GPU dexel submissions', () => {
         motionIndex: i,
         executionStep: i,
       }));
-      const f = fixture(1, sweeps, 16, { historyEvents: 2, historyLimit: 3 });
+      const f = fixture(1, sweeps, 16, { historyEvents: 4096, historyLimit: 4096 });
       const span = new Uint32Array(new Float32Array([-0.25, 0.25]).buffer);
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       try {
         f.read.mockImplementation(async (attribute) =>
           attribute === Reflect.get(f.stock, 'captureAttribute')
-            ? new Uint32Array([0, 0, ...span, 1024, 0, ...span]).buffer
-            : new Uint32Array([0, 0, 2, 0]).buffer,
+            ? new Uint32Array([0, 0, ...span, 1024, 0, ...span, 1, 0, ...span, 1025, 0, ...span])
+                .buffer
+            : new Uint32Array([0, 0, 4, 0]).buffer,
         );
         await f.stock.calculate(sweeps.length);
         expect(f.stock.takeHistory()).toBeUndefined();
@@ -207,6 +222,103 @@ describe('bounded GPU dexel submissions', () => {
         expect(warn).toHaveBeenCalledOnce();
       } finally {
         warn.mockRestore();
+        f.stock.dispose();
+      }
+    });
+    it('streams more than a million captured events without exhausting a single cutter pass', async () => {
+      const sweeps = Array.from({ length: 200 }, (_, i) => ({ ...sweep, executionStep: i }));
+      const f = fixture(1, sweeps, 16, { historyEvents: 262144, historyLimit: 4194304 });
+      const span = new Uint32Array(new Float32Array([-0.25, 0.25]).buffer);
+      let chunk = new Uint32Array(),
+        total = 0;
+      try {
+        f.compute.mockImplementation((_node, rays) => {
+          expect(
+            Reflect.get(f.stock, 'rayEnd').value - Reflect.get(f.stock, 'rayOffset').value,
+          ).toBe(Number(rays));
+          const count = f.compute.mock.calls.length <= 5 ? Number(rays) * 200 * 4 : 0;
+          expect(count).toBeLessThanOrEqual(262144);
+          chunk = new Uint32Array(count * 4);
+          for (let i = 0; i < count; i++) {
+            chunk[i * 4] = Math.floor(i / 800);
+            chunk[i * 4 + 1] = i % 800;
+            chunk.set(span, i * 4 + 2);
+          }
+          total += count;
+          return undefined;
+        });
+        f.read.mockImplementation(async (attribute) =>
+          attribute === Reflect.get(f.stock, 'captureAttribute')
+            ? chunk.buffer
+            : new Uint32Array([0, 0, chunk.length / 4, 0]).buffer,
+        );
+        await f.stock.calculate(200);
+        const history = f.stock.takeHistory()!;
+        expect(total).toBeGreaterThan(1048576);
+        expect(history.count).toBe(total);
+        expect(f.stock.historyUnavailable).toBeUndefined();
+        expect(f.read.mock.calls.length).toBe(f.compute.mock.calls.length + 5);
+        history.dispose();
+      } finally {
+        f.stock.dispose();
+      }
+    }, 30000);
+
+    it('keeps actual 20 × 50 / 0.02 mm sparse allocations bounded and fingerprints the implicit base', async () => {
+      const f = fixture(1);
+      const profile = new RotationalProfile(10, 50);
+      profile.apply(
+        turningSectionVolume(
+          [
+            [9, -24],
+            [11, -24],
+            [11, 24],
+            [9, 24],
+          ].map((p) => new THREE.Vector2(...p)),
+          new THREE.Vector3(),
+          new THREE.Vector3(0, 0, 1),
+          new THREE.Vector3(1, 0, 0),
+        ),
+        () => {},
+      );
+      const base = new RotationalDexelBase(profile);
+      const stock = new GpuDexelStock(
+        f.renderer,
+        f.device,
+        new THREE.Vector3(20, 20, 50),
+        0.02,
+        true,
+        [sweep],
+        new THREE.Matrix4(),
+        16,
+        { rotationalBase: base },
+      );
+      const different = new GpuDexelStock(
+        f.renderer,
+        f.device,
+        new THREE.Vector3(20, 20, 50),
+        0.02,
+        true,
+        [],
+        new THREE.Matrix4(),
+        16,
+        { rotationalBase: new RotationalDexelBase(new RotationalProfile(10, 50)) },
+      );
+      try {
+        expect(stock.layout.storageRays).toBeLessThan(stock.layout.rays / 100);
+        expect(stock.estimatedBytes).toBeLessThan(16 * 1024 * 1024);
+        console.info('Implicit-base Ø20 × 50, pitch .02 allocation', {
+          bytes: stock.estimatedBytes,
+          rays: stock.layout.rays,
+          storedRays: stock.layout.storageRays,
+          tiles: stock.layout.storedTiles.length,
+        });
+        expect(stock.historyKey).not.toBe(different.historyKey);
+        await stock.calculate(1);
+        await expect(different.copyFrom(stock)).rejects.toThrow(/compatible stock/);
+      } finally {
+        stock.dispose();
+        different.dispose();
         f.stock.dispose();
       }
     });
@@ -332,7 +444,8 @@ describe('bounded GPU dexel submissions', () => {
           const shader: unknown = Reflect.get(builder, 'computeShader');
           expect(typeof shader).toBe('string');
           expect(shader).not.toMatch(/ptr\s*<\s*storage\b/);
-          expect(shader).toContain(`entryOffset + ${DEXEL_PASS_SWEEPS}u`);
+          expect(shader).toContain('entryOffset + passSweeps');
+          expect(shader).toContain('id >= rayEnd || id >= gpuRayCount(dims)');
           expect(shader).toContain('if (entryOffset > 0u || resume != 0u)');
           expect(shader).toContain('if (entryOffset == 0u && resume == 0u)');
           expect(shader).toContain('if (!touchesMaterial)');

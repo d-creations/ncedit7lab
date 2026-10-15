@@ -313,11 +313,12 @@ export class RotationalProfile {
           mid = (lower + upper) / 2;
         const edges: Line[] = [];
         for (let j = 0; j < polygon.length; j++) {
-          // Adjacent floating-point levels have no representable interior.
-          if (mid <= lower || mid >= upper) break;
           const a = polygon[j],
             b = polygon[(j + 1) % polygon.length];
-          if (mid <= Math.min(a.y, b.y) || mid >= Math.max(a.y, b.y)) continue;
+          // Classify open slabs by their bounds, not a rounded midpoint. Between
+          // adjacent doubles the midpoint is an endpoint; treating that slab as
+          // untouched resurrected full-radius material and produced thin discs.
+          if (lower >= Math.max(a.y, b.y) || upper <= Math.min(a.y, b.y)) continue;
           const slope = (b.x - a.x) / (b.y - a.y);
           edges.push({ slope, offset: a.x - slope * a.y });
         }
@@ -328,7 +329,8 @@ export class RotationalProfile {
           continue;
         }
         if (edges.length !== 2) throw new Error('Invalid convex turning profile section');
-        edges.sort((a, b) => value(a, mid) - value(b, mid));
+        edges.sort((a, b) => value(a, mid) - value(b, mid) ||
+          (a.slope - b.slope) * (mid >= upper ? -1 : 1));
         const functions = [
           this.zero,
           this.outer,
@@ -359,21 +361,23 @@ export class RotationalProfile {
           const low = sorted[k - 1],
             high = sorted[k],
             z = (low + high) / 2;
-          const cutLow = value(edges[0], z) > 0 ? edges[0] : this.zero;
-          const cutHigh = value(edges[1], z) < this.radius ? edges[1] : this.outer;
+          const compare = (a: Line, b: Line) => value(a, z) - value(b, z) ||
+            (a.slope - b.slope) * (z >= high ? -1 : 1);
+          const cutLow = compare(edges[0], this.zero) > 0 ? edges[0] : this.zero;
+          const cutHigh = compare(edges[1], this.outer) < 0 ? edges[1] : this.outer;
           const intervals: Interval[] = [];
           for (const interval of slab.intervals) {
             if (
-              value(cutHigh, z) <= value(interval.lower, z) ||
-              value(cutLow, z) >= value(interval.upper, z) ||
-              value(cutLow, z) >= value(cutHigh, z)
+              compare(cutHigh, interval.lower) <= 0 ||
+              compare(cutLow, interval.upper) >= 0 ||
+              compare(cutLow, cutHigh) >= 0
             ) {
               intervals.push(interval);
               continue;
             }
-            if (value(cutLow, z) > value(interval.lower, z))
+            if (compare(cutLow, interval.lower) > 0)
               intervals.push({ lower: interval.lower, upper: cutLow });
-            if (value(cutHigh, z) < value(interval.upper, z))
+            if (compare(cutHigh, interval.upper) < 0)
               intervals.push({ lower: cutHigh, upper: interval.upper });
           }
           output.push({ lower: low, upper: high, intervals });

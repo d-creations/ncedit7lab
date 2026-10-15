@@ -46,6 +46,7 @@ interface PlotHarness extends HTMLElement {
   plotService: PlotService;
   toggleMaterial(): void;
   toggleAxes(): void;
+  selectReplayFrame(frame: { position: number; executionStep: number }): void;
 }
 
 // These integration tests execute the real CPU mesher at the production default pitch.
@@ -537,6 +538,30 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
     await expectReplayPosition(1);
     expect(plot.toolObject).toBeNull();
     expect(plot.shadowRoot!.getElementById('plot-status')!.textContent).toContain('step 0');
+    expect(requestPlot).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the executed tool at non-motion M6/state frames without changing selection semantics', async () => {
+    await readyReplay();
+    const events: Array<Record<string, unknown>> = [];
+    bus.subscribe(EVENT_NAMES.PLOT_SELECTION_CHANGED, (event: Record<string, unknown>) => events.push(event));
+    const harness = plot as unknown as { replayTimeline: {
+      occurrences: Array<{ channelId: '1'; executionStep: number; lineNumber: number }>;
+      toolDisplays: unknown[];
+    } };
+    harness.replayTimeline.occurrences.push({ channelId: '1', executionStep: 4, lineNumber: 4 });
+    harness.replayTimeline.toolDisplays.push(harness.replayTimeline.toolDisplays[3]);
+    plot.selectReplayFrame({ position: 5, executionStep: 4 });
+    expect(plot.toolObject?.position.toArray()).toEqual([-1, -1, -1]);
+    expect(plot.highlightObject).toBeNull();
+    expect(events.at(-1)).toMatchObject({ executionStep: 4, sourceSegmentIndex: undefined,
+      toolNumber: undefined });
+    plot.selectReplayFrame({ position: 2, executionStep: 1 });
+    expect(plot.toolObject?.position.toArray()).toEqual([1, 0, -1]);
+    plot.selectReplayFrame({ position: 1, executionStep: 0 });
+    expect(plot.toolObject).toBeNull();
+    plot.selectReplayFrame({ position: 5, executionStep: 4 });
+    expect(plot.toolObject?.position.toArray()).toEqual([-1, -1, -1]);
     expect(requestPlot).toHaveBeenCalledOnce();
   });
 

@@ -7,6 +7,20 @@ from backend import main_import as api
 from backend.tests.test_cgiserver_import_regression import FakeRequest
 
 
+def test_occurrences_capture_tool_selection_and_verified_state_pose_only():
+    nodes = [SimpleNamespace(nc_code_line_nr=i + 1, command_parameter=words)
+             for i, words in enumerate([{"T": "200"}, {"M": "6"}, {"T": "2"}])]
+    control = SimpleNamespace(_canals={1: SimpleNamespace(_exec_sequence=nodes)})
+    pose = {"position": [1, 0, 2], "orientation": [0, 0, 0, 1]}
+    segments = [{"executionStep": 1, "lineNumber": 2, "recordKind": "state",
+                 "toolNumber": 200, "poses": [pose]}]
+    occurrences = api.build_execution_occurrences(control, 1, segments)
+    assert occurrences[0]["toolSelection"] is True
+    assert "toolSelection" not in occurrences[1]
+    assert occurrences[1]["toolState"] == {"toolNumber": 200, "poses": [pose]}
+    assert occurrences[2]["toolSelection"] is True
+
+
 def classify(codes=(), words=None, variable=None, count=1, prior="G0", changed=None):
     start = {"X1": 8.5, "Z1": -1, "B1": 0, "C1": 180}
     end = {**start, "C1": 0, **(changed or {})}
@@ -29,6 +43,7 @@ def classify(codes=(), words=None, variable=None, count=1, prior="G0", changed=N
     (set(), {"N": "200", "T": "200"}, None, 1),
     (set(), {"Z": "0", "S": "3000", "M": "3", "T": "2"}, None, 1),
     ({"G0"}, {"X": "8", "M": "6"}, None, 3),
+    ({"G0", "G18", "G99", "G97"}, {"X": "0", "Z": "-1", "S": "1000", "M": "3", "T": "11"}, None, 1),
     ({"G266"}, {}, None, 1),
     (set(), {}, "#100=2", 4),
 ])
@@ -48,6 +63,7 @@ def test_verified_engine_commands_are_state_regardless_of_samples(codes, words, 
     {"codes": {"G266"}, "words": {"X": "1"}},
     {"words": {"M": "300"}},
     {"words": {"M": "3"}, "changed": {"Z1": 0}},
+    {"codes": {"G0", "G18", "G99", "G97"}, "words": {"X": "0", "Z": "-1", "M": "3", "T": "11"}, "changed": {"Z1": 0}},
     {"words": {"M": "3"}, "changed": {"C1": float("nan")}},
     {"variable": "#100=2", "words": {"X": "0"}},
     {"codes": {"G0"}, "words": {"X": "8"}},
@@ -107,3 +123,39 @@ def test_real_star_spindle_tool_resets_and_feeds_keep_occurrences():
     repeats = [item for item in channel["executionOccurrences"] if item["lineNumber"] == 12]
     assert len(repeats) == 2
     assert repeats[0]["executionStep"] != repeats[1]["executionStep"]
+
+
+def test_real_center_setup_is_state_but_following_feed_is_not_skipped():
+    response = asyncio.run(api.cgiserver_import(FakeRequest({
+        "toolPathMode": "center",
+        "machinedata": [{"machineName": "FANUC_STAR_SR20R_IV_B", "canalNr": "1",
+                         "program": "G0 X20 Z15\nT1100\nG0 G18 G99 G97 X0. Z-1. S1000 M3 T11\nG0 X0 Y0\nG0 Z-1\nG1 Z2 F.1"}],
+    })))
+    assert response["success"], response
+    records = response["canal"]["1"]["segments"]
+    setup = [s for s in records if s["lineNumber"] == 3]
+    assert setup and all(s["recordKind"] == "state" for s in setup)
+    feeds = [s for s in records if s.get("traversal") == "FEED"]
+    assert feeds and all(s["recordKind"] == "motion" for s in feeds)
+
+
+def test_real_star_tool_return_after_milling_is_a_rapid_not_an_unknown_cut():
+    response = asyncio.run(api.cgiserver_import(FakeRequest({
+        "toolPathMode": "center",
+        "machinedata": [{"machineName": "FANUC_STAR_SR20R_IV_B", "canalNr": "1",
+                         "program": "\n".join([
+                             "T3300", "G0 X40 Y-16.856 Z8", "M38", "M9",
+                             "S3000 M3", "N200", "T200", "G0 G18 G40 X17 Y0",
+                             "G0 Z0 Y0", "G1 X0 F.05",
+                         ])}],
+    })))
+    assert response["success"], response
+    channel = response["canal"]["1"]
+    returns = [s for s in channel["segments"] if s["lineNumber"] == 7]
+    assert returns
+    assert all(s["recordKind"] == "motion" and s["geometry"] == "LINEAR"
+               and s["traversal"] == "RAPID" and s["sourceCode"] == "G00" for s in returns)
+    assert returns[0]["points"][0]["y"] != returns[-1]["points"][-1]["y"]
+    assert returns[-1]["points"][-1]["y"] == 0
+    assert any(s["lineNumber"] == 10 and s["recordKind"] == "motion"
+               and s["traversal"] == "FEED" for s in channel["segments"])

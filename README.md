@@ -75,24 +75,43 @@ is at most half the selected coarse/fine pitch. That display approximation is
 not a certified physical machining tolerance or a change to the removal math.
 
 The first milling/drilling cut (including coaxial drilling), or non-coaxial
-turning, switches that prefix to the existing 3D dexel path. A cold transition
-replays **all preceding cuts at the selected dexel pitch**, not a coarse mesh or
-an unmachined cylinder. Later turning subtracts from the same 3D material and
+turning, switches that prefix to the existing 3D dexel path. The exact preceding
+meridian bands become an **immutable implicit base**, not a coarse mesh or an
+unmachined cylinder. Only tiles touched by subsequent cuts allocate intervals.
+Analytical stock-local ray intersections support all three axes, bores, annuli,
+cones and cutoff gaps; initialization, rendering, GPU copies and history restores
+use the same base. Later turning subtracts from the same sparse 3D material and
 never re-revolves it. Earlier timeline prefixes can still display their own
 rotational stock; forward navigation cannot resurrect later pockets or holes.
 Immutable stock caches, GPU tile sharing/history and stopped-prefix handling
 remain in effect.
 
-**Limitations:** conversion to 3D can still be expensive: a diameter 20 × length
+History staging is bounded **before each compute submission** by its ray count,
+cutter count and four-event-per-cutter ceiling, then drained after queue completion.
+The staging ceiling remains 1,048,576 events and the separate total retention
+ceiling remains 4,194,304 events (usually lower under the shared memory budget).
+Exhausted retention explicitly disables history, not completed material removal.
+
+**Limitations:** subsequent broad changes can still be expensive: a diameter 20 × length
 50 part at 0.02 mm may exceed the existing 256 MiB buffer budget once cuts affect
-broad 3D regions. This implementation defers that allocation; it does not claim
-compact-profile-seeded sparse 3D storage. Refinement failures retain the last
+broad 3D regions. Compact-profile-seeded sparse storage removes the initial
+whole-turning replay allocation; it does not provide unlimited/out-of-core later
+turning. The implicit base supports at most 64 disjoint intervals per ray;
+excess complexity fails explicitly. Refinement failures retain the last
 displayed stock and report an error. Requested pitch is never silently enlarged;
 automatic CPU fallback is limited to known capability failures and only when
 the configured CPU resolution preserves the requested detail. Explicitly
 selecting CPU remains available. Feedback stays progress-only, with warning/error
 icons and console details. CPU/reference tests validate geometry and lifecycle,
 not WebGPU hardware execution or timings.
+
+Nonbrowser allocation checks for Ø20 × 50 stock at 0.02 mm used 6,225,920
+logical rays: a localized subsequent cut materialized 5 tiles / 5,120 rays,
+with a 1,726,604-byte combined stock estimate. The unchanged saved full fixture's
+first milling phase (its original 3 mm mill, not the latest 2 mm definition)
+needed 290 tiles / 296,960 rays and a 78,597,256-byte dexel-layout estimate.
+These are actual allocation/preflight measurements, not GPU timings or a
+whole-program fine-resolution guarantee.
 
 ## Transfer Configuration
 

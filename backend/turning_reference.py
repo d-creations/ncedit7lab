@@ -92,7 +92,7 @@ def resolve_turning_references(control, channel, segments, request, machine_name
         nose = tool.get("turningNoseRadius")
         position = tool.get("turningTipPosition", [0, 0, 0])
         radius = offset.get("radius", 0) if mode != "OFF" else 0
-        q = offset.get("tipOrientation", tool.get("turningTipOrientation")) if mode == "OFF" else offset.get("tipOrientation")
+        q = offset.get("tipOrientation", tool.get("turningTipOrientation")) if radius == 0 else offset.get("tipOrientation")
         if (type(nose) not in (float, int) or not math.isfinite(nose) or nose < 0
                 or type(radius) not in (float, int) or not math.isfinite(radius) or radius < 0
                 or type(q) is not int or q not in Q_VECTORS
@@ -139,5 +139,5 @@ def resolve_turning_references(control, channel, segments, request, machine_name
                 },
             })
         segment["poses"] = normalized
-        if mode == "OFF" and "tipOrientation" not in offset:
+        if radius == 0 and "tipOrientation" not in offset:
             context["toolOffset"] = {**offset, "tipOrientation": q}

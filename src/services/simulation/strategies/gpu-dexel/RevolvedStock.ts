@@ -68,7 +68,8 @@ export class RevolvedStock {
     let offset = 0;
     const point = (r: number, z: number, j: number): [number, number, number] => {
       const angle = ((j % segments) * Math.PI * 2) / segments;
-      return [r * Math.cos(angle), r * Math.sin(angle), z];
+      // Test degeneracy in the representation actually uploaded to the renderer.
+      return [Math.fround(r * Math.cos(angle)), Math.fround(r * Math.sin(angle)), Math.fround(z)];
     };
     for (const panel of panels)
       for (let j = 0; j < segments; j++) {

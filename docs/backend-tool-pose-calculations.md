@@ -105,6 +105,36 @@ commands additionally require an executed rapid modal context. Feed/cycle
 blocks, unknown G/M codes, ambiguous occurrence alignment and incomplete
 motion semantics are not certified as state.
 
+STAR full tool selection can generate a real B/Y rapid return even on a
+standalone `T200` block. The engine tool handler must retain the generated
+G00 metadata when that return is the block's only motion; changed linear
+axes must not be certified as a stationary state command. Preserve metadata
+from an authored following motion rather than overwrite a feed with RAPID.
+The current 169-occurrence diagnostic previously stopped at line 99,
+`T200 (TURNING FINISH)`, before any finishing feeds despite the following
+G18/Y0 reset. With the engine correction, preparation accepts 296 cutting
+subsegments through both milling phases and the second turning phase.
+Its next stop is the undeclared T1100 tool at line 152. This verifies
+backend/preparation, not GPU rendering: the same 2 mm, 89-degree mill input
+still exceeds the fine .02 mm layout budget during later turning.
+
+Stationary spindle/tool setup may include the explicitly allowed plane, unit,
+feed-mode and speed-mode words. The real center block
+`G0 G18 G99 G97 X0. Z-1. S1000 M3 T11` produced a singleton with no motion
+metadata: its G18/G99 words previously prevented state certification.
+Unchanged captured linear axes plus the aligned executed node now certify it,
+without manufacturing cutter endpoints or dropping the following G1 feed.
+The unchanged authoritative full fixture places it at occurrence 128; the
+explicit diagnostic variant with Y0 resets before finish and center places it
+at occurrence 130 (line 149). The supplied console log alone does not contain
+the edited NC/source record, so that variant must not be called an exact
+reconstruction of the latest 169-occurrence program.
+
+Singleton G1 endpoints are expanded only when finite complete X/Y/Z captured
+axes (including the channel suffix), all other captured axes and the aligned
+unit pose prove zero displacement. Partial axes, changed translation/rotation,
+arcs and unsupported cycles remain incomplete/unsupported.
+
 The frontend excludes certified state records from stock removal regardless
 of sample count, while retaining their command occurrences, source indices
 and timing. Older backends keep only the narrow verified-source fallback.
@@ -224,6 +254,37 @@ git --no-pager diff --check
 All passed (exit 0). The build retains the existing large-chunk warning.
 The scoped lint command reports errors only; existing style warnings are not
 claimed to be eliminated.
+
+### Persistent tools and repeated turning/milling
+
+Executed occurrences carry an explicit `toolSelection` barrier for T words and
+captured `toolState` for certified state records. Replay builds tool-display
+states by executed prefix, independently of the current motion highlight.
+Non-motion M6 records do not remove the selected tool; backward seeks resolve
+their own historical tool and pose rather than retaining the last displayed one.
+An unknown newly selected tool remains unavailable until execution supplies its
+state. M6's machine-specific C-axis reset is unchanged.
+
+After an offset reset, LEFT/RIGHT compensation can legitimately have zero
+radius and no register Q. The adapter then uses the declared physical tip
+orientation for pose registration, just as for OFF, without inventing path
+compensation. Nonzero compensated paths still require an executed register Q.
+
+A singleton G1 is expanded into equal endpoints only when its captured finite
+start/end axes are identical, its pose matches the point, and its orientation
+is valid. Changing rotary axes, missing context, arcs and unknown records are
+not converted to stationary cuts.
+
+The revised mixed-program diagnostic retained the tilted 2 mm x 6 mm mill at
+89 degrees. Without resetting Y before the second turning block, preparation
+stopped outside the spindle meridian after 154 subsegments. A separately
+labelled diagnostic variant restoring `G18 G40 G0 Y0 Z0` prepared and compiled
+319 subsegments in turning/milling/turning/milling order without a stop. This
+variant ends after the second milling operation; it is not a validation of
+the later drilling/cutoff program or a machine-operation recommendation.
+Material-oracle replay tests cover both milling operations, intervening turning,
+backward prefixes and fine refinement without resurrecting removed material.
+These are non-hardware checks, not GPU timing/equivalence measurements.
 
 ## 4. Normalized reference position
 

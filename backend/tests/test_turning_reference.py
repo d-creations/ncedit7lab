@@ -86,6 +86,63 @@ def test_executed_register_overrides_and_arc_samples_are_not_compensated_twice()
         assert [pose["position"][0] - 0.2, pose["position"][2] + 0.2] == pytest.approx([point["x"], point["z"]])
 
 
+@pytest.mark.parametrize("side", ["G41", "G42"])
+def test_zero_offset_after_reselection_uses_physical_tip_without_inventing_compensation(side):
+    segments = execute(
+        f"T200\nG18 G0 X20 Z0\nT2\nG1 Z5 F0.05\nT0\nT200\nG18 G0 X20 Z0\n{side} G1 Z5\nG1 Z10\nG40",
+        overrides={"toolOffsets": [{"offsetNumber": 2, "qValue": 1, "rValue": 0.4}]},
+    )
+    steady = next(segment for segment in segments if segment["lineNumber"] == 9)
+    offset = steady["motionContext"]["toolOffset"]
+    assert offset["radius"] == 0
+    assert offset["tipOrientation"] == 3
+    point = steady["points"][-1]
+    assert (point["x"], point["z"]) == pytest.approx((10, 10))
+    for point, pose in zip(steady["points"], steady["poses"]):
+        assert pose["turningReference"]["compensationRadius"] == 0
+        assert pose["turningReference"]["tipOrientation"] == 3
+        assert [pose["position"][0] + 0.2, pose["position"][2] - 0.2] == pytest.approx(
+            [point["x"] + 0.2, point["z"] + 0.2],
+        )
+
+
+def test_repeated_feed_is_a_certified_stationary_cut_not_a_missing_endpoint():
+    segments = execute("T200\nG18 G0 X20 Z0\nG41 G1 Z5 F0.05\nG1 Z5\nG40")
+    stationary = next(segment for segment in segments if segment["lineNumber"] == 4)
+    assert stationary["recordKind"] == "motion"
+    assert len(stationary["points"]) == len(stationary["poses"]) == 2
+    assert stationary["points"][0] == stationary["points"][1]
+    assert stationary["poses"][0] == stationary["poses"][1]
+    assert stationary["poses"][0]["turningReference"]["radiusMode"] == "LEFT"
+
+
+@pytest.mark.parametrize("mutation", ["missing", "partial", "translation", "rotation", "invalid", "arc"])
+def test_unproven_singletons_remain_incomplete(mutation):
+    segment = {
+        "geometry": "LINEAR", "traversal": "FEED", "sourceCode": "G01",
+        "points": [{"x": 1, "y": 0, "z": 2}],
+        "poses": [{"position": [1, 0, 2], "orientation": [0, 0, 0, 1],
+                   "frameId": "workpiece:mainSpindle", "reference": "turningVirtualTip"}],
+        "motionContext": {"startAxes": {"X": 1, "Y": 0, "Z": 2, "C": 0},
+                          "endAxes": {"X": 1, "Y": 0, "Z": 2, "C": 0}},
+    }
+    if mutation == "missing":
+        del segment["motionContext"]["startAxes"]
+    elif mutation == "partial":
+        del segment["motionContext"]["startAxes"]["Y"]
+        del segment["motionContext"]["endAxes"]["Y"]
+    elif mutation == "translation":
+        segment["motionContext"]["endAxes"]["X"] = 3
+    elif mutation == "rotation":
+        segment["motionContext"]["endAxes"]["C"] = 180
+    elif mutation == "invalid":
+        segment["poses"][0]["orientation"] = [0, 0, 0, 0]
+    else:
+        segment["geometry"] = "ARC_CW"
+    api.expand_stationary_linear_motion(segment)
+    assert len(segment["points"]) == len(segment["poses"]) == 1
+
+
 @pytest.mark.parametrize("mounting,shift", [((0, 0, 0), (0.2, 0, 0.2)),
                                           ((0, 90, 0), (0.2, 0, -0.2)),
                                           ((0, 180, 0), (-0.2, 0, -0.2))])

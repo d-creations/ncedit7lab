@@ -779,15 +779,35 @@ output is sorted by ray and cutter/cut order, with exact execution-step ranks.
 Overlapping later removals do not erase the earlier history. Only covered prefixes
 at the same pitch may use this history.
 
-Capture has a bounded GPU staging buffer of at most 1,048,576 events. It is drained
-at cutter-pass boundaries before filling when possible; retained history is capped
+Capture has a bounded GPU staging buffer of at most 1,048,576 events. Before
+every actual submission, its ray count and cutter-pass length are limited so
+`rays × cutters × 4` cannot exceed that capacity. The queue is completed and the
+capture is drained/reset before another capturing submission, including within
+one 256-cutter pass. Retained history is separately capped
 at 4,194,304 events and usually less by the shared 256 MiB estimate, including
 sorting/readback staging. A single overfull capture batch or exhausted retention
 budget explicitly disables that incomplete history without invalidating finished
 stock. It never publishes a truncated replay as complete.
+The nonbrowser mocked-queue regression streams 1,280,000 events from a single
+cutter pass without staging overflow; it is scheduling/readback evidence, not
+hardware execution evidence.
 History ray indices are sparse too. Published stock releases cutter, error and
 capture buffers and becomes immutable, retaining only interval/count/display
 index buffers. This leaves more room for fine history and checkpoints.
+
+For eligible cylindrical turning prefixes, those original intervals are now the
+immutable, double-precision meridian arrangement at the first asymmetric cut,
+not the raw cylinder. An indexed packed Float32 slab/band table shares the
+existing tile-index storage binding (eight subtraction bindings remain). X/Y
+rays use indexed axial slab lookup and radial chord/shell intersections; Z rays
+clip linear meridian inequalities and union adjacent spans. CPU reference queries
+retain doubles. Initialize, display, history restore and GPU copy use that same
+table. History/copy compatibility includes the exact serialized base fingerprint.
+Only subsequent cuts materialize tiles, including later turning; neither a
+new profile nor a rotational reset replaces already milled material.
+Fine/coarse grids, COW arenas, device-loss/cancellation ownership, checkpoints
+and the combined 256 MiB estimate remain bounded. Broad later turning can still
+exceed that estimate, and bases requiring more than 64 intervals fail explicitly.
 
 Covered fine history is selected immediately, without a coarse downgrade or idle
 refinement delay. Covered jumps restore original material or a retained earlier checkpoint and apply

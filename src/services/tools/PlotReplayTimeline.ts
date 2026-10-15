@@ -5,6 +5,8 @@ import type { PlotRunSnapshot } from './PlotRunSnapshot';
 export interface PlotReplayTimeline {
   occurrences: DeepReadonly<ExecutionOccurrence>[];
   segments: Map<number, DeepReadonly<PlotSegment>>;
+  /** Persistent display state, indexed by executed prefix, never by cursor history. */
+  toolDisplays: Array<DeepReadonly<PlotSegment> | undefined>;
   complete: boolean;
 }
 
@@ -31,7 +33,7 @@ export function createPlotReplayTimeline(run: PlotRunSnapshot): PlotReplayTimeli
     (occurrence) => occurrence.channelId === channelId,
   );
   const complete = captured !== undefined;
-  const occurrences = complete
+  const occurrences: DeepReadonly<ExecutionOccurrence>[] = complete
     ? [...captured!]
     : [...segments].map(([executionStep, segment]) => ({
         channelId,
@@ -59,5 +61,29 @@ export function createPlotReplayTimeline(run: PlotRunSnapshot): PlotReplayTimeli
     )
       throw new Error('Executed-command history does not match the plotted motion');
   }
-  return { occurrences, segments, complete };
+  let display: DeepReadonly<PlotSegment> | undefined;
+  const toolDisplays = occurrences.map((occurrence) => {
+    const motion = segments.get(occurrence.executionStep);
+    const state = occurrence.toolState;
+    if (occurrence.toolSelection &&
+      (!state || state.toolNumber !== display?.toolNumber)) display = undefined;
+    if (state) {
+      if (state.toolNumber === undefined || state.toolNumber === null || state.toolNumber === 'unknown') {
+        display = undefined;
+      } else if (state.poses?.length) {
+        const position = state.poses[state.poses.length - 1].position;
+        const point = { x: position[0], y: position[1], z: position[2] };
+        display = {
+          ...state, type: 'rapid', startPoint: point, endPoint: point,
+          channelId, executionStep: occurrence.executionStep,
+          subsegmentIndex: Math.max(0, state.poses.length - 2),
+        };
+      } else if (display && display.toolNumber === state.toolNumber) {
+        display = { ...display, motionContext: state.motionContext ?? display.motionContext };
+      } else display = undefined;
+    }
+    if (motion) display = motion.poses?.length ? motion : undefined;
+    return display;
+  });
+  return { occurrences, segments, toolDisplays, complete };
 }

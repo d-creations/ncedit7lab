@@ -248,6 +248,13 @@ export interface ExecutionOccurrence {
   channelId: ChannelId;
   executionStep: number;
   lineNumber?: number;
+  /** Executed T word: invalidates a previous tool unless execution supplies its new state. */
+  toolSelection?: boolean;
+  toolState?: {
+    toolNumber?: number | string | null;
+    motionContext?: MotionContext;
+    poses?: readonly PoseSample[];
+  };
 }
 
 export interface PlotPoint {

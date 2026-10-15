@@ -43,6 +43,33 @@ function run(
   };
 }
 describe('executed replay timeline', () => {
+  it('resolves M6/state holds, explicit selections, offsets and backwards prefixes independently', () => {
+    const pose = { position: [4, 5, 6] as const, orientation: [0, 0, 0, 1] as const,
+      frameId: 'workpiece:test', reference: 'millingTip' as const };
+    const first = { ...segment(1), toolNumber: 1, poses: [pose, pose] };
+    const second = { ...segment(5), toolNumber: 2, poses: [pose, { ...pose, position: [7, 8, 9] as const }] };
+    const history = Array.from({ length: 8 }, (_, executionStep) => ({
+      channelId: '1' as const, executionStep, lineNumber: executionStep === 1 || executionStep === 5 ? 2 : 1,
+    }));
+    const timeline = createPlotReplayTimeline(run([first, second], history.map((entry) => ({
+      ...entry,
+      ...(entry.executionStep === 4 ? { toolSelection: true } : {}),
+      ...(entry.executionStep === 6 ? { toolSelection: true, toolState: {
+        toolNumber: 2, motionContext: {
+          channelId: '1', startAxes: {}, endAxes: {}, toolOffset: { tipOrientation: 8 },
+        },
+      } } : {}),
+    }))));
+    expect(timeline.toolDisplays[0]).toBeUndefined();
+    expect(timeline.toolDisplays[2]).toBe(first); // M6 is not a tool-change barrier.
+    expect(timeline.toolDisplays[3]).toBe(first);
+    expect(timeline.toolDisplays[4]).toBeUndefined();
+    expect(timeline.toolDisplays[5]).toBe(second);
+    expect(timeline.toolDisplays[7]?.motionContext?.toolOffset.tipOrientation).toBe(8);
+    expect(timeline.toolDisplays[7]?.poses).toBe(second.poses);
+    expect(timeline.toolDisplays[2]).toBe(first);
+    expect(timeline.segments.get(2)).toBeUndefined();
+  });
   it('includes non-motion commands and rapids, retains repeated lines and selects the last submove', () => {
     const first = segment(1),
       last = { ...first, subsegmentIndex: 1 };

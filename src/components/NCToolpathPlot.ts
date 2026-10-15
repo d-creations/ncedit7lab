@@ -884,10 +884,11 @@ export class NCToolpathPlot extends HTMLElement {
     const segment = this.replayTimeline?.segments.get(occurrence.executionStep);
     const run = this.displayedRunId ? this.executedProgramService.getPlotRun(this.displayedRunId) : undefined;
     const source = run?.inputs[0]?.snapshot;
-    const tool = source && segment && this.executedProgramService.getRunTool(
-      run!.runId, source.identity.programId, occurrence.channelId, segment.toolNumber);
+    const display = this.replayTimeline?.toolDisplays[frame.position - 1];
+    const tool = source && display && this.executedProgramService.getRunTool(
+      run!.runId, source.identity.programId, occurrence.channelId, display.toolNumber);
     this.highlightSegment(segment ? structuredClone(segment) : undefined);
-    if (segment) this.updateToolMesh(structuredClone(segment), tool);
+    if (display) this.updateToolMesh(structuredClone(display), tool);
     else {
       this.selectedSegment = undefined;
       this.selectedTool = undefined;

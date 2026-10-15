@@ -11,6 +11,7 @@ import type { RemovalMotion, SimulationInput } from '../../../shared/SimulationT
 import type { ProgramToolDefinition } from '@services/tools/SimulationMetadata';
 import { RotationalProfile } from '../../cpu-hybrid/RotationalProfile';
 import { RevolvedStock } from '../RevolvedStock';
+import { RotationalDexelBase } from '../RotationalDexelBase';
 
 const model = vi.hoisted(() => ({ constructed: vi.fn(), calculate: vi.fn(), copy: vi.fn() }));
 
@@ -28,6 +29,7 @@ vi.mock('../GpuDexelStock', async () => {
       dispose = vi.fn();
       releasePreparation = vi.fn();
       takeHistory = vi.fn();
+      rotationalBase?: RotationalDexelBase;
       constructor(
         _renderer: unknown,
         _device: unknown,
@@ -37,8 +39,10 @@ vi.mock('../GpuDexelStock', async () => {
         private sweeps: CompiledGpuSweep[],
         _placement: THREE.Matrix4,
         capacity: 16 | 32 | 64,
-        options: { retainedTiles?: Uint32Array },
+        options: { retainedTiles?: Uint32Array; rotationalBase?: RotationalDexelBase },
       ) {
+        this.group.matrix.copy(_placement);
+        this.rotationalBase = options.rotationalBase;
         this.layout = createDexelLayout(size, pitch, capacity, {
           bounds: sweeps.map((sweep) => sweep.bounds),
           retainedTiles: options.retainedTiles,
@@ -126,8 +130,13 @@ const laterTurning = motion(insert, 'turning', 5, [1.5, 0, -2], [1.5, 0, 2]);
 function field(frame: GpuReplayFrame, point: THREE.Vector3): number {
   if (frame.backend === 'hybrid-turning') return frame.stock.profile.volume.distance(point);
   const applied = (frame.stock as unknown as { applied: CompiledGpuSweep[] }).applied;
+  const base = frame.stock.rotationalBase;
   return Math.max(
-    cylinderVolume(2, 6).distance(point),
+    base
+      ? base.intervals(2, point).some(([a, b]) => point.z > a && point.z < b)
+        ? -1
+        : 1
+      : cylinderVolume(2, 6).distance(point),
     ...applied.map((sweep) => -evaluateGpuSweep(sweep, point)),
   );
 }
@@ -184,6 +193,29 @@ describe('symmetry-aware hybrid turning replay', () => {
     vi.useRealTimers();
   });
 
+  it('preserves every cut through turn/mill/turn/mill, repeated prefixes and fine refinement', async () => {
+    const secondMill = motion(mill, 'milling', 7, [-0.6, -0.5, -0.4], [-0.6, -0.5, 0.4]);
+    const config = input([axial, milling, laterTurning, secondMill]);
+    const replay = session();
+    await replay.start(
+      config,
+      Array.from({ length: 9 }, (_, i) => i),
+      () => {},
+    );
+    for (const position of [2, 4, 6, 8, 3, 6, 0, 8, 4, 9]) {
+      const frame = await replay.seek(position);
+      assertPrefix(frame, config, position - 1);
+      expect(frame.backend).toBe(position <= 3 ? 'hybrid-turning' : 'webgpu-dexel');
+    }
+    await vi.advanceTimersByTimeAsync(350);
+    const fine = refined.mock.calls.at(-1)?.[0] as GpuReplayFrame;
+    expect(fine).toMatchObject({ position: 9, phase: 'fine', backend: 'webgpu-dexel' });
+    assertPrefix(fine, config, 8);
+    expect(failed).not.toHaveBeenCalled();
+    replay.cancel();
+    await expect(replay.seek(4)).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
   it('finishes diameter 20 × length 50 turning at 0.02 mm without allocating any 3D rays', async () => {
     const config = {
       ...input([axial]),
@@ -226,10 +258,12 @@ describe('symmetry-aware hybrid turning replay', () => {
     assertPrefix(before, config, 2);
     const transition = await replay.seek(4);
     expect(transition.backend).toBe('webgpu-dexel');
-    expect(transition.newMotions).toBe(2);
+    expect(transition.newMotions).toBe(1);
     expect(
       model.calculate.mock.calls[0][0].map((sweep: CompiledGpuSweep) => sweep.motionIndex),
-    ).toEqual([0, 1]);
+    ).toEqual([1]);
+    if (transition.backend !== 'webgpu-dexel') throw new Error('Expected sparse stock');
+    expect(transition.stock.rotationalBase).toBeDefined();
     assertPrefix(transition, config, 3);
     const pocket = new THREE.Vector3(0.6, 0.5, 0.1);
     expect(field(before, pocket)).toBeLessThan(0);
@@ -280,7 +314,7 @@ describe('symmetry-aware hybrid turning replay', () => {
   );
 
   it('accepts axial placement, explicit bound frame transforms and a reversed spindle axis', async () => {
-    const config = input([axial]);
+    const config = input([axial, milling]);
     config.stock = { ...config.stock, position: [0, 0, 1], rotation: [0, 0, 90] };
     config.binding = { ...config.binding, position: [7, -3, 2], rotation: [20, 30, 40] };
     const placement = stockPlacement(config.stock, config.binding);
@@ -317,9 +351,29 @@ describe('symmetry-aware hybrid turning replay', () => {
     expect(new THREE.Vector3(...config.binding.spindleOrigin).applyMatrix4(inverse).x).toBeCloseTo(
       0,
     );
-    const frame = await session().start(config, [0, 1], () => {}, true);
+    const replay = session();
+    await replay.start(config, [0, 1, 2, 3]);
+    const frame = await replay.seek(3);
     expect(frame.backend).toBe('hybrid-turning');
     expect(frame.stock.group.matrix.elements).toEqual(placement.elements);
+    const mixed = await replay.seek(4);
+    expect(mixed.backend).toBe('webgpu-dexel');
+    expect(mixed.stock.group.matrix.elements).toEqual(placement.elements);
+    if (mixed.backend !== 'webgpu-dexel') throw new Error('Expected sparse stock');
+    const base = mixed.stock.rotationalBase!;
+    const first = compileGpuSweeps(config)[0].turningVolume!;
+    for (let z = -2.73; z < 3; z += 0.37)
+      for (let x = 0.13; x < 2; x += 0.29) {
+        const point = new THREE.Vector3(x, 0.17, z);
+        const expected = Math.max(cylinderVolume(2, 6).distance(point), -first.distance(point));
+        if (Math.abs(expected) < 1e-6) continue;
+        for (const axis of [0, 1, 2])
+          expect(
+            base
+              .intervals(axis, point)
+              .some(([a, b]) => point.getComponent(axis) > a && point.getComponent(axis) < b),
+          ).toBe(expected < 0);
+      }
   });
 
   it('uses validated mode, never tool number, for T200 drilling', async () => {
@@ -392,7 +446,7 @@ describe('symmetry-aware hybrid turning replay', () => {
     expect(model.constructed).not.toHaveBeenCalled();
   });
 
-  it('reports the concrete large-part 3D refinement limit without reducing fine pitch', async () => {
+  it('refines diameter 20 × length 50 localized milling at 0.02 mm with an implicit turned base', async () => {
     const fullTurning = motion(insert, 'turning', 1, [9.7, 0, -24], [9.7, 0, 24]);
     const config = {
       ...input([fullTurning, milling]),
@@ -407,9 +461,14 @@ describe('symmetry-aware hybrid turning replay', () => {
     scene.add(transition.stock.group);
     const stock = transition.stock;
     await vi.advanceTimersByTimeAsync(350);
-    expect(failed).toHaveBeenCalledOnce();
-    expect(refined).not.toHaveBeenCalled();
-    expect((await replay.seek(4)).stock).toBe(stock);
+    expect(failed).not.toHaveBeenCalled();
+    expect(refined).toHaveBeenCalledOnce();
+    const fine = refined.mock.calls[0][0] as GpuReplayFrame;
+    expect(fine).toMatchObject({ backend: 'webgpu-dexel', phase: 'fine', pitchMm: 0.02 });
+    if (fine.backend !== 'webgpu-dexel') throw new Error('Expected sparse stock');
+    expect(fine.stock.layout.storageRays).toBeLessThan(fine.stock.layout.rays / 100);
+    expect(fine.estimatedBytes).toBeLessThan(64 * 1024 * 1024);
+    expect((await replay.seek(4)).stock).toBe(fine.stock);
     expect(stock.group.parent).toBe(scene);
     replay.cancel();
     scene.remove(stock.group);

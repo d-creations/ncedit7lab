@@ -12,6 +12,7 @@ import type { ProgramToolDefinition } from '@services/tools/SimulationMetadata';
 import { RotationalProfile } from '../../cpu-hybrid/RotationalProfile';
 import { RevolvedStock } from '../RevolvedStock';
 import { RotationalDexelBase } from '../RotationalDexelBase';
+import { GpuDexelHistory } from '../GpuDexelHistory';
 
 const model = vi.hoisted(() => ({ constructed: vi.fn(), calculate: vi.fn(), copy: vi.fn() }));
 
@@ -30,6 +31,7 @@ vi.mock('../GpuDexelStock', async () => {
       releasePreparation = vi.fn();
       takeHistory = vi.fn();
       rotationalBase?: RotationalDexelBase;
+      updateBase?: boolean;
       constructor(
         _renderer: unknown,
         _device: unknown,
@@ -39,10 +41,15 @@ vi.mock('../GpuDexelStock', async () => {
         private sweeps: CompiledGpuSweep[],
         _placement: THREE.Matrix4,
         capacity: 16 | 32 | 64,
-        options: { retainedTiles?: Uint32Array; rotationalBase?: RotationalDexelBase },
+        options: {
+          retainedTiles?: Uint32Array;
+          rotationalBase?: RotationalDexelBase;
+          updateBase?: boolean;
+        },
       ) {
         this.group.matrix.copy(_placement);
         this.rotationalBase = options.rotationalBase;
+        this.updateBase = options.updateBase;
         this.layout = createDexelLayout(size, pitch, capacity, {
           bounds: sweeps.map((sweep) => sweep.bounds),
           retainedTiles: options.retainedTiles,
@@ -297,6 +304,86 @@ describe('symmetry-aware hybrid turning replay', () => {
       pitchMm: 0.02,
       position: 4,
     });
+  });
+
+  it('updates later broad turning implicitly and allocates only localized milling tiles at .02 mm', async () => {
+    const first = motion(insert, 'turning', 1, [8, 0, -24], [8, 0, 24]);
+    const pocket = motion(mill, 'milling', 3, [6.5, 0, -0.4], [6.5, 0, 0.4]);
+    const finish = motion(insert, 'turning', 5, [7, 0, -24], [7, 0, 24]);
+    const config = {
+      ...input([first, pocket, finish]),
+      stock: { type: 'cylinder' as const, diameter: 20, length: 50 },
+    };
+    const replay = session();
+    await replay.start(config, [0, 1, 2, 3, 4, 5, 6]);
+    const milled = await replay.seek(4);
+    const finished = await replay.seek(7);
+    if (milled.backend !== 'webgpu-dexel' || finished.backend !== 'webgpu-dexel')
+      throw new Error('Expected sparse mixed stock');
+    expect(finished.stock.rotationalBase?.fingerprint).not.toBe(
+      milled.stock.rotationalBase?.fingerprint,
+    );
+    expect(finished.stock.layout.storedTiles).toEqual(milled.stock.layout.storedTiles);
+    expect(finished.reusedPosition).toBe(4);
+    expect(Reflect.get(finished.stock, 'updateBase')).toBe(true);
+    expect(field(milled, new THREE.Vector3(7.5, 0.1, 0))).toBeLessThan(0);
+    expect(field(finished, new THREE.Vector3(7.5, 0.1, 0))).toBeGreaterThan(0);
+    expect(field(finished, new THREE.Vector3(6.5, 0, 0))).toBeGreaterThan(0);
+    expect(
+      model.calculate.mock.calls.flatMap(([sweeps]) =>
+        sweeps.map((sweep: CompiledGpuSweep) => sweep.motionIndex),
+      ),
+    ).not.toContain(2);
+    await vi.advanceTimersByTimeAsync(350);
+    const fine = refined.mock.calls.at(-1)?.[0] as GpuReplayFrame;
+    expect(fine).toMatchObject({ backend: 'webgpu-dexel', phase: 'fine', pitchMm: 0.02 });
+    if (fine.backend !== 'webgpu-dexel') throw new Error('Expected fine sparse stock');
+    expect(fine.stock.layout.estimatedBytes).toBeLessThan(8 * 1024 * 1024);
+    expect(fine.stock.layout.storedTiles.length).toBeLessThan(32);
+    expect(field(fine, new THREE.Vector3(6.5, 0, 0))).toBeGreaterThan(0);
+    const earlier = await replay.seek(5);
+    expect(field(earlier, new THREE.Vector3(7.5, 0.1, 0))).toBeLessThan(0);
+    expect(field(milled, new THREE.Vector3(7.5, 0.1, 0))).toBeLessThan(0);
+    expect(failed).not.toHaveBeenCalled();
+  });
+
+  it('uses only the target prefix when cold-starting after two turning/milling transitions', async () => {
+    const secondMill = motion(mill, 'milling', 7, [-0.6, -0.5, -0.4], [-0.6, -0.5, 0.4]);
+    const config = input([axial, milling, laterTurning, secondMill]);
+    const replay = session();
+    const final = await replay.start(config, [0, 1, 2, 3, 4, 5, 6, 7, 8], () => {}, true);
+    assertPrefix(final, config, 8);
+    for (const position of [4, 6, 8, 5, 9]) {
+      const frame = await replay.seek(position);
+      assertPrefix(frame, config, position - 1);
+    }
+    expect(
+      model.constructed.mock.calls.every(([stock]) => stock.rotationalBase !== undefined),
+    ).toBe(true);
+  });
+  it('discards history from another implicit prefix rather than restoring later turning into an earlier state', async () => {
+    const replay = session();
+    await replay.start(input([axial, milling, laterTurning]), [0, 1, 2, 3, 4, 5, 6]);
+    const before = await replay.seek(4);
+    if (before.backend !== 'webgpu-dexel') throw new Error('Expected mixed stock');
+    const history = new GpuDexelHistory(new Uint32Array(), before.stock.layout.rays, []);
+    const disposed = vi.spyOn(history, 'dispose');
+    const histories: Map<
+      string,
+      { history: GpuDexelHistory; through: number; baseFingerprint?: string }
+    > = Reflect.get(replay, 'histories');
+    histories.set('coarse', {
+      history,
+      through: 7,
+      baseFingerprint: before.stock.rotationalBase?.fingerprint,
+    });
+    const after = await replay.seek(7);
+    expect(disposed).toHaveBeenCalledOnce();
+    expect(after.historyHit).toBe(false);
+    assertPrefix(after, input([axial, milling, laterTurning]), 6);
+    const earlier = await replay.seek(5);
+    assertPrefix(earlier, input([axial, milling, laterTurning]), 4);
+    expect(field(before, new THREE.Vector3(1.6, 0.1, 0))).toBeLessThan(0);
   });
 
   it.each(['offset', 'tilted', 'box', 'disabled'])(

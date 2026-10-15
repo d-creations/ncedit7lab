@@ -268,14 +268,35 @@ fn gpuRestoreHistory(id: u32, capacity: u32, resume: u32, after: u32, through: u
 `;
 
 const DEXEL_COPY = `
-fn gpuCopyDexels(id: u32, sourceCapacity: u32, targetCapacity: u32, size: vec3f, dims: vec3f, cylinder: u32) -> void {
+fn gpuCopyDexels(id: u32, sourceCapacity: u32, targetCapacity: u32, trimBase: u32, size: vec3f, dims: vec3f, cylinder: u32) -> void {
   if (id >= gpuRayCount(dims)) { return; }
   let targetSlot = copyTargetTiles.value[id / 1024u];
   if (targetSlot == 0xffffffffu) { return; }
   let sourceSlot = copySourceTiles.value[id / 1024u];
   var count = gpuOriginalCount(id, size, dims, cylinder);
-  if (count > targetCapacity) { return; }
+  if (count > targetCapacity) { atomicOr(&copyErrors.value[0], 1u); return; }
   if (sourceSlot != 0xffffffffu) { count = copySourceCounts.value[sourceSlot * 1024u + id % 1024u]; }
+  if (trimBase != 0u && sourceSlot != 0xffffffffu) {
+    var original: array<vec2f, 64>;
+    let originalCount = gpuOriginalIntervals(id, size, dims, cylinder, &original);
+    var result: array<vec2f, 64>; var n = 0u; var a = 0u; var b = 0u;
+    loop {
+      if (a >= count || b >= originalCount) { break; }
+      let old = copySourceIntervals.value[(sourceSlot * 1024u + id % 1024u) * sourceCapacity + a];
+      let base = original[b];
+      let span = vec2f(max(old.x, base.x), min(old.y, base.y));
+      if (span.x < span.y) {
+        if (n >= targetCapacity) { atomicOr(&copyErrors.value[0], 1u); return; }
+        result[n] = span; n++;
+      }
+      if (old.y <= base.y) { a++; } else { b++; }
+    }
+    for (var i = 0u; i < n; i++) {
+      copyTargetIntervals.value[(targetSlot * 1024u + id % 1024u) * targetCapacity + i] = result[i];
+    }
+    copyTargetCounts.value[targetSlot * 1024u + id % 1024u] = n;
+    return;
+  }
   copyTargetCounts.value[targetSlot * 1024u + id % 1024u] = count;
   for (var i = 0u; i < count; i++) {
     var span = gpuOriginalSpan(id, i, size, dims, cylinder);
@@ -482,6 +503,8 @@ export class GpuDexelStock {
   historyUnavailable?: string;
   readonly historyKey: string;
   readonly rotationalBase?: RotationalDexelBase;
+  private readonly copyKey: string;
+  private readonly baseTransitionSource?: object;
 
   constructor(
     private readonly renderer: WebGPURenderer,
@@ -501,18 +524,21 @@ export class GpuDexelStock {
       arenaTiles?: number;
       arena?: GpuDexelTileArena;
       rotationalBase?: RotationalDexelBase;
+      updateBase?: boolean;
     },
   ) {
     this.rotationalBase = sparse?.rotationalBase;
     if ((this.rotationalBase?.maxIntervals ?? 0) > intervalCapacity)
       throw new GpuDexelIntervalOverflowError(intervalCapacity);
-    this.historyKey = JSON.stringify([
-      size.toArray(),
-      pitchMm,
-      cylinder,
-      stockToWorkpiece.elements,
-      this.rotationalBase?.fingerprint ?? null,
-    ]);
+    this.copyKey = JSON.stringify([size.toArray(), pitchMm, cylinder, stockToWorkpiece.elements]);
+    this.historyKey = JSON.stringify([this.copyKey, this.rotationalBase?.fingerprint ?? null]);
+    if (sparse?.updateBase) {
+      if (!sparse.source?.rotationalBase || !this.rotationalBase)
+        throw new SimulationCapabilityError(
+          'An implicit base update requires both source and target bases',
+        );
+      this.baseTransitionSource = sparse.source.identity;
+    }
     this.sweeps = sweeps;
     const historyEvents = sparse?.historyEvents ?? 0;
     this.historyLimit = sparse?.historyLimit ?? historyEvents;
@@ -544,12 +570,14 @@ export class GpuDexelStock {
     this.tileSlots = new Uint32Array(this.layout.tiles).fill(0xffffffff);
     const source = sparse?.source;
     const changed = new Set(sparse?.changedTiles ?? this.layout.storedTiles);
+    if (this.baseTransitionSource) for (const tile of source!.layout.storedTiles) changed.add(tile);
     const canShare =
       source?.sealed &&
       !source.disposed &&
       source.renderer === renderer &&
       source.device === device &&
-      source.historyKey === this.historyKey &&
+      source.copyKey === this.copyKey &&
+      (source.historyKey === this.historyKey || this.baseTransitionSource === source.identity) &&
       source.layout.intervalCapacity === intervalCapacity &&
       source.layout.storedTiles.every((tile) => this.layout.storedTiles.includes(tile));
     const privateTiles = this.layout.storedTiles.filter(
@@ -754,7 +782,8 @@ export class GpuDexelStock {
       !source.calculated ||
       source.renderer !== this.renderer ||
       source.device !== this.device ||
-      source.historyKey !== this.historyKey ||
+      (source.historyKey !== this.historyKey &&
+        (source.copyKey !== this.copyKey || this.baseTransitionSource !== source.identity)) ||
       source.cylinder !== this.cylinder ||
       !source.group.matrix.equals(this.group.matrix) ||
       !source.layout.size.equals(this.layout.size) ||
@@ -777,6 +806,8 @@ export class GpuDexelStock {
     source.active++;
     this.calculated = false;
     this.resume.value = 0;
+    this.errorAttribute.array.fill(0);
+    this.errorAttribute.needsUpdate = true;
     const bindings = code(
       '',
       [
@@ -796,6 +827,7 @@ export class GpuDexelStock {
         storage(this.countAttribute, 'uint', this.countAttribute.array.length).setName(
           'copyTargetCounts',
         ),
+        storage(this.errorAttribute, 'uint', 4).setName('copyErrors').toAtomic(),
         storage(source.tileIndices, 'uint', source.tileIndices.array.length)
           .setName('copySourceTiles')
           .toReadOnly(),
@@ -817,6 +849,7 @@ export class GpuDexelStock {
       targetCapacity: uniform(this.layout.intervalCapacity, 'uint').setName(
         'dexelCopyTargetCapacity',
       ),
+      trimBase: uniform(this.baseTransitionSource ? 1 : 0, 'uint').setName('dexelCopyTrimBase'),
       size: uniform(this.layout.size).setName('dexelCopySize'),
       dims: uniform(this.layout.dimensions).setName('dexelCopyDimensions'),
       cylinder: uniform(this.cylinder ? 1 : 0, 'uint').setName('dexelCopyCylinder'),
@@ -853,6 +886,15 @@ export class GpuDexelStock {
       if (!copyRanges.length) {
         const completion = await Promise.race([lost, this.device.queue.onSubmittedWorkDone()]);
         if (completion instanceof Error) throw completion;
+      }
+      if (this.baseTransitionSource) {
+        const header = await Promise.race([
+          lost,
+          this.renderer.getArrayBufferAsync(this.errorAttribute),
+        ]);
+        if (header instanceof Error) throw header;
+        if (new Uint32Array(header)[0] & 1)
+          throw new GpuDexelIntervalOverflowError(this.layout.intervalCapacity);
       }
       if (this.disposed || source.disposed || cancelled())
         throw new DOMException('GPU stock copy cancelled', 'AbortError');

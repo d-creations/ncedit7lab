@@ -159,3 +159,26 @@ def test_real_star_tool_return_after_milling_is_a_rapid_not_an_unknown_cut():
     assert returns[-1]["points"][-1]["y"] == 0
     assert any(s["lineNumber"] == 10 and s["recordKind"] == "motion"
                and s["traversal"] == "FEED" for s in channel["segments"])
+
+
+def test_real_star_startup_command_retains_context_for_state_certification():
+    response = asyncio.run(api.cgiserver_import(FakeRequest({
+        "toolPathMode": "center",
+        "machinedata": [{"machineName": "FANUC_STAR_SR20R_IV_B", "canalNr": "1",
+                         "program": "\n".join([
+                             "G21", "G0 G40 G80 G18 G99", "G97", "M38", "M9",
+                             "G266 A16 W40 X-1.5 S3000 F.05 B1 Q500 Z160.5",
+                             "T200", "G0 X17 Y0 Z0", "M3 S3000", "G1 X5 F.05",
+                         ])}],
+    })))
+    assert response["success"], response
+    records = response["canal"]["1"]["segments"]
+    command = [s for s in records if s["lineNumber"] == 5]
+    assert command and all(s["recordKind"] == "state" for s in command)
+    for record in records:
+        context = record["motionContext"]
+        assert isinstance(context, dict)
+        assert context["startAxes"] and context["endAxes"]
+        assert record["machiningMode"] == context["machiningMode"]
+    assert any(s["lineNumber"] == 10 and s["traversal"] == "FEED"
+               and s["recordKind"] == "motion" for s in records)

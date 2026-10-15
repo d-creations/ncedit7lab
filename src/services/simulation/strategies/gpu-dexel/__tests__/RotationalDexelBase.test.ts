@@ -26,6 +26,38 @@ function rectangle(profile: RotationalProfile, lo: number, hi: number, a: number
 }
 
 describe('immutable analytical rotational dexel base', () => {
+  it('bounds asymmetric work by the remaining turned material without dropping tapers or annuli', () => {
+    const profile = new RotationalProfile(10, 50);
+    rectangle(profile, 3, 11, -20, 20);
+    rectangle(profile, 0, 1, -25, 25);
+    rectangle(profile, 0, 11, 4, 5);
+    const base = new RotationalDexelBase(profile);
+    const cutter = new THREE.Box3(new THREE.Vector3(2, -9, -10), new THREE.Vector3(9, 9, 10));
+    const bounds = base.materialBounds(cutter);
+    expect(bounds.min.x).toBe(2);
+    expect(bounds.max.x).toBeLessThan(3.001);
+    expect(bounds.min.y).toBeGreaterThan(-3.001);
+    expect(bounds.max.y).toBeLessThan(3.001);
+    expect(
+      base
+        .materialBounds(new THREE.Box3(new THREE.Vector3(4, -1, -10), new THREE.Vector3(9, 1, 10)))
+        .isEmpty(),
+    ).toBe(true);
+    expect(
+      base
+        .materialBounds(
+          new THREE.Box3(new THREE.Vector3(-1, -1, 4.1), new THREE.Vector3(1, 1, 4.9)),
+        )
+        .isEmpty(),
+    ).toBe(true);
+    for (let z = -24.7; z < 25; z += 0.73)
+      for (let x = 0.17; x < 10; x += 0.31) {
+        const point = new THREE.Vector3(x, 0.2, z);
+        if (!cutter.containsPoint(point) || profile.volume.distance(point) >= -1e-6) continue;
+        expect(bounds.containsPoint(point)).toBe(true);
+      }
+  });
+
   it('matches the full material field along all axes through cones, bores, annuli and cutoff gaps', () => {
     const profile = new RotationalProfile(10, 50);
     rectangle(profile, 0, 1.1, -25, 25);

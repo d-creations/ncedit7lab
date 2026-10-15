@@ -5,15 +5,17 @@ import { SimulationCapabilityError } from '../../shared/SimulationTypes';
 type Slabs = RotationalProfile['meridianSlabs'];
 type Span = [number, number];
 
-/** Immutable material at the symmetry frontier, never updated after milling. */
+/** Immutable turning-only material for one executed prefix, before asymmetric cuts. */
 export class RotationalDexelBase {
   readonly slabs: Slabs;
   readonly words: Uint32Array;
   readonly fingerprint: string;
   readonly estimatedBytes: number;
   readonly maxIntervals: number;
+  private readonly radius: number;
 
   constructor(profile: RotationalProfile) {
+    this.radius = profile.radius;
     this.slabs = profile.meridianSlabs.map((slab) =>
       Object.freeze({
         lower: slab.lower,
@@ -119,6 +121,40 @@ export class RotationalDexelBase {
       else merged.push(span);
     }
     return merged;
+  }
+
+  materialBounds(bounds: THREE.Box3): THREE.Box3 {
+    const result = new THREE.Box3();
+    for (const slab of this.slabs) {
+      const lo = Math.max(bounds.min.z, Math.min(slab.lower, Math.fround(slab.lower))),
+        hi = Math.min(bounds.max.z, Math.max(slab.upper, Math.fround(slab.upper)));
+      if (lo > hi || !slab.intervals.length) continue;
+      let radius = 0;
+      for (const band of slab.intervals) {
+        const line = band.upper;
+        const slope = Math.fround(line.slope),
+          offset = Math.fround(line.offset);
+        const roundoff =
+          8 *
+          2 ** -23 *
+          (Math.abs(slope) * Math.max(Math.abs(lo), Math.abs(hi)) + Math.abs(offset) + 1);
+        radius = Math.max(
+          radius,
+          line.slope * lo + line.offset,
+          line.slope * hi + line.offset,
+          slope * lo + offset + roundoff,
+          slope * hi + offset + roundoff,
+        );
+      }
+      radius = Math.min(this.radius, radius);
+      // Conservative outer bounds only: bores and annuli are resolved by ray intersections.
+      const part = new THREE.Box3(
+        new THREE.Vector3(-radius, -radius, lo),
+        new THREE.Vector3(radius, radius, hi),
+      ).intersect(bounds);
+      if (!part.isEmpty()) result.union(part);
+    }
+    return result;
   }
 }
 

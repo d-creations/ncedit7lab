@@ -94,11 +94,13 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
   private readonly ownedRevolved = new Set<RevolvedStock>();
   private rotationalThrough = -1;
   private rotationalBase?: RotationalDexelBase;
+  private implicitTurning: boolean[] = [];
+  private implicitProfile?: { through: number; profile: RotationalProfile };
   private initialSweeps?: { position: number; sweeps: CompiledGpuSweep[] };
   private compiledSweeps: CompiledGpuSweep[] = [];
   private readonly histories = new Map<
     'coarse' | 'fine',
-    { history: GpuDexelHistory; through: number }
+    { history: GpuDexelHistory; through: number; baseFingerprint?: string }
   >();
   private readonly pinned = new Set<GpuDexelStock>();
   private readonly checkpointStocks = new Set<GpuDexelStock>();
@@ -189,6 +191,9 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
         );
       if (input.stock.type === 'cylinder' && input.rotationalProfile !== false) {
         const profile = new RotationalProfile(input.stock.diameter / 2, input.stock.length);
+        this.implicitTurning = this.compiledSweeps.map(
+          (sweep) => !!sweep.turningVolume && profile.canApply(sweep.turningVolume),
+        );
         this.rotationalThrough = 0;
         for (const sweep of this.compiledSweeps) {
           if (!sweep.turningVolume || !profile.canApply(sweep.turningVolume)) break;
@@ -198,6 +203,7 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
           for (let i = 0; i < this.rotationalThrough; i++)
             profile.apply(this.compiledSweeps[i].turningVolume!, (bytes) => this.makeRoom(bytes));
           this.rotationalBase = new RotationalDexelBase(profile);
+          this.implicitProfile = { through: this.rotationalThrough, profile };
           this.makeRoom(0);
         }
       }
@@ -308,8 +314,7 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
     const step = position ? this.steps[position - 1] : -1;
     const motionCount = input.motions.filter((motion) => motion.executionStep <= step).length;
     // Eligibility is an executed-prefix frontier, never a property of the latest displayed stock.
-    // The immutable frontier is implicit; every subsequent removal (including turning)
-    // is applied to sparse ray tiles, so asymmetric milling is never resurrected.
+    // Turning-only material and asymmetric removals are intersected, never re-revolved.
     if (motionCount <= this.rotationalThrough)
       return this.rotationalFrame(requestedPosition, phase, motionCount);
     const pitch =
@@ -317,11 +322,19 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
     const cache = phase === 'fine' ? this.fine : this.coarse;
     let stock = cache.get(position),
       elapsedMs = 0;
+    const rotationalBase =
+      stock?.rotationalBase ??
+      (this.implicitProfile ? await this.baseForPrefix(motionCount) : undefined);
     const cacheHit = !!stock;
     let newMotions = 0;
     let reusedPosition: number | undefined;
     let preparationMs = 0;
-    const retainedHistory = this.histories.get(phase);
+    let retainedHistory = this.histories.get(phase);
+    if (retainedHistory?.baseFingerprint !== rotationalBase?.fingerprint && retainedHistory) {
+      retainedHistory.history.dispose();
+      this.histories.delete(phase);
+      retainedHistory = undefined;
+    }
     const history =
       retainedHistory && position <= retainedHistory.through ? retainedHistory.history : undefined;
     let capturedHistory = false;
@@ -354,12 +367,20 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
       this.initialSweeps = undefined;
       const sweeps = history
         ? []
-        : (prepared ?? this.compiledSweeps).filter(
-            (sweep) =>
-              sweep.executionStep > baseStep &&
-              sweep.executionStep <= step &&
-              (!source || sweep.executionStep > sourceStep),
-          );
+        : (prepared ?? this.compiledSweeps)
+            .filter(
+              (sweep) =>
+                sweep.executionStep > baseStep &&
+                sweep.executionStep <= step &&
+                !this.implicitTurning[sweep.motionIndex] &&
+                (!source || sweep.executionStep > sourceStep),
+            )
+            .map((sweep) =>
+              rotationalBase
+                ? { ...sweep, bounds: rotationalBase.materialBounds(sweep.bounds) }
+                : sweep,
+            )
+            .filter((sweep) => !sweep.bounds.isEmpty());
       preparationMs = performance.now() - preparationStarted;
       recordGpuDiagnostic(this.device, 'frame-preparation', {
         position,
@@ -375,8 +396,12 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
       const calculationEpoch = this.epoch;
       let intervalCapacity: DexelIntervalCapacity =
         source?.layout.intervalCapacity ?? DEXEL_INTERVALS;
-      if ((this.rotationalBase?.maxIntervals ?? 0) > intervalCapacity)
-        intervalCapacity = this.rotationalBase!.maxIntervals <= 32 ? 32 : 64;
+      if ((rotationalBase?.maxIntervals ?? 0) > intervalCapacity)
+        intervalCapacity = rotationalBase!.maxIntervals <= 32 ? 32 : 64;
+      const updateBase =
+        !!source?.rotationalBase &&
+        !!rotationalBase &&
+        source.rotationalBase.fingerprint !== rotationalBase.fingerprint;
       let retry: boolean;
       do {
         retry = false;
@@ -394,7 +419,7 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
         const index = indexDexelTiles(layout, sweeps);
         const staging = layout.tiles * 96 + index.sweeps.length * 16;
         const records = sweeps.length * (GPU_SWEEP_STRIDE * 12 + 320);
-        const changedTiles = history
+        const cutTiles = history
           ? Uint32Array.from(
               history.work(source ? sourceStep : -1, step).reduce<number[]>((tiles, count, i) => {
                 if (i % 2 && count) tiles.push(Math.floor(i / 2));
@@ -404,6 +429,9 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
           : Uint32Array.from(
               new Set(sweeps.flatMap((sweep) => dexelTilesForBounds(layout, sweep.bounds))),
             );
+        const changedTiles = updateBase
+          ? Uint32Array.from(new Set([...cutTiles, ...source!.layout.storedTiles]))
+          : cutTiles;
         const arenaProvider =
           source?.layout.intervalCapacity === intervalCapacity
             ? source
@@ -425,7 +453,7 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
           layout.estimatedBytes +
           staging +
           records +
-          (this.rotationalBase?.estimatedBytes ?? 0) * 2 +
+          (rotationalBase?.estimatedBytes ?? 0) * 2 +
           4096 -
           (arena ? 2 * (layout.intervalBytes + Math.max(1, layout.storageRays) * 4) : 0);
         this.makeRoom(baseBytes, source ?? (arena ? arenaProvider : undefined));
@@ -471,7 +499,8 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
             arena,
             arenaTiles,
             changedTiles,
-            rotationalBase: this.rotationalBase,
+            rotationalBase,
+            updateBase,
           },
         );
         const attemptStarted = performance.now();
@@ -502,7 +531,11 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
           if (recorded) {
             if (this.residentBytes() + recorded.estimatedBytes <= DEXEL_MEMORY_BYTES) {
               this.histories.get(phase)?.history.dispose();
-              this.histories.set(phase, { history: recorded, through: position });
+              this.histories.set(phase, {
+                history: recorded,
+                through: position,
+                baseFingerprint: rotationalBase?.fingerprint,
+              });
               capturedHistory = true;
             } else {
               recorded.dispose();
@@ -565,6 +598,16 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
           .get(phase)!
           .history.checkpointPositions(this.steps, position)) {
           if (cache.has(checkpoint)) continue;
+          const checkpointStep = this.steps[checkpoint - 1];
+          if (
+            this.compiledSweeps.some(
+              (sweep) =>
+                this.implicitTurning[sweep.motionIndex] &&
+                sweep.executionStep > checkpointStep &&
+                sweep.executionStep <= step,
+            )
+          )
+            continue;
           if (
             this.residentBytes() + stock.estimatedBytes - (stock.tileArena?.estimatedBytes ?? 0) >
             DEXEL_MEMORY_BYTES
@@ -638,6 +681,42 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
       readinessMs: performance.now() - readinessStarted,
       estimatedBytes: this.residentBytes(),
     };
+  }
+
+  private async baseForPrefix(motionCount: number): Promise<RotationalDexelBase | undefined> {
+    const current = this.implicitProfile;
+    if (!current) return undefined;
+    const from = current.through <= motionCount ? current.through : 0;
+    const changes = this.implicitTurning.slice(from, motionCount).some(Boolean);
+    if (from === current.through && !changes) {
+      current.through = motionCount;
+      return this.rotationalBase;
+    }
+    const input = this.input!;
+    if (input.stock.type !== 'cylinder') throw new Error('Implicit turning requires a cylinder');
+    this.makeRoom(current.profile.allocatedBytes);
+    const profile = from
+      ? current.profile.fork()
+      : new RotationalProfile(input.stock.diameter / 2, input.stock.length);
+    const epoch = this.epoch;
+    const reserve = (bytes: number) => {
+      if (this.cancelled || epoch !== this.epoch)
+        throw new DOMException('Turning replay superseded', 'AbortError');
+      this.makeRoom(bytes);
+    };
+    for (let i = from; i < motionCount; i++) {
+      if (!this.implicitTurning[i]) continue;
+      if (i > from && (i - from) % 16 === 0)
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      reserve(profile.allocatedBytes);
+      profile.apply(this.compiledSweeps[i].turningVolume!, reserve);
+    }
+    reserve(profile.allocatedBytes * 2);
+    const base = new RotationalDexelBase(profile);
+    this.implicitProfile = { through: motionCount, profile };
+    this.rotationalBase = base;
+    this.makeRoom(0);
+    return base;
   }
 
   private async rotationalFrame(
@@ -810,7 +889,8 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
           (sweep.turningVolume?.rotationalSection?.polygon.length ?? 0) * 256,
         0,
       ) +
-      (this.rotationalBase?.estimatedBytes ?? 0)
+      (this.rotationalBase?.estimatedBytes ?? 0) +
+      (this.implicitProfile?.profile.allocatedBytes ?? 0)
     );
   }
 
@@ -833,6 +913,8 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
     this.histories.clear();
     this.compiledSweeps = [];
     this.rotationalBase = undefined;
+    this.implicitProfile = undefined;
+    this.implicitTurning = [];
     this.input = undefined;
     this.steps = [];
     this.progress = () => {};

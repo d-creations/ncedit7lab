@@ -76,15 +76,19 @@ not a certified physical machining tolerance or a change to the removal math.
 
 The first milling/drilling cut (including coaxial drilling), or non-coaxial
 turning, switches that prefix to the existing 3D dexel path. The exact preceding
-meridian bands become an **immutable implicit base**, not a coarse mesh or an
-unmachined cylinder. Only tiles touched by subsequent cuts allocate intervals.
+meridian bands become an **immutable implicit base for that executed prefix**,
+not a coarse mesh or an unmachined cylinder. Subsequent eligible coaxial turning
+updates a new base version, including after milling. Only asymmetric cuts allocate
+interval tiles; their bounds are conservatively clipped to remaining turned stock.
 Analytical stock-local ray intersections support all three axes, bores, annuli,
 cones and cutoff gaps; initialization, rendering, GPU copies and history restores
-use the same base. Later turning subtracts from the same sparse 3D material and
-never re-revolves it. Earlier timeline prefixes can still display their own
+use the same base. Forward copies intersect existing milling-modified ray
+intervals with the new base, using private tile slots and explicit overflow checks.
+They never replace those intervals with a fresh revolved surface. Earlier timeline prefixes can still display their own
 rotational stock; forward navigation cannot resurrect later pockets or holes.
 Immutable stock caches, GPU tile sharing/history and stopped-prefix handling
-remain in effect.
+remain in effect. History is used only with its matching implicit-base fingerprint;
+checkpoints never restore a later turning base into an earlier prefix.
 
 History staging is bounded **before each compute submission** by its ray count,
 cutter count and four-event-per-cutter ceiling, then drained after queue completion.
@@ -95,8 +99,9 @@ Exhausted retention explicitly disables history, not completed material removal.
 **Limitations:** subsequent broad changes can still be expensive: a diameter 20 × length
 50 part at 0.02 mm may exceed the existing 256 MiB buffer budget once cuts affect
 broad 3D regions. Compact-profile-seeded sparse storage removes the initial
-whole-turning replay allocation; it does not provide unlimited/out-of-core later
-turning. The implicit base supports at most 64 disjoint intervals per ray;
+whole-turning replay allocation, including later eligible turning; it does not
+provide unlimited/out-of-core asymmetric removal. Non-coaxial turning still uses
+3D tiles. The implicit base supports at most 64 disjoint intervals per ray;
 excess complexity fails explicitly. Refinement failures retain the last
 displayed stock and report an error. Requested pitch is never silently enlarged;
 automatic CPU fallback is limited to known capability failures and only when

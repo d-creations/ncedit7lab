@@ -98,6 +98,11 @@ boundaries according to the existing command semantics.
 
 The FastAPI adapter publishes `recordKind: "motion" | "state" | "unknown"` on
 plotted records when the engine's aligned execution trace is available.
+Engine plot entries must retain `motionContext` alongside `machiningMode`.
+The top-level mode is not a replacement for captured axes, tool offsets or
+carrier/target state. Omitting the context prevents certification of
+stationary startup commands (for example the M9 record at occurrence 6 in
+the current diagnostic) and compensated turning reference normalization.
 `state` requires a matched executed node and captured unchanged linear axes:
 validated consumed G266 setup, parsed assignments, or spindle/tool commands
 whose output is a generated rapid rotary reset. Coordinate-bearing reset
@@ -115,8 +120,12 @@ The current 169-occurrence diagnostic previously stopped at line 99,
 G18/Y0 reset. With the engine correction, preparation accepts 296 cutting
 subsegments through both milling phases and the second turning phase.
 Its next stop is the undeclared T1100 tool at line 152. This verifies
-backend/preparation, not GPU rendering: the same 2 mm, 89-degree mill input
-still exceeds the fine .02 mm layout budget during later turning.
+backend/preparation, not GPU rendering. The original later-turning layout exceeded
+the fine .02 mm budget for the 2 mm, 89-degree mill input. Eligible later turning
+now updates a prefix-owned implicit base and clips retained milling intervals;
+only asymmetric work allocates tiles, bounded by remaining turned material.
+History remains fingerprint-specific. Nonbrowser allocation evidence is not
+hardware rendering, material-equivalence or timing validation.
 
 Stationary spindle/tool setup may include the explicitly allowed plane, unit,
 feed-mode and speed-mode words. The real center block

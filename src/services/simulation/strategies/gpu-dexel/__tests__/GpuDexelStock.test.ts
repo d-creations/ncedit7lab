@@ -688,6 +688,121 @@ describe('bounded GPU dexel submissions', () => {
 });
 
 describe('immutable GPU stock copying', () => {
+  it.each([false, true])(
+    'clips retained milling intervals to a later base with shared arena=%s',
+    async (shared) => {
+      const profile = new RotationalProfile(0.5, 1);
+      const f = fixture(1, [], 16, {
+        rotationalBase: new RotationalDexelBase(profile),
+        retainedTiles: new Uint32Array([0, 1, 2]),
+        arenaTiles: 9,
+      });
+      await f.stock.calculate(0);
+      if (shared) f.stock.releasePreparation();
+      profile.apply(
+        turningSectionVolume(
+          [
+            [0.25, -0.5],
+            [1, -0.5],
+            [1, 0.5],
+            [0.25, 0.5],
+          ].map((p) => new THREE.Vector2(...p)),
+          new THREE.Vector3(),
+          new THREE.Vector3(0, 0, 1),
+          new THREE.Vector3(1, 0, 0),
+        ),
+        () => {},
+      );
+      const next = new GpuDexelStock(
+        f.renderer,
+        f.device,
+        f.stock.layout.size.clone(),
+        0.1,
+        false,
+        [],
+        new THREE.Matrix4(),
+        16,
+        {
+          source: f.stock,
+          retainedTiles: f.stock.layout.storedTiles,
+          rotationalBase: new RotationalDexelBase(profile),
+          updateBase: true,
+          changedTiles: new Uint32Array(),
+        },
+      );
+      const oldHistory = new GpuDexelHistory(
+        new Uint32Array(),
+        f.stock.layout.rays,
+        [],
+        f.stock.historyKey,
+      );
+      try {
+        expect(next.tileArena === f.stock.tileArena).toBe(shared);
+        if (shared)
+          for (const tile of next.layout.storedTiles)
+            expect(next.tileSlots[tile]).not.toBe(f.stock.tileSlots[tile]);
+        expect(next.layout.storedTiles).toEqual(f.stock.layout.storedTiles);
+        vi.spyOn(f.renderer, 'hasFeature').mockReturnValue(false);
+        const shaders: string[] = [];
+        f.compute.mockImplementation((node) => {
+          if (!(node instanceof ComputeNode)) throw new Error('Expected compute node');
+          const builder = new WGSLNodeBuilder(new THREE.Object3D(), f.renderer);
+          builder.compute = node;
+          shaders.push(generateShader(builder, 'computeShader'));
+          return undefined;
+        });
+        f.read.mockClear();
+        await next.copyFrom(f.stock);
+        expect(next.timings.sharedTiles).toBe(0);
+        expect(next.timings.copiedTiles).toBe(3);
+        expect(f.read).toHaveBeenCalledOnce();
+        expect(shaders[0]).toContain('dexelCopyTrimBase');
+        expect(shaders[0]).toContain('max(old.x, base.x), min(old.y, base.y)');
+        expect(shaders[0]).toContain('atomicOr(&copyErrors.value[0], 1u)');
+        expect(shaders[0]).not.toMatch(/ptr\s*<\s*storage\b/);
+        if (shared) expect(shaders[0]).not.toContain('copySourceIntervals');
+        await expect(next.restoreHistory(oldHistory, -1)).rejects.toThrow(/compatible ray grid/);
+      } finally {
+        oldHistory.dispose();
+        next.dispose();
+        f.stock.dispose();
+      }
+    },
+  );
+
+  it('reports interval overflow while trimming an old base instead of publishing incomplete stock', async () => {
+    const profile = new RotationalProfile(0.5, 1);
+    const f = fixture(1, [], 16, {
+      rotationalBase: new RotationalDexelBase(profile),
+      retainedTiles: new Uint32Array([0]),
+    });
+    await f.stock.calculate(0);
+    const next = new GpuDexelStock(
+      f.renderer,
+      f.device,
+      f.stock.layout.size.clone(),
+      0.1,
+      false,
+      [],
+      new THREE.Matrix4(),
+      16,
+      {
+        source: f.stock,
+        retainedTiles: f.stock.layout.storedTiles,
+        rotationalBase: new RotationalDexelBase(profile),
+        updateBase: true,
+      },
+    );
+    try {
+      f.read.mockResolvedValue(new Uint32Array([1, 0, 0, 0]).buffer);
+      await expect(next.copyFrom(f.stock)).rejects.toBeInstanceOf(GpuDexelIntervalOverflowError);
+      expect(Reflect.get(next, 'calculated')).toBe(false);
+    } finally {
+      next.dispose();
+      f.stock.dispose();
+    }
+  });
+
   function fork(f: ReturnType<typeof fixture>, changedTiles: number[], source = f.stock) {
     return new GpuDexelStock(
       f.renderer,

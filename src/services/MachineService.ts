@@ -50,6 +50,7 @@ export class MachineService {
     }
   }
 
+
   async fetchMachines(): Promise<MachineProfile[]> {
     const response = await this.backend.listMachines();
     this.machines = response.machines.map((data) => this.convertToMachineProfile(data));
@@ -76,6 +77,7 @@ export class MachineService {
       availableChannels: data.availableChannels,
       profileRevision: data.profileRevision,
       supportedPoseContracts: data.supportedPoseContracts,
+      turningReferenceContract: data.turningReferenceContract,
       simulation: data.simulation,
       regexPatterns: data.regexPatterns,
       toolSelection: toToolSelectionPolicy(data.toolSelection),
@@ -90,4 +92,3 @@ export class MachineService {
     ];
   }
 }
-

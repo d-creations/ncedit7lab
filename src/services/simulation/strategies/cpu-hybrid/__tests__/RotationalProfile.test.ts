@@ -106,6 +106,19 @@ function bruteCount(volume: ImplicitVolume, first: THREE.Vector3, span: number, 
 }
 
 describe('hybrid rotational base and local 3D removal', () => {
+  it('handles convex section vertex levels separated by one floating-point step', () => {
+    const profile = new RotationalProfile(3, 4);
+    const cut = section([[1, 0], [2, 0], [2, 1], [1.5, 1 + Number.EPSILON], [1, 1]]);
+    expect(() => profile.apply(cut, () => {})).not.toThrow();
+    const initial = cylinderVolume(3, 4);
+    for (const radial of [0.5, 1.25, 1.75, 2.5])
+      for (const axial of [-0.5, 0.5, 1, 1.5]) {
+        const point = new THREE.Vector3(radial, 0, axial);
+        expect(profile.volume.distance(point)).toBeCloseTo(
+          Math.max(initial.distance(point), -cut.distance(point)), 10,
+        );
+      }
+  });
   it.each([
     [0, 1],
     [1.17, 1],

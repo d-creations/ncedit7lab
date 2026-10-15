@@ -293,9 +293,28 @@ export function prepareMaterialRemoval(
       if (turning) {
         const radiusMode = segment.motionContext?.toolOffset?.radiusMode;
         if (radiusMode && radiusMode !== 'OFF' && radiusMode !== 'G40') {
-          throw new SimulationCapabilityError(
-            'Compensated turning nose/reference semantics are not supported by this preview',
-          );
+          const offset = segment.motionContext?.toolOffset;
+          const verified = [start, end].every((pose) => {
+            const resolved = pose.turningReference;
+            return resolved?.kind === 'resolved-center-path-v1' &&
+              (radiusMode === 'LEFT' || radiusMode === 'RIGHT') &&
+              resolved.radiusMode === radiusMode &&
+              resolved.tipOrientation === executedQ &&
+              Number.isInteger(executedQ) && executedQ! >= 0 && executedQ! <= 9 &&
+              Number.isFinite(offset?.radius) && offset!.radius! >= 0 &&
+              resolved.compensationRadius === offset?.radius &&
+              tool.cutting![0].type === 'insert' &&
+              resolved.noseRadius === tool.cutting![0].noseRadius &&
+              Array.isArray(resolved.tipPosition) &&
+              resolved.tipPosition.length === 3 &&
+              resolved.tipPosition.every((value, axis) =>
+                value === (tool.cutting![0].position ?? [0, 0, 0])[axis],
+              );
+          });
+          if (!verified)
+            throw new SimulationCapabilityError(
+              'Compensated turning requires backend-resolved virtual-tip poses',
+            );
         }
         if (
           new THREE.Quaternion(...start.orientation).angleTo(

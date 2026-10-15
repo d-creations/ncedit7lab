@@ -33,6 +33,10 @@ function parseMachiningMode(value: unknown): MachiningMode {
 }
 
 function isNonCuttingStateMarker(segment: BackendPlotSegment, sourceLine: string | undefined): boolean {
+  if (segment.recordKind !== undefined) {
+    return segment.recordKind === 'state' &&
+      segment.geometry == null && segment.traversal == null && segment.sourceCode == null;
+  }
   if (
     segment.points?.length !== 1 ||
     segment.geometry != null || segment.traversal != null || segment.sourceCode != null ||
@@ -286,6 +290,13 @@ export class ExecutedProgramService {
         toolNumber: tool.toolNumber,
         reference,
         mountingOrientationDegrees: [...(tool.orientation ?? [0, 0, 0])] as [number, number, number],
+        ...(machine.turningReferenceContract === 'resolved-center-path-v1' &&
+          tool.cutting?.length === 1 && tool.cutting[0].type === 'insert'
+          ? {
+            turningNoseRadius: tool.cutting[0].noseRadius,
+            turningTipPosition: [...(tool.cutting[0].position ?? [0, 0, 0])] as [number, number, number],
+            ...(tool.Q !== undefined ? { turningTipOrientation: tool.Q } : {}),
+          } : {}),
       };
     });
     const supportedInputs = inputs.filter((input): input is SimulationChannelInput['tools'][number] => input !== undefined);

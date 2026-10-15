@@ -22,6 +22,7 @@ import uuid
 from pathlib import Path
 import importlib.util
 from pydantic import BaseModel
+from backend.turning_reference import engine_pose_request, resolve_turning_references
 
 # Transfer Service
 try:
@@ -427,6 +428,8 @@ def list_machines() -> Dict[str, Any]:
             machine["regexPatterns"] = get_machine_regex_patterns(machine["machineName"])
         config = get_machine_config(machine["machineName"])
         machine.update(config.simulation_metadata())
+        if machine["machineName"].startswith("FANUC_STAR"):
+            machine["turningReferenceContract"] = "resolved-center-path-v1"
         machine["toolSelection"] = getattr(config, "tool_selection", {})
         machine["controlType"] = getattr(config, "control_type", machine["controlType"])
         machine["machineType"] = getattr(config, "machine_type", "")
@@ -507,6 +510,80 @@ def build_execution_occurrences(control: Any, canal_number: int, segments: List[
         ):
             raise ValueError("Engine command history does not match motion execution occurrences")
     return occurrences
+
+
+def annotate_execution_record_kinds(control: Any, canal_number: int, segments: List[Dict[str, Any]]) -> None:
+    """Separate verified command/reset records from motions in the engine's mixed plot."""
+    canals = getattr(control, "_canals", None)
+    canal = canals.get(canal_number) if isinstance(canals, dict) else None
+    history = getattr(canal, "_exec_sequence", None)
+    plotted = getattr(canal, "_tool_nodes", None)
+    if not isinstance(history, list) or not isinstance(plotted, list):
+        return
+
+    motion_modes = []
+    mode = None
+    for node in history:
+        codes = {str(code).upper() for code in node.g_code}
+        explicit = codes.intersection({"G0", "G00", "G1", "G01", "G2", "G02", "G3", "G03"})
+        if len(explicit) > 1 or any(code.startswith("G8") and code != "G80" for code in codes):
+            mode = None
+        elif len(explicit) == 1:
+            mode = next(iter(explicit))
+        elif "G80" in codes:
+            mode = None
+        motion_modes.append(mode)
+
+    nodes_by_step = {}
+    for node in plotted:
+        step = getattr(node, "execution_step", None)
+        if step is not None:
+            nodes_by_step.setdefault(step, []).append(node)
+    for segment in segments:
+        if any(segment.get(key) is not None for key in ("geometry", "traversal", "sourceCode")):
+            segment["recordKind"] = "motion"
+            continue
+        segment["recordKind"] = "unknown"
+        step = segment.get("executionStep")
+        if isinstance(step, bool) or not isinstance(step, int) or not 0 <= step < len(history):
+            continue
+        candidates = nodes_by_step.get(step, [])
+        if len(candidates) != 1:
+            continue
+        node = candidates[0]
+        if node.nc_code_line_nr != segment.get("lineNumber"):
+            continue
+        codes = {str(code).upper() for code in node.g_code}
+        words = {str(word).upper(): value for word, value in node.command_parameter.items()}
+        variable = getattr(node, "variable_command", None)
+        # A parsed assignment cannot contain axis/modal words. Never infer state from point count.
+        assignment = variable is not None and not codes and words.keys() <= {"N"}
+        setup = codes == {"G266"} and words.keys() <= {"N"}
+        command = bool(words.keys() & {"T", "M", "S"}) and codes <= {"G0", "G00", "G96", "G97"}
+        if "M" in words:
+            try:
+                command = command and float(words["M"]) in {3, 4, 5, 6, 8, 9}
+            except (TypeError, ValueError):
+                command = False
+        coordinate_words = words.keys() - {"N", "T", "M", "S"}
+        if coordinate_words:
+            # STAR spindle/tool commands can return generated rapid rotary-reset points
+            # without propagating their metadata to the original node. Coordinate blocks
+            # are safe to exclude only in a verified rapid modal context, never under feed.
+            command = command and coordinate_words <= set("XYZUVWABCH") and motion_modes[step] in {"G0", "G00"}
+        context = segment.get("motionContext")
+        start = context.get("startAxes") if isinstance(context, dict) else None
+        end = context.get("endAxes") if isinstance(context, dict) else None
+        unchanged_linear = (
+            isinstance(start, dict) and isinstance(end, dict) and bool(start) and start.keys() == end.keys()
+            and all(
+                isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+                for axes in (start, end) for value in axes.values()
+            )
+            and all(start[axis] == end[axis] for axis in start if not axis.startswith(("B", "C")))
+        )
+        if (assignment or setup or command) and unchanged_linear:
+            segment["recordKind"] = "state"
 
 
 def build_segments_from_engine_output(canal_output: Dict[str, Any]) -> Dict[str, Any]:
@@ -871,7 +948,7 @@ async def cgiserver_import(request: Request):
     try:
         profiles = {machine["machineName"]: get_machine_config(machine["machineName"])
                     for machine in get_available_machines()}
-        validate_pose_request(req, profiles)
+        validate_pose_request(engine_pose_request(req), profiles)
     except SimulationContractError as error:
         return {
             "success": False, "canal": {}, "message": [str(error)],
@@ -998,6 +1075,9 @@ async def cgiserver_import(request: Request):
                 canal = {"plot": canal, "programExec": []}
 
             converted = build_segments_from_engine_output(canal)
+            annotate_execution_record_kinds(control, idx + 1, converted["segments"])
+            if isinstance(req, dict):
+                resolve_turning_references(control, idx + 1, converted["segments"], req, machine_names[idx])
             occurrences = build_execution_occurrences(control, idx + 1, converted["segments"])
             if occurrences is not None:
                 converted["executionOccurrences"] = occurrences

@@ -74,6 +74,87 @@ describe('ExecutedProgramService', () => {
     });
     const request = { channelId: '1' as const, program: 'G1 X1', machineName: 'SIEMENS_MILL' };
 
+    it.each([false, true])('preserves valid zero-displacement feeds and aligned poses (orientation changes: %s)', async (rotates) => {
+      const poses = [
+        { position: [1, 0, 0] as [number, number, number], orientation: [0, 0, 0, 1] as [number, number, number, number],
+          reference: 'millingTip' as const, frameId: 'workpiece:mainSpindle' },
+        { position: [1, 0, 0] as [number, number, number],
+          orientation: (rotates ? [0, 0, 1, 0] : [0, 0, 0, 1]) as [number, number, number, number],
+          reference: 'millingTip' as const, frameId: 'workpiece:mainSpindle' },
+      ];
+      vi.mocked(mockBackend.requestPlot).mockResolvedValue({
+        canal: { '1': { segments: [move({
+          recordKind: 'motion', points: [{ x: 1, y: 0, z: 0 }, { x: 1, y: 0, z: 0 }], poses,
+        })] } },
+      });
+      const result = await service.executeProgram(request);
+      expect(result.plotMetadata!.removalStops ?? []).toEqual([]);
+      expect(result.plotMetadata!.segments).toHaveLength(1);
+      expect(result.plotMetadata!.segments[0].startPoint).toEqual(result.plotMetadata!.segments[0].endPoint);
+      expect(result.plotMetadata!.segments[0].poses).toEqual(poses);
+    });
+
+    it('excludes explicit engine state records of any sample count but retains command occurrences and timing', async () => {
+      const occurrences = [0, 1, 2, 3].map((executionStep) => ({
+        executionStep, lineNumber: executionStep < 2 ? 1 : executionStep,
+      }));
+      vi.mocked(mockBackend.requestPlot).mockResolvedValue({
+        canal: { '1': {
+          executionOccurrences: occurrences,
+          timing: [0.1, 0.2, 0.3, 0.4],
+          segments: [
+            { recordKind: 'state', lineNumber: 1, executionStep: 0, points: [{ x: 0, y: 0, z: 0 }] },
+            { recordKind: 'state', lineNumber: 1, executionStep: 1, points: [
+              { x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0 },
+            ] },
+            { recordKind: 'state', lineNumber: 2, executionStep: 2, points: [] },
+            move({ recordKind: 'motion', machiningMode: 'turning', lineNumber: 3, executionStep: 3 }),
+          ],
+        } },
+      });
+      const result = await service.executeProgram({
+        ...request, machineName: 'CUSTOM_MACHINE', program: '(comment)\r\n\r\nG1 X1',
+      });
+      expect(result.plotMetadata!.removalStops ?? []).toEqual([]);
+      expect(result.plotMetadata!.segments).toHaveLength(1);
+      expect(result.plotMetadata!.segments[0].sourceSegmentIndex).toBe(3);
+      expect(result.plotMetadata!.executionOccurrences).toEqual(
+        occurrences.map((occurrence) => ({ ...occurrence, channelId: '1' })),
+      );
+      expect(result.timingData.get(1)).toBeCloseTo(0.3);
+    });
+
+    it.each(['unknown', 'motion'] as const)(
+      'does not override authoritative %s records with the legacy source classifier',
+      async (recordKind) => {
+        vi.mocked(mockBackend.requestPlot).mockResolvedValue({
+          canal: { '1': { segments: [{
+            recordKind, toolNumber: 1, lineNumber: 1, executionStep: 0,
+            points: [{ x: 0, y: 0, z: 0 }],
+          }] } },
+        });
+        const result = await service.executeProgram({
+          ...request, machineName: 'FANUC_MILL', program: 'T1',
+        });
+        expect(result.plotMetadata!.removalStops).toHaveLength(1);
+      },
+    );
+
+    it('never skips cutting semantics mislabeled as state or incomplete cutting samples', async () => {
+      vi.mocked(mockBackend.requestPlot).mockResolvedValue({
+        canal: { '1': { segments: [
+          move({ recordKind: 'state' }),
+          move({ recordKind: 'state', points: [{ x: 0, y: 0, z: 0 }], executionStep: 1 }),
+          { recordKind: 'unknown', executionStep: 2, points: [
+            { x: 0, y: 0, z: 0 }, { x: 1, y: 0, z: 0 },
+          ] },
+        ] } },
+      });
+      const result = await service.executeProgram(request);
+      expect(result.plotMetadata!.segments).toHaveLength(1);
+      expect(result.plotMetadata!.removalStops?.map((stop) => stop.sourceSegmentIndex)).toEqual([1, 2]);
+    });
+
     it('preserves turning, milling and turning in execution order without inferring mode from traversal', async () => {
       vi.mocked(mockBackend.requestPlot).mockResolvedValue({
         canal: { '1': { segments: [

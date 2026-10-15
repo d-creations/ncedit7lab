@@ -59,6 +59,9 @@ export interface SimulationToolInput {
   toolNumber: number | string;
   reference: ToolReference;
   mountingOrientationDegrees: [number, number, number];
+  turningNoseRadius?: number;
+  turningTipPosition?: [number, number, number];
+  turningTipOrientation?: number;
 }
 
 export interface SimulationChannelInput {
@@ -128,6 +131,7 @@ export interface MachineProfile {
   availableChannels: number;
   profileRevision?: string;
   supportedPoseContracts?: string[];
+  turningReferenceContract?: 'resolved-center-path-v1';
   simulation?: MachineSimulationConfig;
   regexPatterns?: MachineRegexPatterns;
   toolSelection?: ToolSelectionPolicy;
@@ -275,6 +279,14 @@ export interface PoseSample {
   orientation: readonly [number, number, number, number];
   reference: 'millingTip' | 'turningVirtualTip';
   frameId: string;
+  turningReference?: {
+    kind: 'resolved-center-path-v1';
+    noseRadius: number;
+    tipPosition: readonly [number, number, number];
+    tipOrientation: number;
+    compensationRadius: number;
+    radiusMode: 'OFF' | 'LEFT' | 'RIGHT';
+  };
 }
 
 export interface PlotSegment {
@@ -336,6 +348,8 @@ export interface PlotRequest {
 
 /** Raw motion metadata from the backend; identifiers must not be inferred from NC text. */
 export interface BackendPlotSegment {
+  /** Verified engine command/reset records are not cutting paths, regardless of sample count. */
+  recordKind?: 'motion' | 'state' | 'unknown';
   geometry?: string;
   traversal?: string;
   sourceCode?: string;
@@ -398,6 +412,7 @@ export interface ServerMachineData {
   availableChannels: number;
   profileRevision: string;
   supportedPoseContracts: string[];
+  turningReferenceContract?: 'resolved-center-path-v1';
   simulation?: MachineSimulationConfig;
   variablePrefix?: string;
   regexPatterns?: MachineRegexPatterns;

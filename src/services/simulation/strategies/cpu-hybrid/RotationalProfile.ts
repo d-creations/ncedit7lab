@@ -313,6 +313,8 @@ export class RotationalProfile {
           mid = (lower + upper) / 2;
         const edges: Line[] = [];
         for (let j = 0; j < polygon.length; j++) {
+          // Adjacent floating-point levels have no representable interior.
+          if (mid <= lower || mid >= upper) break;
           const a = polygon[j],
             b = polygon[(j + 1) % polygon.length];
           if (mid <= Math.min(a.y, b.y) || mid >= Math.max(a.y, b.y)) continue;

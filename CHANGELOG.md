@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **Compensated Turning Reference**: Preserve the backend's G41/G42 center path and resolve its STAR G18 nose-center samples into certified virtual-tip poses before stock preparation. Register the authored insert position, executed Q/register R, physical nose radius and mounting without a frontend compensation algorithm; preserve G40/zero-R virtual-tip paths and milling output. Reject older/unverified output, other planes, missing poses and unsupported cycles. Cover actual engine geometry and the corrected user program past G41, without claiming whole-part or GPU validation. Handle adjacent floating-point axial levels in the CPU profile exposed by the newly accepted sweeps.
+- **Executed Command Records Before Turning Cuts**: Distinguish verified engine spindle/tool rapid-reset, setup and assignment records from cutting motions, including multi-sample records. Keep authoritative execution occurrences and timing, and retain explicit stops for incomplete feeds, unsupported cycles, unknown semantics and unverified compensated turning. Equal endpoint positions remain valid stationary cutting motions when both aligned poses exist; changed orientations are never collapsed into a no-op.
+
 ### Added
 - **Line-by-Line Stock Replay**: Optional Start, Previous/Next, Play/Pause and execution-timeline controls with opt-in cursor/occurrence following. Keep a worker alive, apply cutting prefixes incrementally, transfer dirty surface chunks and restore bounded hybrid-stock checkpoints for backward/forward jumps without backend reexecution.
 - **Executed Command History**: Publish validated authoritative command occurrences, including non-motion commands, separately from plotted motions. Preserve repeated source lines and explicitly label older backend histories as motion-only.

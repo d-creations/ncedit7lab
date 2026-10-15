@@ -14,7 +14,7 @@ The current STAR producer uses the configured tool carrier and the executed
 workpiece target from `motionContext`. `M171` selects `mainSpindle/C1` and
 `M172` selects `subSpindle/C2`; dynamic targets are rejected when the executed
 target is absent or not allowed by the profile. The remaining wider work includes
-real-machine calibration, turning nose/Q semantics, length/TCP behavior,
+real-machine calibration, turning beyond the verified center-path reference described below, length/TCP behavior,
 non-demo frame changes, full-turn sampling and bounded adaptive subdivision.
 
 For STAR machines, `M03` also resets the active workpiece C axis to zero before
@@ -43,7 +43,7 @@ Evidence from the supplied ncplot7py CGI, compensation plan and handlers:
 | --- | --- |
 | Tool handlers already capture the active tool ID; generated moves expose toolNumber/executionStep. | Reuse them, including exact STAR subtool IDs and Siemens names. Do not implement a second active-tool scanner. |
 | The shared projector implements FANUC mill and Siemens ISO radius compensation on sampled polylines. | Keep the existing radius kernel; do not compensate again while computing poses. Analytic corner/lead-in accuracy is not implied. |
-| Turning Q/nose correction and dynamic TCP are still incomplete in the supplied plan. | Do not advertise those operations as resolved centre/reference output. |
+| STAR G18 center mode offsets the polyline and adds the executed machine-space Q/R vector, but the original pose projector labels these nose centers `turningVirtualTip`. | Normalize that geometric reference in the backend; never apply a second G41/G42 algorithm in the frontend. Dynamic TCP remains unsupported. |
 | The supplied Siemens ISO length handler uses H as a literal Z offset. | This is not H-register lookup or general tool-axis compensation. Detect/diagnose this limitation on the new contract until replaced. |
 | CGI and FastAPI now set CNCState.tool_path_mode from the request. | Real-engine tests cover centre output, including explicit R=0 and nonzero radii. |
 | Both adapters now reject unavailable/failed execution and recorded NC errors instead of invoking mock fallback. | Empty successful engine output is legitimate. Failed runs no longer masquerade as successful partial/mock plots. |
@@ -51,8 +51,11 @@ Evidence from the supplied ncplot7py CGI, compensation plan and handlers:
 
 Engine files are in the sibling ncplot7py repository supplied by the user;
 FastAPI integration is [backend/main_import.py](../backend/main_import.py).
-Implement shared calculations in the engine package. HTTP/CGI wrappers validate,
-invoke and serialize; they must not contain separate rotation/compensation maths.
+Keep compensation and machine projection in the engine package. The repository-owned
+`backend/turning_reference.py` normalizes the engine's mislabeled turning reference
+at the FastAPI boundary; it does not offset, join, or interpolate toolpaths.
+The upstream CGI adapter does not advertise this extension and remains unverified
+for compensated turning removal.
 
 ## 2. Validate and snapshot before executing
 
@@ -91,9 +94,142 @@ Do not apply the next block's tool, offsets or axis angles to an earlier move
 when flushing on G40, program end, tool change or error. Split/flush at context
 boundaries according to the existing command semantics.
 
+### Command records in the mixed engine plot
+
+The FastAPI adapter publishes `recordKind: "motion" | "state" | "unknown"` on
+plotted records when the engine's aligned execution trace is available.
+`state` requires a matched executed node and captured unchanged linear axes:
+validated consumed G266 setup, parsed assignments, or spindle/tool commands
+whose output is a generated rapid rotary reset. Coordinate-bearing reset
+commands additionally require an executed rapid modal context. Feed/cycle
+blocks, unknown G/M codes, ambiguous occurrence alignment and incomplete
+motion semantics are not certified as state.
+
+The frontend excludes certified state records from stock removal regardless
+of sample count, while retaining their command occurrences, source indices
+and timing. Older backends keep only the narrow verified-source fallback.
+Neither absent motion metadata nor a singleton authorizes a cutting skip or
+manufactured second endpoint. Two valid equal-position endpoint poses can
+describe stationary cutting; differing orientations still describe motion.
+
+This is an engine-path geometric preview, not validation of every physical NC
+operation. In particular, no harmless-operation assertion is made for G300
+automatic cutoff, G125 coordinate changes or unsupported cycles. Turning
+G41/G42 remains a stock-removal stop unless each endpoint has the backend
+certification described below.
+
+### Verified compensated STAR virtual-tip reference
+
+Machine discovery advertises `turningReferenceContract: "resolved-center-path-v1"`.
+Only then does the frontend supply `turningNoseRadius`, `turningTipPosition`
+and optional stored `turningTipOrientation` for a single insert
+alongside its existing mounting orientation. These are physical cutter geometry,
+not the executed compensation-register R. The adapter validates this extension
+and removes it from the copy passed to the engine's strict pose-request schema.
+Old backends receive the unchanged original schema and still stop on G41/G42.
+
+Certification requires an executed, aligned STAR G18 turning record, center mode,
+known Q (0–9), finite nonnegative executed R and physical nose radius, and valid
+engine poses aligned one-for-one with its actual center-path samples. Other
+planes, unresolved polar/rotation changes, missing context/poses and unknown
+compensation modes remain unverified. Milling poses and all plot coordinates are
+unchanged; G40/OFF poses are registered to the same insert reference as active
+compensation when the physical geometry and Q are available.
+
+For positive executed R, let `C` be an engine center sample, `O` its assembly
+quaternion, and `v(Q)` the existing insert-reference quadrant vector. The
+registered virtual-tip assembly pose is
+`V = C - O * (part.position + v(Q) * physicalNoseRadius)`.
+The insert model already cancels its rotated outline fillet center and places
+its nose at `part.position + v(Q) * physicalNoseRadius`. Consequently its world
+nose is exactly `C`, and every outline vertex retains its authored relative
+position/rotation and physical radius. The assembly origin is registered to the
+cutting reference; an authored `[-8, 0, 0]` part translation must not incorrectly
+displace the nose from its executed center path. Q and R are not compensated a
+second time. Executed register Q overrides stored Q; register R changes the
+engine path, not the physical nose radius. R=0 bypasses the engine radius kernel,
+and G40/OFF also outputs virtual tips: their physical nose center is
+`C = programmedVirtualTip + machineXZ(v(Q) * physicalNoseRadius)`. Apply the
+same assembly-reference registration to that center, preserving the engine's
+unshifted virtual-tip path rather than misinterpreting it as a center path.
+Each normalized pose carries `turningReference` with its kind, physical radius,
+executed Q/R, part reference position and side; preparation checks these against
+captured inputs. An unavailable OFF Q can use the explicitly supplied physical
+tool Q; active compensation always requires its executed Q. No Q is inferred
+from an insert shape.
+
+This verifies the engine's sampled shape, including its existing lead-in,
+lead-out, corner-join and arc policy, not physical controller accuracy. No new
+G41/G42 kernel, target calibration, cycle or TCP support is implied.
+
+The opt-in nonbrowser live regression uses `NCEDIT_LIVE_BACKEND` and
+`NCEDIT_LIVE_PROGRAM` with `npx vitest run
+src/services/tools/__tests__/CompensatedTurning.live.test.ts`. The exact corrected
+user fixture now prepares 154 subsegments (first step 30, last step 67 / line 81),
+including G41 and subsequent milling. Its next legitimate stop is step 82 /
+line 100: finishing turning retains the prior milling Y offset (`Y = -8.428 mm`
+in the executed workpiece frame) and its insert
+section is outside the spindle meridian. Later incomplete samples/cycles remain
+reported; this is not whole-part success. Live assertions compare 734 endpoint
+samples and 8,808 insert vertices to actual backend paths, also under transformed
+stock, and apply 90 eligible CPU rotational sweeps. No browser or GPU execution
+or GPU timings are claimed.
+
+#### Validation evidence (2026-10-15)
+
+Commands run from the repository root:
+
+```powershell
+docker exec nc-edit7-backend-1 python -m pytest backend/tests/test_turning_reference.py backend/tests/test_execution_record_kinds.py backend/tests/test_stock_binding_defaults.py -q --tb=short
+```
+
+Passed: **248 tests**. The reference matrix independently checks machine-space
+straight-path normals for G41/G42, Q0–9 and R0/.2/.4 on axial, radial and diagonal
+travel, executed register overrides, arc samples, G40, mode changes, mount
+orientations, zero physical nose radius, authored part position, rejected planes
+and invalid request geometry.
+
+```powershell
+docker exec nc-edit7-backend-1 python -m pytest backend/tests/test_turning_reference.py backend/tests/test_execution_record_kinds.py backend/tests/test_stock_binding_defaults.py backend/tests/test_cgiserver_import_regression.py -q --tb=short
+```
+
+Result: **297 passed, 3 failed**. Existing direct-engine profile tests still use
+unavailable tool IDs/mounts (`SR20R` tool 1, `SV20R` tool 31 and its default target).
+All three failures were reproduced with the new reference normalizer disabled;
+they do not exercise this adapter extension.
+
+```powershell
+npx vitest run src\services\tools\__tests__\MaterialRemovalPreparation.test.ts src\services\__tests__\ExecutedProgramService.test.ts src\services\__tests__\MachineService.test.ts src\services\__tests__\PlotRun.test.ts src\services\simulation\strategies\gpu-dexel\__tests__\GpuSweepCompiler.test.ts src\services\simulation\strategies\cpu-hybrid\__tests__\MaterialRemovalEngine.test.ts src\services\simulation\strategies\cpu-hybrid\__tests__\RotationalProfile.test.ts --maxWorkers=1 --reporter=dot --silent
+```
+
+Passed: **200 tests / 7 files**. An earlier parallel run hit the existing
+5-second rotary CPU-test timeout; that file passed separately (22 tests) and
+the final single-worker run passed without changing global/test timeouts.
+
+```powershell
+npx vitest run src\services\tools\__tests__\CompensatedTurning.live.test.ts --reporter=dot
+```
+
+Passed: **1 live test**, with `NCEDIT_LIVE_BACKEND=http://localhost:8000` and
+`NCEDIT_LIVE_PROGRAM` set to the supplied corrected NC fixture. This uses HTTP
+and CPU geometry only. It is opt-in and skips when those variables are absent.
+
+```powershell
+npx eslint src\core\types.ts src\services\ExecutedProgramService.ts src\services\MachineService.ts src\services\tools\MaterialRemovalPreparation.ts src\services\tools\__tests__\MaterialRemovalPreparation.test.ts src\services\tools\__tests__\CompensatedTurning.live.test.ts src\services\simulation\strategies\cpu-hybrid\RotationalProfile.ts src\services\simulation\strategies\cpu-hybrid\__tests__\RotationalProfile.test.ts --quiet
+npx tsc --noEmit
+npm run build
+git --no-pager diff --check
+```
+
+All passed (exit 0). The build retains the existing large-chunk warning.
+The scoped lint command reports errors only; existing style warnings are not
+claimed to be eliminated.
+
 ## 4. Normalized reference position
 
-The output XYZ and the mesh origin must represent the same reference point.
+The pose position and registered mesh origin must represent the same reference
+point. Compensated plot XYZ remains the engine's nose-center path and is not
+interchangeable with the normalized assembly pose position.
 Version one uses millingTip or turningVirtualTip, never an implicit ball/nose
 centre. The metadata mesh must be aligned to this origin separately.
 
@@ -121,8 +257,9 @@ XYZ in the pose stage or infer radius from a mesh.
 
 Turning additionally requires a controller-specific mapping of Q and nose radius
 to the theoretical tip/nose-centre relationship and compensated side. Keep that
-mapping separate from physical tool mounting orientation. Until that correction
-is implemented and tested, reject pose-contract output that depends on it.
+mapping separate from physical tool mounting orientation. The certified STAR
+G18 reference normalization above implements and tests this boundary; reject
+other pose-contract output that depends on an unverified mapping.
 
 Changing an offset alone does not necessarily change the physical tool. Explicit
 offset records own their compensation data; never merge a missing value with a

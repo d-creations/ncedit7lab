@@ -69,6 +69,16 @@ function machineInput(bindings: StockBinding[] = [setup.binding]): PlotRunInput 
 }
 
 describe('material removal prerequisites', () => {
+  it('retains a stationary feed cutter when both aligned endpoint poses exist', () => {
+    const segment = move();
+    segment.endPoint = { ...segment.startPoint };
+    segment.poses = [segment.poses![0], structuredClone(segment.poses![0])];
+    const result = prepareMaterialRemoval([input('1', stock)], metadata(segment), setup);
+    expect(result.simulation?.stop).toBeUndefined();
+    expect(result.simulation?.motions).toHaveLength(1);
+    expect(result.simulation?.motions[0].start).toEqual(result.simulation?.motions[0].end);
+  });
+
   it('uses the matching backend stock binding with 0.05 mm detail and captures a copy', () => {
     const source = machineInput([setup.binding, { ...setup.binding, frameId: 'workpiece:subSpindle' }]);
     const result = prepareMaterialRemoval([source], metadata(move()));
@@ -249,7 +259,31 @@ describe('material removal prerequisites', () => {
       ...turning, motionContext: { ...turning.motionContext!, toolOffset: { radiusMode: 'G41', tipOrientation: 3 } },
     }), setup);
     expect(compensated.simulation?.motions).toHaveLength(0);
-    expect(compensated.simulation?.stop?.message).toContain('Compensated turning');
+    expect(compensated.simulation?.stop?.message).toContain('backend-resolved');
+    const resolved = {
+      ...turning,
+      motionContext: { ...turning.motionContext!, toolOffset: { radiusMode: 'LEFT', tipOrientation: 3, radius: 0.4 } },
+      poses: turning.poses!.map((pose) => ({
+        ...pose,
+        turningReference: { kind: 'resolved-center-path-v1' as const, noseRadius: 0.2,
+          tipPosition: [0, 0, 0] as const,
+          tipOrientation: 3, compensationRadius: 0.4, radiusMode: 'LEFT' as const },
+      })),
+    };
+    const accepted = prepareMaterialRemoval([original], metadata(resolved), setup);
+    expect(accepted.simulation?.stop).toBeUndefined();
+    expect(accepted.simulation?.motions).toHaveLength(1);
+    expect(accepted.simulation?.motions[0].start).toEqual(resolved.poses[0]);
+    for (const mismatch of [
+      { noseRadius: 0.4 }, { tipOrientation: 1 }, { compensationRadius: 0.2 },
+      { radiusMode: 'RIGHT' as const },
+      { tipPosition: [1, 0, 0] as const },
+    ]) {
+      const bad = { ...resolved, poses: resolved.poses.map((pose) => ({
+        ...pose, turningReference: { ...pose.turningReference, ...mismatch },
+      })) };
+      expect(prepareMaterialRemoval([original], metadata(bad), setup).simulation?.motions).toHaveLength(0);
+    }
   });
 
   it('rejects undersampled full-turn rotations rather than interpreting equal quaternions as no motion', () => {

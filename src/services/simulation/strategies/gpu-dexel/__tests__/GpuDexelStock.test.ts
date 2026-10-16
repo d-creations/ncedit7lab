@@ -352,7 +352,7 @@ describe('bounded GPU dexel submissions', () => {
         vi.spyOn(f.renderer, 'hasFeature').mockReturnValue(false);
         const builder = new WGSLNodeBuilder(f.stock.group.children[0], f.renderer);
         Reflect.set(builder, 'camera', new THREE.PerspectiveCamera());
-        expect(generateShader(builder, 'fragmentShader')).toContain('gpuDexelSpan');
+        expect(generateShader(builder, 'fragmentShader')).toContain('gpuDexelIntervals');
       } finally {
         next.dispose();
         f.stock.dispose();
@@ -382,7 +382,7 @@ describe('bounded GPU dexel submissions', () => {
           const shader = generateShader(builder, 'computeShader');
           expect(shader).toContain('fn gpuRestoreHistory');
           expect(shader).toContain('event.y > through');
-          expect(shader).toContain('gpuOriginalSpan');
+          expect(shader).toContain('gpuOriginalIntervals');
           expect(shader).not.toContain('gpuSweepRayCuts');
           expect(shader).not.toMatch(/ptr\s*<\s*storage\b/);
           return undefined;
@@ -495,7 +495,11 @@ describe('bounded GPU dexel submissions', () => {
         Reflect.set(builder, 'camera', new THREE.PerspectiveCamera());
         const fragment = generateShader(builder, 'fragmentShader');
         fragments.push(fragment);
-        expect(fragment).toContain('gpuDexelSpan(ray, i, size, dims, capacity, cylinder)');
+        expect(fragment).toContain('gpuDexelIntervals(ray, size, dims, capacity, cylinder, &spans)');
+        expect(fragment).not.toContain('gpuDexelCount(');
+        expect(fragment).not.toContain('gpuDexelSpan(');
+        expect(fragment).not.toContain('gpuOriginalCount(');
+        expect(fragment).not.toContain('gpuOriginalSpan(');
         expect(fragment).toContain('gpuDexelNormal(p, size, dims, capacity, cylinder)');
         expect(fragment).not.toMatch(/ptr\s*<\s*storage\b/);
       } finally {

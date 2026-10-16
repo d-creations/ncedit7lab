@@ -52,6 +52,7 @@ export class RotationalProfile {
   private readonly initial: ImplicitVolume;
   private readonly cuts: ProfileCut[] = [];
   private slabs: Slab[];
+  private slabBytes = 0;
   private fieldBytes = 0;
   private readonly zero: Line = { slope: 0, offset: 0 };
   private readonly outer: Line;
@@ -103,7 +104,7 @@ export class RotationalProfile {
     return (
       1024 +
       this.fieldBytes +
-      this.slabs.reduce((bytes, slab) => bytes + 128 + slab.intervals.length * 192, 0) +
+      this.slabBytes +
       this.countCacheBytes
     );
   }
@@ -555,6 +556,10 @@ export class RotationalProfile {
   }
 
   private refreshExtrusions(): void {
+    this.slabBytes = this.slabs.reduce(
+      (bytes, slab) => bytes + 128 + slab.intervals.length * 192,
+      0,
+    );
     this.volume.extrusion = this.slabs
       .filter((slab) =>
         slab.intervals.every(

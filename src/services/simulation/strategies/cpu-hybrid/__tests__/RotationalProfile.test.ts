@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { RotationalProfile } from '../RotationalProfile';
 import { StockModel, boundaryEdgeRoot } from '../StockModel';
 import { StockMeshBuilder } from '../StockMeshBuilder';
@@ -7,7 +7,7 @@ import { CuttingToolModel } from '../../../shared/CuttingToolModel';
 import { cylinderVolume, type ImplicitVolume } from '../../../shared/ImplicitGeometry';
 import { SIMULATION_LIMITS, type StockSurfaceChunk } from '../../../shared/SimulationTypes';
 import { WorkpieceFactory } from '../WorkpieceFactory';
-import { buildTurningSweep } from '../../../shared/TurningEnvelope';
+import { buildTurningSweep, turningSectionVolume } from '../../../shared/TurningEnvelope';
 
 function section(points: readonly (readonly [number, number])[]): ImplicitVolume {
   const polygon = points.map((point) => new THREE.Vector2(...point));
@@ -106,6 +106,50 @@ function bruteCount(volume: ImplicitVolume, first: THREE.Vector3, span: number, 
 }
 
 describe('hybrid rotational base and local 3D removal', () => {
+  it('accounts profile memory without rescanning slabs on repeated workspace checks', () => {
+    const profile = new RotationalProfile(3, 4);
+    for (let i = 0; i < 12; i++)
+      profile.apply(rectangle(1 + i / 100, 2, -1 + i / 10, -0.95 + i / 10), () => {});
+    const slabs = profile.meridianSlabs;
+    const slabBytes = slabs.reduce((bytes, slab) => bytes + 128 + slab.intervals.length * 192, 0);
+    const expected = 1024 + Reflect.get(profile, 'fieldBytes') + slabBytes;
+    const reduce = vi.spyOn(slabs, 'reduce');
+    try {
+      for (let i = 0; i < 1000; i++) expect(profile.allocatedBytes).toBe(expected);
+      expect(reduce).not.toHaveBeenCalled();
+    } finally {
+      reduce.mockRestore();
+    }
+    const fork = profile.fork();
+    expect(fork.allocatedBytes).toBe(profile.allocatedBytes);
+    fork.apply(rectangle(0.3, 0.7, -2, 2), () => {});
+    const updated = fork.meridianSlabs.reduce(
+      (bytes, slab) => bytes + 128 + slab.intervals.length * 192, 0,
+    );
+    expect(fork.allocatedBytes).toBe(1024 + Reflect.get(fork, 'fieldBytes') + updated);
+    expect(profile.allocatedBytes).toBe(expected);
+  });
+
+  it('refreshes cached slab memory when restoring a different profile history', () => {
+    const profile = new RotationalProfile(3, 4);
+    const initial = profile.encodeHistory();
+    const cut = turningSectionVolume(
+      [new THREE.Vector2(1, -1), new THREE.Vector2(2, -1),
+        new THREE.Vector2(2, 1), new THREE.Vector2(1, 1)],
+      new THREE.Vector3(), new THREE.Vector3(0, 0, 1), new THREE.Vector3(1, 0, 0),
+    );
+    profile.apply(cut, () => {});
+    const cutBytes = profile.allocatedBytes;
+    const history = profile.encodeHistory();
+    const restored = new RotationalProfile(3, 4);
+    restored.restoreHistory(history);
+    expect(restored.allocatedBytes).toBe(cutBytes);
+    restored.restoreHistory(initial);
+    expect(restored.allocatedBytes).toBe(1024 + 128 + 192);
+    expect(restored.allocatedBytes).toBeLessThan(cutBytes);
+    restored.restoreHistory(history);
+    expect(restored.allocatedBytes).toBe(cutBytes);
+  });
   it('handles convex section vertex levels separated by one floating-point step', () => {
     const profile = new RotationalProfile(3, 4);
     const cut = section([[1, 0], [2, 0], [2, 1], [1.5, 1 + Number.EPSILON], [1, 1]]);

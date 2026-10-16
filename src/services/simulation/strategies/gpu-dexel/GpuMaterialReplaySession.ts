@@ -13,12 +13,11 @@ import {
   createDexelLayout,
   DEXEL_MEMORY_BYTES,
   DEXEL_BINDING_BYTES,
-  DEXEL_INTERVALS,
+  dexelIntervalCapacity,
   DEXEL_MAX_INTERVALS,
   GpuDexelIntervalOverflowError,
   indexDexelTiles,
   dexelTilesForBounds,
-  type DexelIntervalCapacity,
 } from './DexelLayout';
 import { materialSize, stockPlacement } from '../../shared/SimulationTransforms';
 import {
@@ -98,6 +97,7 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
   private implicitProfile?: { through: number; profile: RotationalProfile };
   private initialSweeps?: { position: number; sweeps: CompiledGpuSweep[] };
   private compiledSweeps: CompiledGpuSweep[] = [];
+  private compiledSweepBytes = 0;
   private readonly histories = new Map<
     'coarse' | 'fine',
     { history: GpuDexelHistory; through: number; baseFingerprint?: string }
@@ -175,17 +175,15 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
         );
       const preparationStarted = performance.now();
       this.compiledSweeps = compileGpuSweeps(input);
-      if (
-        this.compiledSweeps.reduce(
-          (bytes, sweep) =>
-            bytes +
-            sweep.data.byteLength +
-            256 +
-            (sweep.turningVolume?.rotationalSection?.polygon.length ?? 0) * 256,
-          0,
-        ) >
-        32 * 1024 * 1024
-      )
+      this.compiledSweepBytes = this.compiledSweeps.reduce(
+        (bytes, sweep) =>
+          bytes +
+          sweep.data.byteLength +
+          256 +
+          (sweep.turningVolume?.rotationalSection?.polygon.length ?? 0) * 256,
+        0,
+      );
+      if (this.compiledSweepBytes > 32 * 1024 * 1024)
         throw new SimulationCapabilityError(
           'Hybrid cutter compilation exceeds its 32 MiB staging budget',
         );
@@ -200,10 +198,8 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
           this.rotationalThrough++;
         }
         if (this.rotationalThrough < this.compiledSweeps.length) {
-          for (let i = 0; i < this.rotationalThrough; i++)
-            profile.apply(this.compiledSweeps[i].turningVolume!, (bytes) => this.makeRoom(bytes));
-          this.rotationalBase = new RotationalDexelBase(profile);
-          this.implicitProfile = { through: this.rotationalThrough, profile };
+          // Build the base in the cancellable, yielding seek path, not synchronously in start().
+          this.implicitProfile = { through: 0, profile };
           this.makeRoom(0);
         }
       }
@@ -222,6 +218,7 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
     } catch (error) {
       this.initialSweeps = undefined;
       this.compiledSweeps = [];
+      this.compiledSweepBytes = 0;
       return Promise.reject(error);
     }
   }
@@ -394,19 +391,18 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
       });
       const size = new THREE.Vector3(...materialSize(input.stock));
       const calculationEpoch = this.epoch;
-      let intervalCapacity: DexelIntervalCapacity =
-        source?.layout.intervalCapacity ?? DEXEL_INTERVALS;
-      if ((rotationalBase?.maxIntervals ?? 0) > intervalCapacity)
-        intervalCapacity = rotationalBase!.maxIntervals <= 32 ? 32 : 64;
-      const updateBase =
-        !!source?.rotationalBase &&
-        !!rotationalBase &&
-        source.rotationalBase.fingerprint !== rotationalBase.fingerprint;
+      let intervalCapacity = dexelIntervalCapacity(
+        Math.max(source?.layout.intervalCapacity ?? 0, rotationalBase?.maxIntervals ?? 0),
+      );
       let retry: boolean;
       do {
         retry = false;
         if (this.cancelled || calculationEpoch !== this.epoch)
           throw new DOMException('GPU replay cancelled', 'AbortError');
+        const updateBase =
+          !!source?.rotationalBase &&
+          !!rotationalBase &&
+          source.rotationalBase.fingerprint !== rotationalBase.fingerprint;
         const retainedTiles = history
           ? Uint32Array.from(
               new Set([...history.tiles(step), ...(source?.layout.storedTiles ?? [])]),
@@ -439,10 +435,10 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
                 (candidate) => candidate.layout.intervalCapacity === intervalCapacity,
               );
         const privateTiles =
-          source?.layout.intervalCapacity === intervalCapacity
+          source && source.layout.intervalCapacity === intervalCapacity
             ? new Set([
                 ...changedTiles,
-                ...layout.storedTiles.filter((tile) => source.tileSlots[tile] === 0xffffffff),
+                ...layout.storedTiles.filter((tile) => source!.tileSlots[tile] === 0xffffffff),
               ]).size
             : layout.storedTiles.length;
         const arena =
@@ -559,13 +555,17 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
         } catch (error) {
           this.owned.delete(stock);
           stock.dispose();
+          if (source && !this.owned.has(source)) {
+            source = undefined;
+            reusedPosition = undefined;
+          }
           if (
             !(error instanceof GpuDexelIntervalOverflowError) ||
             intervalCapacity === DEXEL_MAX_INTERVALS
           )
             throw error;
           elapsedMs += performance.now() - attemptStarted;
-          const nextCapacity: DexelIntervalCapacity = intervalCapacity === 16 ? 32 : 64;
+          const nextCapacity = dexelIntervalCapacity(intervalCapacity + 1);
           recordGpuDiagnostic(this.device, 'interval-capacity-retry', {
             position,
             phase,
@@ -688,7 +688,7 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
     if (!current) return undefined;
     const from = current.through <= motionCount ? current.through : 0;
     const changes = this.implicitTurning.slice(from, motionCount).some(Boolean);
-    if (from === current.through && !changes) {
+    if (from === current.through && !changes && this.rotationalBase) {
       current.through = motionCount;
       return this.rotationalBase;
     }
@@ -704,12 +704,14 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
         throw new DOMException('Turning replay superseded', 'AbortError');
       this.makeRoom(bytes);
     };
+    this.progress(0, motionCount);
     for (let i = from; i < motionCount; i++) {
-      if (!this.implicitTurning[i]) continue;
       if (i > from && (i - from) % 16 === 0)
         await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      if (!this.implicitTurning[i]) continue;
       reserve(profile.allocatedBytes);
       profile.apply(this.compiledSweeps[i].turningVolume!, reserve);
+      this.progress(Math.min(i + 1, this.rotationalThrough), motionCount);
     }
     reserve(profile.allocatedBytes * 2);
     const base = new RotationalDexelBase(profile);
@@ -828,6 +830,13 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
 
   private makeRoom(extra: number, protectedStock?: GpuDexelStock | RevolvedStock): void {
     let bytes = this.residentBytes();
+    if (
+      bytes + extra <= DEXEL_MEMORY_BYTES &&
+      this.revolved.size < 4 &&
+      this.coarse.size < 4 &&
+      this.fine.size < 4
+    )
+      return;
     for (const [key, entry] of this.revolved) {
       if (bytes + extra <= DEXEL_MEMORY_BYTES && this.revolved.size < 4) break;
       if (entry.stock.group.parent || entry.stock === protectedStock) continue;
@@ -881,14 +890,7 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
       [...arenas].reduce((sum, arena) => sum + arena.estimatedBytes, 0) +
       [...this.histories.values()].reduce((sum, entry) => sum + entry.history.estimatedBytes, 0) +
       [...this.ownedRevolved].reduce((sum, stock) => sum + stock.estimatedBytes, 0) +
-      this.compiledSweeps.reduce(
-        (sum, sweep) =>
-          sum +
-          sweep.data.byteLength +
-          256 +
-          (sweep.turningVolume?.rotationalSection?.polygon.length ?? 0) * 256,
-        0,
-      ) +
+      this.compiledSweepBytes +
       (this.rotationalBase?.estimatedBytes ?? 0) +
       (this.implicitProfile?.profile.allocatedBytes ?? 0)
     );
@@ -912,6 +914,7 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
     for (const entry of this.histories.values()) entry.history.dispose();
     this.histories.clear();
     this.compiledSweeps = [];
+    this.compiledSweepBytes = 0;
     this.rotationalBase = undefined;
     this.implicitProfile = undefined;
     this.implicitTurning = [];

@@ -1,6 +1,23 @@
 import * as THREE from 'three';
+import { MeshBasicNodeMaterial, type Node } from 'three/webgpu';
+import { Fn, normalView, positionViewDirection, vec4, wgslFn } from 'three/tsl';
 import { RotationalProfile } from '../cpu-hybrid/RotationalProfile';
 import { SimulationCapabilityError, SIMULATION_LIMITS } from '../../shared/SimulationTypes';
+
+const REVOLVED_MATCAP_WGSL = `
+fn gpuStockMatcap(normal: vec3f, viewDirection: vec3f) -> vec3f {
+  let view = normalize(viewDirection);
+  var right = vec3f(view.z, 0.0, -view.x);
+  if (dot(right, right) < 1e-10) { right = vec3f(1.0, 0.0, 0.0); }
+  right = normalize(right);
+  let up = cross(view, right);
+  let uv = vec2f(dot(right, normal), dot(up, normal));
+  let highlight = exp(-3.0 * dot(uv - vec2f(-0.35, 0.4), uv - vec2f(-0.35, 0.4)));
+  let fill = exp(-2.0 * dot(uv - vec2f(0.55, 0.0), uv - vec2f(0.55, 0.0)));
+  let brightness = 0.46 + 0.10 * uv.y + 0.25 * highlight + 0.10 * fill;
+  return vec3f(0.93, 0.94, 0.96) * brightness;
+}
+`;
 
 type Span = readonly [number, number];
 
@@ -108,11 +125,17 @@ export class RevolvedStock {
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(positions.subarray(0, offset), 3));
     geometry.setAttribute('normal', new THREE.BufferAttribute(normals.subarray(0, offset), 3));
-    const material = new THREE.MeshStandardMaterial({
-      color: 0xc4c7ca,
-      roughness: 0.65,
-      metalness: 0.15,
-    });
+    const material = new MeshBasicNodeMaterial();
+    const matcap = wgslFn(REVOLVED_MATCAP_WGSL);
+    material.fragmentNode = Fn(() =>
+      vec4(
+        matcap({
+          normal: normalView.normalize(),
+          viewDirection: positionViewDirection,
+        }) as Node<'vec3'>,
+        1,
+      ),
+    )();
     this.group.add(new THREE.Mesh(geometry, material));
     this.group.name = 'revolved-stock';
     this.group.matrixAutoUpdate = false;

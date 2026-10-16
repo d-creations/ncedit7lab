@@ -90,6 +90,35 @@ Immutable stock caches, GPU tile sharing/history and stopped-prefix handling
 remain in effect. History is used only with its matching implicit-base fingerprint;
 checkpoints never restore a later turning base into an earlier prefix.
 
+GPU replay reserves the smallest supported interval capacity that fits the
+implicit base and any copied source, starting at four intervals per ray.
+An explicit interval overflow retries at 8, 16, 32 and finally 64 intervals,
+without changing the ray grid or pitch. This reduces unused tile storage in
+simple turning/milling parts; complex cuts may still require larger capacities
+and additional retry work. Failed attempts are disposed and displayed/source
+stock remains immutable. Direct stock/reference helpers retain their existing
+16-interval default; adaptive selection is owned by the replay session.
+
+The 3D plot renders on demand, not continuously while editing. Camera controls
+(including damping), plot/stock/tool/selection changes, theme changes and resizing
+request coalesced frames. Hidden views/tabs defer rendering; GPU frames remain
+limited to one in flight, with changes during that frame drawn after completion.
+An unchanged view schedules no animation frames or repeated GPU renders. This
+does not eliminate the cost of an individual render or background stock compute.
+WebGPU camera controls use immediate motion without post-input damping so a
+camera gesture does not start a tail of costly stock renders. WebGL keeps damping.
+Unchanged background colors and repeated same-size resize notifications do not
+invalidate the view.
+
+Mixed-stock preparation builds the initial turning base in the cancellable replay
+path, yielding to the browser every 16 timeline motions instead of first running a
+synchronous turning prepass. Workspace checks use cached compiled-sweep and
+profile-slab byte totals, refreshed when their contents change; they do not rescan
+the entire program/profile for every inner profile reservation. These changes
+preserve geometry, pitch and memory limits. Individual profile updates, GPU
+submissions and stock renders can still be expensive; this is not a hardware
+hang guarantee.
+
 History staging is bounded **before each compute submission** by its ray count,
 cutter count and four-event-per-cutter ceiling, then drained after queue completion.
 The staging ceiling remains 1,048,576 events and the separate total retention

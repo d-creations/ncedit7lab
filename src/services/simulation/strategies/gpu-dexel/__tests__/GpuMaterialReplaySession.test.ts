@@ -118,7 +118,7 @@ describe('progressive GPU replay lifecycle', () => {
     expect(first.phase).toBe('coarse');
     expect(first.position).toBe(3);
     expect(first.pitchMm).toBe(0.1);
-    expect(created[0].intervalCapacity).toBe(16);
+    expect(created[0].intervalCapacity).toBe(4);
     expect(calculate).toHaveBeenCalledOnce();
     await vi.advanceTimersByTimeAsync(350);
     expect(refined).toHaveBeenCalledOnce();
@@ -547,48 +547,55 @@ describe('progressive GPU replay lifecycle', () => {
     });
     calculate.mockImplementationOnce(async () => {
       vi.advanceTimersByTime(20);
-      throw new GpuDexelIntervalOverflowError(16);
+      throw new GpuDexelIntervalOverflowError(4);
     });
     const next = await replay.seek(2);
     expect(next).toMatchObject({ reusedPosition: 1, newMotions: 1, elapsedMs: 31 });
     expect(copyFrom.mock.calls.map(([stock]) => stock)).toEqual([source.stock, source.stock]);
-    expect(created.slice(-2).map((stock) => stock.intervalCapacity)).toEqual([16, 32]);
+    expect(created.slice(-2).map((stock) => stock.intervalCapacity)).toEqual([4, 8]);
     expect(created.at(-2)?.dispose).toHaveBeenCalledOnce();
     expect(created[1].dispose).not.toHaveBeenCalled();
+    const promoted = next.stock;
+    const following = await replay.seek(3);
+    expect(copyFrom.mock.calls.at(-1)?.[0]).toBe(promoted);
+    expect(following).toMatchObject({ reusedPosition: 2, newMotions: 1 });
+    expect(created.at(-1)?.intervalCapacity).toBe(8);
+    expect((await replay.seek(1)).stock).toBe(source.stock);
   });
   it('retries only interval overflow, releases rejected stocks and caches the successful capacity', async () => {
     calculate
+      .mockRejectedValueOnce(new GpuDexelIntervalOverflowError(4))
+      .mockRejectedValueOnce(new GpuDexelIntervalOverflowError(8))
       .mockRejectedValueOnce(new GpuDexelIntervalOverflowError(16))
       .mockRejectedValueOnce(new GpuDexelIntervalOverflowError(32));
     const replay = session();
     const frame = await replay.start(input, [0], () => {}, true);
-    expect(created.map((stock) => stock.intervalCapacity)).toEqual([16, 32, 64]);
-    expect(created.map((stock) => stock.pitch)).toEqual([0.1, 0.1, 0.1]);
-    expect(created[0].dispose).toHaveBeenCalledOnce();
-    expect(created[1].dispose).toHaveBeenCalledOnce();
-    expect(created[2].dispose).not.toHaveBeenCalled();
-    expect(frame.stock).toBe(created[2]);
+    expect(created.map((stock) => stock.intervalCapacity)).toEqual([4, 8, 16, 32, 64]);
+    expect(created.map((stock) => stock.pitch)).toEqual([0.1, 0.1, 0.1, 0.1, 0.1]);
+    for (const stock of created.slice(0, -1)) expect(stock.dispose).toHaveBeenCalledOnce();
+    expect(created[4].dispose).not.toHaveBeenCalled();
+    expect(frame.stock).toBe(created[4]);
     expect((await replay.seek(1)).stock).toBe(frame.stock);
-    expect(calculate).toHaveBeenCalledTimes(3);
+    expect(calculate).toHaveBeenCalledTimes(5);
   });
   it('stops at 64 intervals and propagates the capacity failure', async () => {
     calculate.mockRejectedValue(new GpuDexelIntervalOverflowError(64));
     await expect(session().start(input, [0], () => {}, true)).rejects.toThrow(
       /64 material intervals/,
     );
-    expect(created.map((stock) => stock.intervalCapacity)).toEqual([16, 32, 64]);
+    expect(created.map((stock) => stock.intervalCapacity)).toEqual([4, 8, 16, 32, 64]);
     expect(created.every((stock) => stock.dispose.mock.calls.length === 1)).toBe(true);
   });
-  it('adapts fine stock to 32 intervals while preserving displayed coarse stock and fine pitch', async () => {
+  it('adapts fine stock to 8 intervals while preserving displayed coarse stock and fine pitch', async () => {
     const replay = session();
     const coarse = await replay.start(input, [0], () => {}, true);
     new THREE.Scene().add(coarse.stock.group);
-    calculate.mockRejectedValueOnce(new GpuDexelIntervalOverflowError(16));
+    calculate.mockRejectedValueOnce(new GpuDexelIntervalOverflowError(4));
     await vi.advanceTimersByTimeAsync(350);
     expect(created.map((stock) => [stock.pitch, stock.intervalCapacity])).toEqual([
-      [0.1, 16],
-      [0.02, 16],
-      [0.02, 32],
+      [0.1, 4],
+      [0.02, 4],
+      [0.02, 8],
     ]);
     expect(created[0].dispose).not.toHaveBeenCalled();
     expect(created[1].dispose).toHaveBeenCalledOnce();
@@ -609,11 +616,11 @@ describe('progressive GPU replay lifecycle', () => {
       calculate
         .mockImplementationOnce(async () => {
           vi.advanceTimersByTime(20);
-          throw new GpuDexelIntervalOverflowError(16);
+          throw new GpuDexelIntervalOverflowError(4);
         })
         .mockImplementationOnce(async () => {
           vi.advanceTimersByTime(30);
-          throw new GpuDexelIntervalOverflowError(32);
+          throw new GpuDexelIntervalOverflowError(8);
         });
       const replay = session();
       await replay.start(input, [0], () => {}, true);
@@ -628,7 +635,7 @@ describe('progressive GPU replay lifecycle', () => {
         requestedPosition: 1,
         phase: 'coarse',
         pitchMm: 0.1,
-        intervalCapacity: 64,
+        intervalCapacity: 16,
         motions: 0,
         elapsedMs: 55,
       });
@@ -642,7 +649,7 @@ describe('progressive GPU replay lifecycle', () => {
     const replay = session();
     calculate.mockImplementationOnce(async () => {
       replay.cancel();
-      throw new GpuDexelIntervalOverflowError(16);
+      throw new GpuDexelIntervalOverflowError(4);
     });
     await expect(replay.start(input, [0], () => {}, true)).rejects.toMatchObject({
       name: 'AbortError',
@@ -669,9 +676,9 @@ describe('progressive GPU replay lifecycle', () => {
         end: { ...large.motions[0].end, position: [0, 0, -60] },
       },
     ];
-    calculate.mockRejectedValueOnce(new GpuDexelIntervalOverflowError(16));
+    calculate.mockRejectedValue(new GpuDexelIntervalOverflowError(16));
     await expect(replay.start(large, [0], () => {}, true)).rejects.toThrow(/larger pitch|256 MiB/);
-    expect(created).toHaveLength(1);
-    expect(created[0].dispose).toHaveBeenCalledOnce();
+    expect(created.map((stock) => stock.intervalCapacity)).toEqual([4, 8, 16]);
+    expect(created.every((stock) => stock.dispose.mock.calls.length === 1)).toBe(true);
   });
 });

@@ -9,10 +9,44 @@ import {
   dexelTilesForBounds,
   originalDexelSpan,
   subtractDexelInterval,
+  dexelIntervalCapacity,
 } from '../DexelLayout';
 import type { CompiledGpuSweep } from '../GpuSweepCompiler';
 
 describe('bounded tiled tri-dexel layout', () => {
+  it.each([
+    [0, 4],
+    [1, 4],
+    [4, 4],
+    [5, 8],
+    [8, 8],
+    [9, 16],
+    [16, 16],
+    [17, 32],
+    [32, 32],
+    [33, 64],
+    [64, 64],
+  ])('reserves the smallest supported capacity for %i intervals', (required, expected) => {
+    expect(dexelIntervalCapacity(required)).toBe(expected);
+  });
+  it.each([-1, 0.5, NaN, Infinity, 65])('rejects invalid interval requirements %s', (required) => {
+    expect(() => dexelIntervalCapacity(required)).toThrow();
+  });
+  it('reduces a 349-tile mixed-stock interval allocation by 75% at unchanged .02 mm pitch', () => {
+    const size = new THREE.Vector3(20, 20, 50);
+    const retainedTiles = Uint32Array.from({ length: 349 }, (_, i) => i);
+    const before = createDexelLayout(size, 0.02, 16, { bounds: [], retainedTiles });
+    const after = createDexelLayout(size, 0.02, dexelIntervalCapacity(1), {
+      bounds: [],
+      retainedTiles,
+    });
+    expect(after.intervalBytes).toBe(before.intervalBytes / 4);
+    expect(after.estimatedBytes).toBeLessThan(before.estimatedBytes * 0.28);
+    expect(after.rays).toBe(before.rays);
+    expect(after.dimensions).toEqual(before.dimensions);
+    expect(after.storedTiles).toEqual(before.storedTiles);
+  });
+
   it('reconstructs untouched box/cylinder rays consistently on all axes, including padded and empty rays', () => {
     const layout = createDexelLayout(new THREE.Vector3(2, 2, 2), 0.1, 16, { bounds: [] });
     expect(originalDexelSpan(layout, 0, false)).toEqual([-1, 1]);

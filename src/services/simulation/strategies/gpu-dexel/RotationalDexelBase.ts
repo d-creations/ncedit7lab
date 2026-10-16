@@ -160,24 +160,33 @@ export class RotationalDexelBase {
 
 /** Uses the existing tile-index binding, retaining the eight-storage-binding baseline. */
 export const ROTATIONAL_BASE_WGSL = `
-fn gpuOriginalIntervals(id: u32, size: vec3f, dims: vec3f, cylinder: u32,
+fn gpuOriginalPointIntervals(axis: u32, point: vec3f, size: vec3f, dims: vec3f, cylinder: u32,
   segments: ptr<function, array<vec2f, 64>>) -> u32 {
   let header = gpuRayCount(dims) / 1024u;
   let slabs = dexelTileSweeps.value[header];
   if (slabs == 0u) {
-    let span = gpuCylinderSpan(id, size, dims, cylinder);
-    (*segments)[0] = span;
-    return select(0u, 1u, span.x < span.y);
+    if (any(abs(point) > size * 0.5)) { return 0u; }
+    if (cylinder == 0u) { (*segments)[0] = vec2f(-size[axis] * 0.5, size[axis] * 0.5); return 1u; }
+    let radius = size.x * 0.5;
+    if (axis == 2u) {
+      if (dot(point.xy, point.xy) >= radius * radius) { return 0u; }
+      (*segments)[0] = vec2f(-size.z * 0.5, size.z * 0.5);
+      return 1u;
+    }
+    let square = radius * radius - point[1u - axis] * point[1u - axis];
+    if (square <= 0.0) { return 0u; }
+    let extent = sqrt(square);
+    (*segments)[0] = vec2f(-extent, extent);
+    return 1u;
   }
-  let info = gpuRayInfo(id, size, dims); let axis = u32(info.w);
-  if (any(info.xyz > size * 0.5)) { return 0u; }
+  if (any(abs(point) > size * 0.5)) { return 0u; }
   var first = 0u; var last = slabs;
   if (axis != 2u) {
     loop {
       if (first >= last) { break; }
       let mid = first + (last - first) / 2u;
       let upper = bitcast<f32>(dexelTileSweeps.value[header + 2u + mid * 4u]);
-      if (upper <= info.z) { first = mid + 1u; } else { last = mid; }
+      if (upper <= point.z) { first = mid + 1u; } else { last = mid; }
     }
     last = min(slabs, first + 1u);
   }
@@ -186,7 +195,7 @@ fn gpuOriginalIntervals(id: u32, size: vec3f, dims: vec3f, cylinder: u32,
     let table = header + 1u + s * 4u;
     let za = bitcast<f32>(dexelTileSweeps.value[table]);
     let zb = bitcast<f32>(dexelTileSweeps.value[table + 1u]);
-    if (axis != 2u && (info.z < za || info.z >= zb)) { continue; }
+    if (axis != 2u && (point.z < za || point.z >= zb)) { continue; }
     let bands = dexelTileSweeps.value[table + 3u];
     for (var b = 0u; b < bands; b++) {
       let index = header + dexelTileSweeps.value[table + 2u] + b * 4u;
@@ -194,7 +203,7 @@ fn gpuOriginalIntervals(id: u32, size: vec3f, dims: vec3f, cylinder: u32,
       let upper = vec2f(bitcast<f32>(dexelTileSweeps.value[index + 2u]), bitcast<f32>(dexelTileSweeps.value[index + 3u]));
       var spans: array<vec2f, 2>; var n = 0u;
       if (axis == 2u) {
-        let radius = length(info.xy); var lo = za; var hi = zb;
+        let radius = length(point.xy); var lo = za; var hi = zb;
         let lines = array<vec2f, 2>(lower, -upper);
         for (var l = 0u; l < 2u; l++) {
           let a = lines[l].x;
@@ -205,9 +214,9 @@ fn gpuOriginalIntervals(id: u32, size: vec3f, dims: vec3f, cylinder: u32,
         }
         if (hi > lo) { spans[0] = vec2f(lo, hi); n = 1u; }
       } else {
-        let other = info[1u - axis];
-        let lo = max(0.0, lower.x * info.z + lower.y);
-        let hi = max(0.0, upper.x * info.z + upper.y);
+        let other = point[1u - axis];
+        let lo = max(0.0, lower.x * point.z + lower.y);
+        let hi = max(0.0, upper.x * point.z + upper.y);
         if (hi > abs(other)) {
           let outer = sqrt(max(0.0, hi * hi - other * other));
           let inner = sqrt(max(0.0, lo * lo - other * other));
@@ -240,14 +249,10 @@ fn gpuOriginalIntervals(id: u32, size: vec3f, dims: vec3f, cylinder: u32,
   }
   return count;
 }
-fn gpuOriginalSpan(id: u32, i: u32, size: vec3f, dims: vec3f, cylinder: u32) -> vec2f {
-  var segments: array<vec2f, 64>;
-  let count = gpuOriginalIntervals(id, size, dims, cylinder, &segments);
-  if (i >= count || count > 64u) { return vec2f(0.0); }
-  return segments[i];
-}
-fn gpuOriginalCount(id: u32, size: vec3f, dims: vec3f, cylinder: u32) -> u32 {
-  var segments: array<vec2f, 64>;
-  return gpuOriginalIntervals(id, size, dims, cylinder, &segments);
+fn gpuOriginalIntervals(id: u32, size: vec3f, dims: vec3f, cylinder: u32,
+  segments: ptr<function, array<vec2f, 64>>) -> u32 {
+  let info = gpuRayInfo(id, size, dims);
+  if (any(info.xyz > size * 0.5)) { return 0u; }
+  return gpuOriginalPointIntervals(u32(info.w), info.xyz, size, dims, cylinder, segments);
 }
 `;

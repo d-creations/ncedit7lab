@@ -3,10 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NCToolpathPlot } from '../NCToolpathPlot';
 import * as THREE from 'three';
 import { WebGPURenderer } from 'three/webgpu';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { GpuDexelStock } from '@services/simulation/strategies/gpu-dexel/GpuDexelStock';
 import { GpuDexelHistory } from '@services/simulation/strategies/gpu-dexel/GpuDexelHistory';
 import { GPU_SWEEP_STRIDE } from '@services/simulation/strategies/gpu-dexel/GpuSweepCompiler';
-import { GpuMaterialReplaySession } from '@services/simulation/strategies/gpu-dexel/GpuMaterialReplaySession';
 import { SimulationCapabilityError } from '@services/simulation/shared/SimulationTypes';
 import * as replayStrategyFactory from '@services/simulation/replay/createReplayStrategy';
 import { ServiceRegistry } from '@core/ServiceRegistry';
@@ -37,8 +37,19 @@ interface PlotHarness extends HTMLElement {
   gpuDevice?: GPUDevice;
   camera?: THREE.PerspectiveCamera;
   renderScene(): void;
+  requestRender(): void;
+  controls?: OrbitControls;
+  isVisible: boolean;
+  updateVisibility(): void;
+  onResize(): void;
+  setupThemeObserver(): void;
+  applyThemeToScene(): void;
+  replaceMaterialObject(group: THREE.Group): void;
+  highlightSegment(segment?: import('@core/types').PlotSegment): void;
   gpuRendererLost: boolean;
   gpuRenderPending: boolean;
+  gpuStockPixelBudget: number;
+  materialObject: THREE.Group | null;
   highlightObject: THREE.LineSegments | null;
   toolObject: THREE.Group | null;
   plotNCCode(channel?: string): Promise<void>;
@@ -376,7 +387,7 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
     expect(worker.postMessage).not.toHaveBeenCalled();
     const status = plot.shadowRoot!.getElementById('material-removal-status')!;
     expect(status.textContent).toContain('0.1 mm ray pitch');
-    expect(status.textContent).toContain('16 interval capacity per ray');
+    expect(status.textContent).toContain('4 interval capacity per ray');
     expect(status.textContent).toContain('4/4');
     expect(status.hidden).toBe(true);
     expect(plot.shadowRoot!.getElementById('replay-status')!.hidden).toBe(true);
@@ -698,29 +709,247 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
     log.mockRestore();
   });
 
-  it('throttles completed render submissions only while GPU removal is computing', async () => {
-    vi.useFakeTimers();
+  it('bounds ray-marched GPU stock pixels and lowers them after a slow frame', async () => {
     vi.spyOn(GpuDexelStock.prototype, 'calculate').mockResolvedValue(5);
     await readyReplay(true);
     plot.camera = new THREE.PerspectiveCamera();
     vi.spyOn(document, 'hidden', 'get').mockReturnValue(false);
-    const computing = vi.spyOn(GpuMaterialReplaySession.prototype, 'computing', 'get').mockReturnValue(true);
     const renderer = plot.renderer!;
-    vi.mocked(renderer.render).mockClear();
+    const group = new THREE.Group();
+    group.name = 'gpu-dexel-stock';
+    plot.materialObject = group;
+    vi.spyOn(renderer, 'getSize').mockImplementation((target) => target.set(1075, 628));
+    const ratio = vi.spyOn(renderer, 'setPixelRatio').mockImplementation(() => {});
+    vi.spyOn(renderer, 'getPixelRatio').mockReturnValue(1.5);
+    plot.gpuStockPixelBudget = 400_000;
+    const now = vi.spyOn(performance, 'now');
+    now.mockReturnValueOnce(0).mockReturnValue(2000);
     plot.renderScene();
-    await vi.advanceTimersByTimeAsync(0);
-    plot.renderScene();
-    expect(renderer.render).toHaveBeenCalledOnce();
-    await vi.advanceTimersByTimeAsync(99);
-    plot.renderScene();
-    expect(renderer.render).toHaveBeenCalledOnce();
-    await vi.advanceTimersByTimeAsync(1);
-    plot.renderScene();
-    await vi.advanceTimersByTimeAsync(0);
-    expect(renderer.render).toHaveBeenCalledTimes(2);
-    computing.mockReturnValue(false);
-    plot.renderScene();
-    expect(renderer.render).toHaveBeenCalledTimes(3);
+    const applied = ratio.mock.calls[0][0] as number;
+    expect(applied * applied * 1075 * 628).toBeCloseTo(400_000, -2);
+    await vi.waitFor(() => expect(plot.gpuRenderPending).toBe(false));
+    expect(plot.gpuStockPixelBudget).toBeLessThan(400_000 * 0.85);
+    expect(plot.gpuStockPixelBudget).toBeGreaterThanOrEqual(180_000);
+    now.mockRestore();
+  });
+
+  function demandView() {
+    vi.spyOn(document, 'hidden', 'get').mockReturnValue(false);
+    plot.scene ??= new THREE.Scene();
+    plot.camera = new THREE.PerspectiveCamera();
+    plot.renderer ??= new WebGPURenderer();
+    vi.spyOn(plot.renderer, 'dispose').mockResolvedValue();
+    const draw = vi.spyOn(plot.renderer, 'render').mockImplementation(() => {});
+    const callbacks = new Map<number, FrameRequestCallback>();
+    let id = 0;
+    vi.spyOn(globalThis, 'requestAnimationFrame').mockImplementation((callback) => {
+      callbacks.set(++id, callback);
+      return id;
+    });
+    vi.spyOn(globalThis, 'cancelAnimationFrame').mockImplementation((handle) => {
+      callbacks.delete(handle);
+    });
+    const frame = () => {
+      const next = callbacks.entries().next().value;
+      expect(next).toBeDefined();
+      const [handle, callback] = next!;
+      callbacks.delete(handle);
+      callback(performance.now());
+    };
+    return { callbacks, draw, frame };
+  }
+
+  it('coalesces view changes into one frame and submits no idle or text-edit frames', () => {
+    const { callbacks, draw, frame } = demandView();
+    plot.requestRender();
+    plot.requestRender();
+    expect(callbacks.size).toBe(1);
+    frame();
+    expect(draw).toHaveBeenCalledOnce();
+    expect(callbacks.size).toBe(0);
+    for (let i = 0; i < 20; i++) {
+      bus.publish('program:content_changed', { channelId: '1' });
+    }
+    expect(callbacks.size).toBe(0);
+    expect(draw).toHaveBeenCalledOnce();
+  });
+
+  it('keeps damping frames only until OrbitControls settles', () => {
+    const { callbacks, draw, frame } = demandView();
+    plot.controls = new OrbitControls(plot.camera!, plot.renderer!.domElement);
+    plot.controls.enableDamping = true;
+    const update = vi.spyOn(plot.controls, 'update')
+      .mockReturnValueOnce(true).mockReturnValueOnce(true).mockReturnValue(false);
+    plot.requestRender();
+    frame();
+    frame();
+    frame();
+    expect(update).toHaveBeenCalledTimes(3);
+    expect(draw).toHaveBeenCalledTimes(3);
+    expect(callbacks.size).toBe(0);
+  });
+
+  it('settles real OrbitControls damping and change-event feedback without idle redraws', () => {
+    const { callbacks, draw, frame } = demandView();
+    plot.camera!.position.set(50, 50, 50);
+    plot.controls = new OrbitControls(plot.camera!, plot.renderer!.domElement);
+    plot.controls.enableDamping = true;
+    plot.controls.dampingFactor = 0.05;
+    plot.controls.addEventListener('change', () => plot.requestRender());
+    plot.controls.rotateLeft(0.3);
+    for (let i = 0; callbacks.size && i < 300; i++) frame();
+    expect(draw.mock.calls.length).toBeGreaterThan(1);
+    expect(callbacks.size).toBe(0);
+  });
+
+  it('renders real GPU camera input once without an inertia or control-update loop', () => {
+    const { callbacks, draw, frame } = demandView();
+    plot.camera!.position.set(50, 50, 50);
+    plot.controls = new OrbitControls(plot.camera!, plot.renderer!.domElement);
+    plot.controls.enableDamping = false;
+    plot.controls.addEventListener('change', () => plot.requestRender());
+    const update = vi.spyOn(plot.controls, 'update');
+    plot.controls.rotateLeft(0.3);
+    expect(callbacks.size).toBe(1);
+    const updates = update.mock.calls.length;
+    frame();
+    expect(update).toHaveBeenCalledTimes(updates);
+    expect(draw).toHaveBeenCalledOnce();
+    expect(callbacks.size).toBe(0);
+  });
+
+  it('ignores repeated root style/class notifications when the scene theme did not change', async () => {
+    const { callbacks, draw, frame } = demandView();
+    plot.setupThemeObserver();
+    plot.applyThemeToScene();
+    frame();
+    const renders = draw.mock.calls.length;
+    const previous = document.body.style.cursor;
+    document.body.style.cursor = 'ew-resize';
+    await Promise.resolve();
+    expect(callbacks.size).toBe(0);
+    document.body.style.cursor = previous;
+    await Promise.resolve();
+    expect(callbacks.size).toBe(0);
+    expect(draw).toHaveBeenCalledTimes(renders);
+  });
+
+  it('does not resize or redraw when repeated ResizeObserver callbacks report the same size', () => {
+    const { callbacks, draw } = demandView();
+    const container = plot.shadowRoot!.getElementById('plot-container')!;
+    vi.spyOn(container, 'clientWidth', 'get').mockReturnValue(600);
+    vi.spyOn(container, 'clientHeight', 'get').mockReturnValue(300);
+    vi.spyOn(plot.renderer!, 'getSize').mockImplementation((size) => size.set(600, 300));
+    const resize = vi.spyOn(plot.renderer!, 'setSize');
+    for (let i = 0; i < 100; i++) plot.onResize();
+    expect(resize).not.toHaveBeenCalled();
+    expect(callbacks.size).toBe(0);
+    expect(draw).not.toHaveBeenCalled();
+  });
+
+  it('stops redrawing after the first edit invalidates an existing simulation', async () => {
+    await readyReplay();
+    await expectReplayPosition(0);
+    const { callbacks, draw, frame } = demandView();
+    plot.highlightObject = new THREE.LineSegments();
+    plot.scene!.add(plot.highlightObject);
+    plot.requestRender();
+    frame();
+    source = { ...source, revision: 1, text: `${source.text}\nG1 X3` };
+    bus.publish('program:content_changed', { channelId: '1' });
+    expect(callbacks.size).toBe(1);
+    frame();
+    expect(plot.highlightObject).toBeNull();
+    const calls = draw.mock.calls.length;
+    for (let i = 0; i < 20; i++) {
+      source = { ...source, revision: Number(source.revision) + 1, text: `${source.text} ` };
+      bus.publish('program:content_changed', { channelId: '1' });
+      bus.publish(EVENT_NAMES.STATE_CHANGED, { channel: { program: source.text } });
+    }
+    expect(callbacks.size).toBe(0);
+    expect(draw).toHaveBeenCalledTimes(calls);
+  });
+
+  it('retains the latest invalidation during a pending GPU frame without polling', async () => {
+    vi.spyOn(GpuDexelStock.prototype, 'calculate').mockResolvedValue(5);
+    await readyReplay(true);
+    const { callbacks, draw, frame } = demandView();
+    draw.mockClear();
+    let finish!: () => void;
+    vi.mocked(plot.gpuDevice!.queue.onSubmittedWorkDone)
+      .mockImplementationOnce(() => new Promise<undefined>((resolve) => {
+        finish = () => resolve(undefined);
+      }));
+    plot.requestRender();
+    frame();
+    for (let i = 0; i < 20; i++) plot.requestRender();
+    expect(draw).toHaveBeenCalledOnce();
+    expect(callbacks.size).toBe(0);
+    finish();
+    await vi.waitFor(() => expect(callbacks.size).toBe(1));
+    frame();
+    await vi.waitFor(() => expect(plot.gpuRenderPending).toBe(false));
+    expect(draw).toHaveBeenCalledTimes(2);
+    expect(callbacks.size).toBe(0);
+  });
+
+  it('defers hidden-tab/view changes and cancels scheduled work on disconnect', () => {
+    const { callbacks, draw, frame } = demandView();
+    plot.isVisible = false;
+    plot.updateVisibility();
+    plot.requestRender();
+    expect(callbacks.size).toBe(0);
+    plot.isVisible = true;
+    plot.updateVisibility();
+    expect(callbacks.size).toBe(1);
+    frame();
+    expect(draw).toHaveBeenCalledOnce();
+    const hidden = vi.spyOn(document, 'hidden', 'get').mockReturnValue(true);
+    document.dispatchEvent(new Event('visibilitychange'));
+    plot.requestRender();
+    expect(callbacks.size).toBe(0);
+    hidden.mockReturnValue(false);
+    document.dispatchEvent(new Event('visibilitychange'));
+    frame();
+    expect(draw).toHaveBeenCalledTimes(2);
+    plot.requestRender();
+    expect(callbacks.size).toBe(1);
+    plot.remove();
+    expect(callbacks.size).toBe(0);
+  });
+
+  it('redraws axis toggles and removal of the selected highlight', () => {
+    const { callbacks, draw, frame } = demandView();
+    plot.toggleAxes();
+    frame();
+    plot.highlightObject = new THREE.LineSegments();
+    plot.scene!.add(plot.highlightObject);
+    plot.highlightSegment();
+    frame();
+    expect(plot.highlightObject).toBeNull();
+    expect(draw).toHaveBeenCalledTimes(2);
+    expect(callbacks.size).toBe(0);
+  });
+
+  it('redraws stock installation, visibility and resize without an idle loop', () => {
+    const { callbacks, draw, frame } = demandView();
+    const group = new THREE.Group();
+    plot.replaceMaterialObject(group);
+    frame();
+    plot.toggleMaterial();
+    frame();
+    expect(group.visible).toBe(false);
+    const container = plot.shadowRoot!.getElementById('plot-container')!;
+    vi.spyOn(container, 'clientWidth', 'get').mockReturnValue(600);
+    vi.spyOn(container, 'clientHeight', 'get').mockReturnValue(300);
+    const resize = vi.spyOn(plot.renderer!, 'setSize').mockImplementation(() => {});
+    plot.onResize();
+    frame();
+    expect(resize).toHaveBeenCalledWith(600, 300);
+    expect(plot.camera!.aspect).toBe(2);
+    expect(draw).toHaveBeenCalledTimes(3);
+    bus.publish(EVENT_NAMES.STATE_CHANGED, { uiSettings: { plotViewerOpen: true } });
+    expect(callbacks.size).toBe(0);
   });
 
   it.each(['1', undefined])('renders once from the completed run for channel/global Plot %s', async (channelId) => {
@@ -863,6 +1092,7 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
 
   it.each(['workpiece:test', 'workpiece:tableBC'])(
     'uses backend bindings at fine default resolution without rerunning the backend on cursor movement (%s)', async (frameId) => {
+    plot.shadowRoot!.querySelector<HTMLInputElement>('#gpu-stock')!.checked = false;
     configureStock(frameId);
     const codec = new SimulationCommentCodec();
     source.text = codec.encodeSetup({
@@ -907,6 +1137,7 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
   });
 
   it('keeps backend binding directions and persists resolution changes without backend reexecution', async () => {
+    plot.shadowRoot!.querySelector<HTMLInputElement>('#gpu-stock')!.checked = false;
     const binding = {
       frameId: 'workpiece:mainSpindle', position: [1, 2, 3], rotation: [0, 0, 90],
       spindleOrigin: [4, 5, 6], spindleAxis: [-1, 0, 0],

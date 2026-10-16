@@ -57,6 +57,8 @@ export class NCToolpathPlot extends HTMLElement {
   private gpuWarmupStock?: GpuDexelStock;
   private gpuComputeError?: string;
   private gpuRenderPending = false;
+  /** Ray-marched dexel stock costs scale with pixels × detail; bound pixels, adapt to measured time. */
+  private gpuStockPixelBudget = 400_000;
   private gpuRendererLost = false;
   private controls?: OrbitControls;
   private plotService: PlotService;
@@ -64,6 +66,11 @@ export class NCToolpathPlot extends HTMLElement {
   private executedProgramService: ExecutedProgramService;
   private stateService: StateService;
   private animationFrameId?: number;
+  private renderDirty = false;
+  private readonly handleVisibilityChange = () => {
+    if (document.hidden) this.cancelRenderFrame();
+    else this.requestRender();
+  };
   private isVisible = false;
   private resizeObserver?: ResizeObserver;
   private isPlotting = false;
@@ -92,7 +99,6 @@ export class NCToolpathPlot extends HTMLElement {
   private removalGeneration = 0;
   private removalPreparation?: DeepReadonly<MaterialRemovalPreparation>;
   private materialReplay?: MaterialReplayStrategy;
-  private lastGpuRenderMs = -Infinity;
   private replayTimeline?: PlotReplayTimeline;
   private replayPosition = 0;
   private replayRequestedPosition = 0;
@@ -122,15 +128,15 @@ export class NCToolpathPlot extends HTMLElement {
     this.render();
     this.rendererReady = this.initThree();
     this.setupEventListeners();
+    document.addEventListener('visibilitychange', this.handleVisibilityChange);
   }
 
   disconnectedCallback() {
     this.clearPlot();
     this.subscriptions.forEach((subscription) => subscription.unsubscribe());
     this.subscriptions = [];
-    if (this.animationFrameId) {
-      cancelAnimationFrame(this.animationFrameId);
-    }
+    this.cancelRenderFrame();
+    document.removeEventListener('visibilitychange', this.handleVisibilityChange);
     if (this.resizeObserver) {
       this.resizeObserver.disconnect();
     }
@@ -450,6 +456,7 @@ export class NCToolpathPlot extends HTMLElement {
     this.stockMeshes.clear();
     this.scene.add(group);
     this.updateMaterialControl();
+    this.requestRender();
   }
 
   private installStockSurface(result: Pick<SimulationResult, 'chunks' | 'stockToWorkpiece'>): void {
@@ -773,6 +780,7 @@ export class NCToolpathPlot extends HTMLElement {
   }
 
   private installReplayFrame(frame: MaterialReplayFrame): void {
+    this.requestRender();
     if (frame.backend === 'webgpu-dexel' || frame.backend === 'hybrid-turning') {
       if (this.materialObject !== frame.stock.group) this.replaceMaterialObject(frame.stock.group);
       this.replayPosition = frame.position;
@@ -1565,8 +1573,10 @@ export class NCToolpathPlot extends HTMLElement {
 
     // OrbitControls setup for rotation/pan/zoom
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
-    this.controls.enableDamping = true;
+    // GPU stock frames can be expensive; do not continue rendering camera inertia after input.
+    this.controls.enableDamping = !(this.renderer instanceof WebGPURenderer);
     this.controls.dampingFactor = 0.05;
+    this.controls.addEventListener('change', () => this.requestRender());
     this.controls.screenSpacePanning = true;
     this.controls.minDistance = 0.1;
     this.controls.maxDistance = 5000;
@@ -1612,8 +1622,7 @@ export class NCToolpathPlot extends HTMLElement {
       if (!this.isConnected) return;
     }
 
-    // Start animation loop
-    this.animateScene();
+    this.requestRender();
   }
 
   /** Leaves Plot status/controls usable; only the 3D view is unavailable. */
@@ -1654,11 +1663,14 @@ export class NCToolpathPlot extends HTMLElement {
   private applyThemeToScene() {
     if (!this.scene) return;
 
-    const backgroundColor = this.resolveThemeColor('--vscode-editor-background', '#282c34');
-    this.scene.background = new THREE.Color(backgroundColor);
+    const background = new THREE.Color(
+      this.resolveThemeColor('--vscode-editor-background', '#282c34'),
+    );
+    if (this.scene.background instanceof THREE.Color && this.scene.background.equals(background)) return;
+    this.scene.background = background;
 
     if (this.renderer && this.scene && this.camera) {
-      this.renderScene();
+      this.requestRender();
     }
   }
 
@@ -1670,23 +1682,29 @@ export class NCToolpathPlot extends HTMLElement {
   }
 
   private renderScene(): void {
-    if (!this.scene || !this.camera || !this.renderer || this.gpuRendererLost) return;
+    if (!this.scene || !this.camera || !this.renderer || this.gpuRendererLost ||
+      !this.isConnected || this.hidden || document.hidden) return;
     if (!(this.renderer instanceof WebGPURenderer) || !this.gpuDevice) {
+      this.renderDirty = false;
       this.renderer.render(this.scene, this.camera);
       return;
     }
-    if (this.gpuRenderPending || document.hidden) return;
-    const now = performance.now();
-    if (this.materialReplay?.backend === 'hybrid-turning' &&
-      this.materialReplay.computing && now - this.lastGpuRenderMs < 100) return;
-    this.lastGpuRenderMs = now;
+    if (this.gpuRenderPending) return;
+    this.renderDirty = false;
     const device = this.gpuDevice;
     this.gpuRenderPending = true;
     const started = performance.now();
+    const dexelStock = this.materialObject?.name === 'gpu-dexel-stock';
+    if (dexelStock) this.applyGpuStockRenderScale();
     recordGpuDiagnostic(device, 'render-submit', {
       width: this.renderer.domElement.width, height: this.renderer.domElement.height,
       replayPosition: this.replayPosition, replayBusy: this.replayBusy,
     });
+    if (dexelStock)
+      console.info('[NC-Edit7 GPU] Render submit ' + JSON.stringify({
+        width: this.renderer.domElement.width, height: this.renderer.domElement.height,
+        pixelBudget: Math.round(this.gpuStockPixelBudget),
+      }));
     try {
       this.renderer.render(this.scene, this.camera);
     } catch (error) {
@@ -1710,25 +1728,54 @@ export class NCToolpathPlot extends HTMLElement {
         this.gpuRenderPending = false;
         const elapsedMs = Math.round(performance.now() - started);
         recordGpuDiagnostic(device, 'render-complete', { elapsedMs });
+        if (dexelStock) {
+          console.info('[NC-Edit7 GPU] Render complete ' + JSON.stringify({ elapsedMs }));
+          if (elapsedMs > 300)
+            this.gpuStockPixelBudget = Math.max(180_000, this.gpuStockPixelBudget * Math.min(0.85, 220 / elapsedMs));
+          else if (elapsedMs < 120)
+            this.gpuStockPixelBudget = Math.min(600_000, this.gpuStockPixelBudget * 1.25);
+        }
         if (elapsedMs > 500)
           console.warn('[NC-Edit7 GPU] Slow render/queue completion ' + JSON.stringify({
             elapsedMs, recentEvents: gpuDiagnosticSnapshot(device),
           }));
+        this.scheduleRender();
       }
     });
   }
 
-  private animateScene() {
-    this.animationFrameId = requestAnimationFrame(() => this.animateScene());
+  private applyGpuStockRenderScale(): void {
+    const renderer = this.renderer;
+    if (!renderer) return;
+    const size = renderer.getSize(new THREE.Vector2());
+    const ratio = Math.min(
+      window.devicePixelRatio,
+      Math.sqrt(this.gpuStockPixelBudget / Math.max(1, size.x * size.y)),
+    );
+    if (Math.abs(renderer.getPixelRatio() - ratio) > 0.02) renderer.setPixelRatio(ratio);
+  }
 
-    // Update orbit controls
-    if (this.controls) {
-      this.controls.update();
-    }
+  private requestRender(): void {
+    this.renderDirty = true;
+    this.scheduleRender();
+  }
 
-    if (this.scene && this.camera && this.renderer) {
-      this.renderScene();
-    }
+  private scheduleRender(): void {
+    if (!this.renderDirty || this.animationFrameId !== undefined || this.gpuRenderPending ||
+      this.gpuRendererLost || !this.isConnected || this.hidden || document.hidden ||
+      !this.scene || !this.camera || !this.renderer) return;
+    this.animationFrameId = requestAnimationFrame(() => {
+      // Keep the scheduled ID during update so OrbitControls change events coalesce.
+      const changed = this.controls?.enableDamping ? this.controls.update() : false;
+      this.animationFrameId = undefined;
+      if (this.renderDirty) this.renderScene();
+      if (changed) this.requestRender();
+    });
+  }
+
+  private cancelRenderFrame(): void {
+    if (this.animationFrameId !== undefined) cancelAnimationFrame(this.animationFrameId);
+    this.animationFrameId = undefined;
   }
 
   private onResize() {
@@ -1739,10 +1786,13 @@ export class NCToolpathPlot extends HTMLElement {
     const height = container.clientHeight;
 
     if (width === 0 || height === 0) return;
+    const currentSize = this.renderer.getSize(new THREE.Vector2());
+    if (currentSize.x === width && currentSize.y === height) return;
 
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(Math.max(1, width), Math.max(1, height));
+    this.requestRender();
   }
 
   private updatePlot(
@@ -1797,6 +1847,7 @@ export class NCToolpathPlot extends HTMLElement {
 
     // Auto-fit camera to the new plot
     this.zoomToFit();
+    this.requestRender();
   }
 
   private highlightSegment(selectedSegment?: PlotSegment) {
@@ -1834,10 +1885,7 @@ export class NCToolpathPlot extends HTMLElement {
 
     this.scene.add(this.highlightObject);
 
-    // Force a re-render if not animating
-    if (!this.animationFrameId && this.renderer && this.camera) {
-      this.renderScene();
-    }
+    this.requestRender();
   }
 
   private updateToolMesh(segment?: PlotSegment, tool?: ReturnType<ExecutedProgramService['getRunTool']>): void {
@@ -1866,6 +1914,7 @@ export class NCToolpathPlot extends HTMLElement {
     mesh.renderOrder = 1000;
     this.toolObject = mesh;
     this.scene.add(mesh);
+    this.requestRender();
   }
 
   private resetCamera() {
@@ -1967,6 +2016,7 @@ export class NCToolpathPlot extends HTMLElement {
         child.visible = !child.visible;
       }
     });
+    this.requestRender();
   }
 
   private toggleMaterial() {
@@ -1974,6 +2024,7 @@ export class NCToolpathPlot extends HTMLElement {
     this.materialVisible = !this.materialVisible;
     this.materialObject.visible = this.materialVisible;
     this.updateMaterialControl();
+    this.requestRender();
   }
 
   private updateMaterialControl() {
@@ -2046,6 +2097,7 @@ export class NCToolpathPlot extends HTMLElement {
   /** Segmented paths and highlights own their resources; never dispose shared axes/cache here. */
   private removeOwnedPlotObject(object: THREE.Object3D): void {
     this.scene?.remove(object);
+    this.requestRender();
     const releaseGpuStock: unknown = object.userData.releaseGpuStock;
     if (typeof releaseGpuStock === 'function') { releaseGpuStock(); return; }
     const geometries = new Set<THREE.BufferGeometry>();
@@ -2151,9 +2203,12 @@ export class NCToolpathPlot extends HTMLElement {
 
   private updateVisibility() {
     if (this.isVisible) {
+      const wasHidden = this.hidden;
       this.removeAttribute('hidden');
+      if (wasHidden) this.requestRender();
     } else {
       this.setAttribute('hidden', '');
+      this.cancelRenderFrame();
     }
   }
 }

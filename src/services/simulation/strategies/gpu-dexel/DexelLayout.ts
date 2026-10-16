@@ -6,6 +6,13 @@ export const DEXEL_TILE_SIZE = 32;
 export const DEXEL_INTERVALS = 16;
 export const DEXEL_MAX_INTERVALS = 64;
 export type DexelIntervalCapacity = 4 | 8 | 16 | 32 | 64;
+export function dexelIntervalCapacity(required: number): DexelIntervalCapacity {
+  if (!Number.isSafeInteger(required) || required < 0)
+    throw new SimulationCapabilityError('GPU interval requirement must be a nonnegative integer');
+  for (const capacity of [4, 8, 16, 32, 64] as const) if (required <= capacity) return capacity;
+  throw new SimulationCapabilityError('GPU stock exceeds 64 material intervals on a ray');
+}
+
 export class GpuDexelIntervalOverflowError extends SimulationCapabilityError {
   constructor(capacity: DexelIntervalCapacity) {
     super(`GPU stock exceeds ${capacity} material intervals on a ray`);

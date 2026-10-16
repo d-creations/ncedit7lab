@@ -4,6 +4,7 @@ import { WebGPURenderer } from 'three/webgpu';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GpuMaterialReplaySession, type GpuReplayFrame } from '../GpuMaterialReplaySession';
 import { compileGpuSweeps, evaluateGpuSweep, type CompiledGpuSweep } from '../GpuSweepCompiler';
+import * as sweepCompiler from '../GpuSweepCompiler';
 import { cylinderVolume } from '../../../shared/ImplicitGeometry';
 import { turningSectionVolume } from '../../../shared/TurningEnvelope';
 import { stockPlacement } from '../../../shared/SimulationTransforms';
@@ -13,6 +14,7 @@ import { RotationalProfile } from '../../cpu-hybrid/RotationalProfile';
 import { RevolvedStock } from '../RevolvedStock';
 import { RotationalDexelBase } from '../RotationalDexelBase';
 import { GpuDexelHistory } from '../GpuDexelHistory';
+import { dexelIntervalCapacity, type DexelIntervalCapacity } from '../DexelLayout';
 
 const model = vi.hoisted(() => ({ constructed: vi.fn(), calculate: vi.fn(), copy: vi.fn() }));
 
@@ -40,7 +42,7 @@ vi.mock('../GpuDexelStock', async () => {
         _cylinder: boolean,
         private sweeps: CompiledGpuSweep[],
         _placement: THREE.Matrix4,
-        capacity: 16 | 32 | 64,
+        capacity: DexelIntervalCapacity,
         options: {
           retainedTiles?: Uint32Array;
           rotationalBase?: RotationalDexelBase;
@@ -271,6 +273,9 @@ describe('symmetry-aware hybrid turning replay', () => {
     ).toEqual([1]);
     if (transition.backend !== 'webgpu-dexel') throw new Error('Expected sparse stock');
     expect(transition.stock.rotationalBase).toBeDefined();
+    expect(transition.stock.layout.intervalCapacity).toBe(
+      dexelIntervalCapacity(transition.stock.rotationalBase!.maxIntervals),
+    );
     assertPrefix(transition, config, 3);
     const pocket = new THREE.Vector3(0.6, 0.5, 0.1);
     expect(field(before, pocket)).toBeLessThan(0);
@@ -326,6 +331,11 @@ describe('symmetry-aware hybrid turning replay', () => {
     expect(finished.stock.layout.storedTiles).toEqual(milled.stock.layout.storedTiles);
     expect(finished.reusedPosition).toBe(4);
     expect(Reflect.get(finished.stock, 'updateBase')).toBe(true);
+    expect(finished.stock.layout.intervalCapacity).toBe(
+      dexelIntervalCapacity(
+        Math.max(milled.stock.layout.intervalCapacity, finished.stock.rotationalBase!.maxIntervals),
+      ),
+    );
     expect(field(milled, new THREE.Vector3(7.5, 0.1, 0))).toBeLessThan(0);
     expect(field(finished, new THREE.Vector3(7.5, 0.1, 0))).toBeGreaterThan(0);
     expect(field(finished, new THREE.Vector3(6.5, 0, 0))).toBeGreaterThan(0);
@@ -525,6 +535,74 @@ describe('symmetry-aware hybrid turning replay', () => {
     await obsoleteRejected;
     expect((await latest).position).toBe(2);
     expect(model.constructed).not.toHaveBeenCalled();
+  });
+
+  it('yields and cancels initial mixed-stock preparation before allocating GPU stock', async () => {
+    const motions = [
+      ...Array.from({ length: 34 }, (_, i) => ({ ...axial, executionStep: i })),
+      { ...milling, executionStep: 34 },
+    ];
+    const replay = session();
+    const apply = vi.spyOn(RotationalProfile.prototype, 'apply');
+    try {
+      const pending = replay.start(input(motions), motions.map((cut) => cut.executionStep), () => {}, true);
+      const rejected = expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+      expect(replay.computing).toBe(true);
+      expect(apply).toHaveBeenCalledTimes(16);
+      expect(model.constructed).not.toHaveBeenCalled();
+      replay.cancel();
+      await vi.advanceTimersByTimeAsync(0);
+      await rejected;
+      expect(apply).toHaveBeenCalledTimes(16);
+      expect(model.constructed).not.toHaveBeenCalled();
+    } finally {
+      apply.mockRestore();
+    }
+  });
+
+  it('does not rescan all compiled sweeps for every inner profile workspace reservation', async () => {
+    const config = input([axial, milling, laterTurning]);
+    const sweeps = compileGpuSweeps(config);
+    const reduce = vi.spyOn(sweeps, 'reduce');
+    const compile = vi.spyOn(sweepCompiler, 'compileGpuSweeps').mockReturnValue(sweeps);
+    try {
+      const frame = await session().start(config, [0, 1, 2, 3, 4, 5], () => {}, true);
+      expect(frame.backend).toBe('webgpu-dexel');
+      expect(reduce).toHaveBeenCalledOnce();
+      expect(frame.estimatedBytes).toBeGreaterThan(
+        sweeps.length * (sweepCompiler.GPU_SWEEP_STRIDE * 4 + 256),
+      );
+    } finally {
+      compile.mockRestore();
+      reduce.mockRestore();
+    }
+  });
+
+  it('finishes a yielding mixed-stock prefix once with the same exact turning base', async () => {
+    const motions = [
+      ...Array.from({ length: 34 }, (_, i) => ({ ...axial, executionStep: i })),
+      { ...milling, executionStep: 34 },
+    ];
+    const config = input(motions);
+    const expected = new RotationalProfile(2, 6);
+    for (const sweep of compileGpuSweeps(config))
+      if (sweep.turningVolume) expected.apply(sweep.turningVolume, () => {});
+    const apply = vi.spyOn(RotationalProfile.prototype, 'apply');
+    try {
+      const pending = session().start(config, motions.map((cut) => cut.executionStep), () => {}, true);
+      expect(apply).toHaveBeenCalledTimes(16);
+      await vi.advanceTimersByTimeAsync(10);
+      const frame = await pending;
+      expect(apply).toHaveBeenCalledTimes(34);
+      expect(frame.backend).toBe('webgpu-dexel');
+      if (frame.backend !== 'webgpu-dexel') throw new Error('Expected mixed stock');
+      expect(frame.stock.rotationalBase?.fingerprint).toBe(
+        new RotationalDexelBase(expected).fingerprint,
+      );
+      expect(model.calculate).toHaveBeenCalledOnce();
+    } finally {
+      apply.mockRestore();
+    }
   });
 
   it('fails an over-budget compact stock explicitly, without GPU work or pitch reduction', async () => {

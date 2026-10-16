@@ -273,11 +273,15 @@ fn gpuCopyDexels(id: u32, sourceCapacity: u32, targetCapacity: u32, trimBase: u3
   let targetSlot = copyTargetTiles.value[id / 1024u];
   if (targetSlot == 0xffffffffu) { return; }
   let sourceSlot = copySourceTiles.value[id / 1024u];
-  var count = gpuOriginalCount(id, size, dims, cylinder);
-  if (count > targetCapacity) { atomicOr(&copyErrors.value[0], 1u); return; }
-  if (sourceSlot != 0xffffffffu) { count = copySourceCounts.value[sourceSlot * 1024u + id % 1024u]; }
+  var count = 0u;
+  var original: array<vec2f, 64>;
+  if (sourceSlot != 0xffffffffu) {
+    count = copySourceCounts.value[sourceSlot * 1024u + id % 1024u];
+  } else {
+    count = gpuOriginalIntervals(id, size, dims, cylinder, &original);
+    if (count > targetCapacity) { atomicOr(&copyErrors.value[0], 1u); return; }
+  }
   if (trimBase != 0u && sourceSlot != 0xffffffffu) {
-    var original: array<vec2f, 64>;
     let originalCount = gpuOriginalIntervals(id, size, dims, cylinder, &original);
     var result: array<vec2f, 64>; var n = 0u; var a = 0u; var b = 0u;
     loop {
@@ -299,7 +303,7 @@ fn gpuCopyDexels(id: u32, sourceCapacity: u32, targetCapacity: u32, trimBase: u3
   }
   copyTargetCounts.value[targetSlot * 1024u + id % 1024u] = count;
   for (var i = 0u; i < count; i++) {
-    var span = gpuOriginalSpan(id, i, size, dims, cylinder);
+    var span = original[i];
     if (sourceSlot != 0xffffffffu) {
       span = copySourceIntervals.value[(sourceSlot * 1024u + id % 1024u) * sourceCapacity + i];
     }
@@ -316,23 +320,26 @@ const DEXEL_SHARED_COPY = DEXEL_COPY.replace(/copySourceIntervals/g, 'copyTarget
 );
 
 const DEXEL_DISPLAY_HELPERS = `
-fn gpuDexelCount(ray: u32, size: vec3f, dims: vec3f, cylinder: u32) -> u32 {
+fn gpuDexelIntervals(ray: u32, size: vec3f, dims: vec3f, capacity: u32, cylinder: u32,
+  segments: ptr<function, array<vec2f, 64>>) -> u32 {
   let slot = dexelTileSweeps.value[ray / 1024u];
   if (slot == 0xffffffffu) {
-    return gpuOriginalCount(ray, size, dims, cylinder);
+    return gpuOriginalIntervals(ray, size, dims, cylinder, segments);
   }
-  return dexelCounts.value[slot * 1024u + ray % 1024u];
-}
-fn gpuDexelSpan(ray: u32, i: u32, size: vec3f, dims: vec3f, capacity: u32, cylinder: u32) -> vec2f {
-  let slot = dexelTileSweeps.value[ray / 1024u];
-  if (slot == 0xffffffffu) { return gpuOriginalSpan(ray, i, size, dims, cylinder); }
-  return dexelIntervals.value[(slot * 1024u + ray % 1024u) * capacity + i];
+  let base = slot * 1024u + ray % 1024u;
+  let count = dexelCounts.value[base];
+  for (var i = 0u; i < count; i++) {
+    (*segments)[i] = dexelIntervals.value[base * capacity + i];
+  }
+  return count;
 }
 fn gpuDexelNearestAxis(p: vec3f, axis: u32, size: vec3f, dims: vec3f, capacity: u32, cylinder: u32) -> vec4f {
   let ray = gpuRayIndex(clamp(p, -size * 0.5, size * 0.5), axis, size, dims);
   var result = vec4f(0.0, 0.0, 0.0, 1e20);
-  for (var i = 0u; i < gpuDexelCount(ray, size, dims, cylinder); i++) {
-    let span = gpuDexelSpan(ray, i, size, dims, capacity, cylinder);
+  var spans: array<vec2f, 64>;
+  let count = gpuDexelIntervals(ray, size, dims, capacity, cylinder, &spans);
+  for (var i = 0u; i < count; i++) {
+    let span = spans[i];
     let lower = span.x - p[axis]; let upper = p[axis] - span.y;
     let field = max(lower, upper);
     if (field < result.w) {
@@ -345,8 +352,10 @@ fn gpuDexelNearestAxis(p: vec3f, axis: u32, size: vec3f, dims: vec3f, capacity: 
 fn gpuDexelMatchEndpoint(ray: u32, reference: f32, entry: bool, limit: f32, capacity: u32, size: vec3f, dims: vec3f, cylinder: u32) -> vec2f {
   var best = vec2f(0.0, 1e20);
   var second = 1e20;
-  for (var i = 0u; i < gpuDexelCount(ray, size, dims, cylinder); i++) {
-    let span = gpuDexelSpan(ray, i, size, dims, capacity, cylinder);
+  var spans: array<vec2f, 64>;
+  let count = gpuDexelIntervals(ray, size, dims, capacity, cylinder, &spans);
+  for (var i = 0u; i < count; i++) {
+    let span = spans[i];
     let endpoint = select(span.y, span.x, entry);
     let distance = abs(endpoint - reference);
     if (distance < best.y) { second = best.y; best = vec2f(endpoint, distance); }
@@ -419,19 +428,168 @@ fn gpuTraceDexels(origin: vec3f, surface: vec3f, size: vec3f, dims: vec3f, capac
   var t = max(0.0, max(low.x, max(low.y, low.z))); let end = min(high.x, min(high.y, high.z));
   if (t > end) { return vec4f(0.0); }
   let h = size / dims; let epsilon = min(h.x, min(h.y, h.z)) * 0.0001;
-  for (var iteration = 0u; iteration < 8192u; iteration++) {
+  for (var iteration = 0u; iteration < 32768u; iteration++) {
     if (t + epsilon >= end) { return vec4f(0.0); }
     let p = origin + direction * (t + epsilon);
+    let clamped = clamp(p, -size * 0.5, size * 0.5);
     let cell = floor((p + size * 0.5) / h);
+    let r0 = gpuRayIndex(clamped, 0u, size, dims);
+    let r1 = gpuRayIndex(clamped, 1u, size, dims);
+    let r2 = gpuRayIndex(clamped, 2u, size, dims);
+    let s0 = dexelTileSweeps.value[r0 / 1024u];
+    let s1 = dexelTileSweeps.value[r1 / 1024u];
+    let s2 = dexelTileSweeps.value[r2 / 1024u];
     var occupied = true; var safeSkip = 0.0;
-    for (var axis = 0u; axis < 3u; axis++) {
-      let ray = gpuRayIndex(clamp(p, -size * 0.5, size * 0.5), axis, size, dims);
+    if (s0 == 0xffffffffu && s1 == 0xffffffffu && s2 == 0xffffffffu) {
+      let header = gpuRayCount(dims) / 1024u;
+      let slabs = dexelTileSweeps.value[header];
+      var zRayCenter = vec3f(-size.x * 0.5 + (clamp(cell.x, 0.0, dims.x - 1.0) + 0.5) * h.x,
+                             -size.y * 0.5 + (clamp(cell.y, 0.0, dims.y - 1.0) + 0.5) * h.y, 0.0);
+      let xRayCenter = vec3f(0.0, -size.y * 0.5 + (clamp(cell.y, 0.0, dims.y - 1.0) + 0.5) * h.y,
+                             -size.z * 0.5 + (clamp(cell.z, 0.0, dims.z - 1.0) + 0.5) * h.z);
+      var spans: array<vec2f, 64>;
+      var count = 0u;
+      if (slabs == 0u) {
+        count = gpuOriginalPointIntervals(2u, zRayCenter, size, dims, cylinder, &spans);
+      } else {
+        count = gpuOriginalPointIntervals(0u, xRayCenter, size, dims, cylinder, &spans);
+      }
+      let axis = select(0u, 2u, slabs == 0u);
       var inMaterial = false; var entry = end - t;
-      for (var i = 0u; i < gpuDexelCount(ray, size, dims, cylinder); i++) {
-        let span = gpuDexelSpan(ray, i, size, dims, capacity, cylinder);
+      for (var i = 0u; i < count; i++) {
+        let span = spans[i];
         if (p[axis] >= span.x && p[axis] <= span.y) { inMaterial = true; }
         if (abs(direction[axis]) >= 1e-15) {
-          let next = (select(span.y, span.x, direction[axis] > 0.0) - p[axis]) / direction[axis] + epsilon;
+          let next = (select(span.x, span.y, p[axis] < span.x) - p[axis]) / direction[axis] + epsilon;
+          if (next > epsilon * 0.5) { entry = min(entry, next); }
+        }
+      }
+      if (!inMaterial) {
+        occupied = false;
+        for (var transverse = 0u; transverse < 3u; transverse++) {
+          if (transverse == axis || abs(direction[transverse]) < 1e-15) { continue; }
+          let grid = -size[transverse] * 0.5 + (cell[transverse] + select(0.0, 1.0, direction[transverse] > 0.0)) * h[transverse];
+          entry = min(entry, (grid - p[transverse]) / direction[transverse] + epsilon);
+        }
+        safeSkip = entry;
+      } else {
+        let testAxis = select(1u, 0u, slabs == 0u);
+        var testCenter = vec3f(0.0);
+        if (testAxis == 0u) {
+          testCenter = vec3f(0.0, -size.y * 0.5 + (clamp(cell.y, 0.0, dims.y - 1.0) + 0.5) * h.y,
+                             -size.z * 0.5 + (clamp(cell.z, 0.0, dims.z - 1.0) + 0.5) * h.z);
+        } else {
+          testCenter = vec3f(-size.x * 0.5 + (clamp(cell.x, 0.0, dims.x - 1.0) + 0.5) * h.x, 0.0,
+                             -size.z * 0.5 + (clamp(cell.z, 0.0, dims.z - 1.0) + 0.5) * h.z);
+        }
+        let testCount = gpuOriginalPointIntervals(testAxis, testCenter, size, dims, cylinder, &spans);
+        var inSecond = false; var secondEntry = end - t;
+        for (var i = 0u; i < testCount; i++) {
+          let span = spans[i];
+          if (p[testAxis] >= span.x && p[testAxis] <= span.y) { inSecond = true; }
+          if (abs(direction[testAxis]) >= 1e-15) {
+            let next = (select(span.x, span.y, p[testAxis] < span.x) - p[testAxis]) / direction[testAxis] + epsilon;
+            if (next > epsilon * 0.5) { secondEntry = min(secondEntry, next); }
+          }
+        }
+        if (!inSecond) {
+          occupied = false;
+          for (var transverse = 0u; transverse < 3u; transverse++) {
+            if (transverse == testAxis || abs(direction[transverse]) < 1e-15) { continue; }
+            let grid = -size[transverse] * 0.5 + (cell[transverse] + select(0.0, 1.0, direction[transverse] > 0.0)) * h[transverse];
+            secondEntry = min(secondEntry, (grid - p[transverse]) / direction[transverse] + epsilon);
+          }
+          safeSkip = secondEntry;
+        }
+      }
+      if (!occupied) {
+        var tileSkip = end - t;
+        for (var a = 0u; a < 3u; a++) {
+          if (abs(direction[a]) < 1e-15) { continue; }
+          let tileCell = floor(clamp(cell[a], 0.0, dims[a] - 1.0) / 32.0) * 32.0;
+          let tileBound = -size[a] * 0.5 + (tileCell + select(0.0, 32.0, direction[a] > 0.0)) * h[a];
+          tileSkip = min(tileSkip, (tileBound - p[a]) / direction[a] + epsilon);
+        }
+        if (slabs > 0u) {
+          var first = 0u; var last = slabs;
+          loop {
+            if (first >= last) { break; }
+            let mid = first + (last - first) / 2u;
+            let upper = bitcast<f32>(dexelTileSweeps.value[header + 2u + mid * 4u]);
+            if (upper <= p.z) { first = mid + 1u; } else { last = mid; }
+          }
+          var maxR = 0.0; var slabBound = select(-size.z * 0.5, size.z * 0.5, direction.z > 0.0);
+          if (first < slabs) {
+            let table = header + 1u + first * 4u;
+            let za = bitcast<f32>(dexelTileSweeps.value[table]);
+            let zb = bitcast<f32>(dexelTileSweeps.value[table + 1u]);
+            if (p.z < za) {
+              slabBound = select(-size.z * 0.5, za, direction.z > 0.0);
+            } else {
+              slabBound = select(za, zb, direction.z > 0.0);
+              let bands = dexelTileSweeps.value[table + 3u];
+              for (var b = 0u; b < bands; b++) {
+                let index = header + dexelTileSweeps.value[table + 2u] + b * 4u;
+                let upper = vec2f(bitcast<f32>(dexelTileSweeps.value[index + 2u]), bitcast<f32>(dexelTileSweeps.value[index + 3u]));
+                maxR = max(maxR, max(0.0, max(upper.x * za + upper.y, upper.x * zb + upper.y)));
+              }
+            }
+          } else if (direction.z < 0.0) {
+            slabBound = bitcast<f32>(dexelTileSweeps.value[header + 2u + (slabs - 1u) * 4u]);
+          }
+          let paddedR = maxR + max(h.x, h.y);
+          let r2xy = dot(p.xy, p.xy);
+          if (r2xy > paddedR * paddedR) {
+            var cylSkip = end - t;
+            if (abs(direction.z) >= 1e-15) {
+              cylSkip = min(cylSkip, (slabBound - p.z) / direction.z + epsilon);
+            }
+            let a = dot(direction.xy, direction.xy);
+            let halfB = dot(p.xy, direction.xy);
+            let c = r2xy - paddedR * paddedR;
+            if (a > 1e-15 && halfB < 0.0) {
+              let disc = halfB * halfB - a * c;
+              if (disc >= 0.0) {
+                let hit = (-halfB - sqrt(disc)) / a;
+                if (hit > 0.0) { cylSkip = min(cylSkip, hit); }
+              }
+            }
+            safeSkip = max(safeSkip, min(tileSkip, cylSkip));
+          }
+        } else if (cylinder != 0u) {
+          let paddedR = size.x * 0.5 + max(h.x, h.y);
+          let r2xy = dot(p.xy, p.xy);
+          if (r2xy > paddedR * paddedR) {
+            var cylSkip = end - t;
+            let a = dot(direction.xy, direction.xy);
+            let halfB = dot(p.xy, direction.xy);
+            let c = r2xy - paddedR * paddedR;
+            if (a > 1e-15 && halfB < 0.0) {
+              let disc = halfB * halfB - a * c;
+              if (disc >= 0.0) {
+                let hit = (-halfB - sqrt(disc)) / a;
+                if (hit > 0.0) { cylSkip = min(cylSkip, hit); }
+              }
+            }
+            safeSkip = max(safeSkip, min(tileSkip, cylSkip));
+          }
+        } else {
+          safeSkip = max(safeSkip, tileSkip);
+        }
+        t += max(safeSkip, epsilon);
+        continue;
+      }
+    }
+    for (var axis = 0u; axis < 3u; axis++) {
+      let ray = select(select(r0, r1, axis == 1u), r2, axis == 2u);
+      var inMaterial = false; var entry = end - t;
+      var spans: array<vec2f, 64>;
+      let count = gpuDexelIntervals(ray, size, dims, capacity, cylinder, &spans);
+      for (var i = 0u; i < count; i++) {
+        let span = spans[i];
+        if (p[axis] >= span.x && p[axis] <= span.y) { inMaterial = true; }
+        if (abs(direction[axis]) >= 1e-15) {
+          let next = (select(span.x, span.y, p[axis] < span.x) - p[axis]) / direction[axis] + epsilon;
           if (next > epsilon * 0.5) { entry = min(entry, next); }
         }
       }
@@ -581,7 +739,11 @@ export class GpuDexelStock {
       source.layout.intervalCapacity === intervalCapacity &&
       source.layout.storedTiles.every((tile) => this.layout.storedTiles.includes(tile));
     const privateTiles = this.layout.storedTiles.filter(
-      (tile) => !canShare || changed.has(tile) || source!.tileSlots[tile] === 0xffffffff,
+      (tile) =>
+        !canShare ||
+        changed.has(tile) ||
+        source!.tileSlots[tile] === 0xffffffff ||
+        !!this.baseTransitionSource,
     );
     this.sharedSource =
       canShare && source!.tileArena.available >= privateTiles.length ? source : undefined;
@@ -887,6 +1049,8 @@ export class GpuDexelStock {
         const completion = await Promise.race([lost, this.device.queue.onSubmittedWorkDone()]);
         if (completion instanceof Error) throw completion;
       }
+      if (this.disposed || source.disposed || cancelled())
+        throw new DOMException('GPU stock copy cancelled', 'AbortError');
       if (this.baseTransitionSource) {
         const header = await Promise.race([
           lost,
@@ -896,8 +1060,6 @@ export class GpuDexelStock {
         if (new Uint32Array(header)[0] & 1)
           throw new GpuDexelIntervalOverflowError(this.layout.intervalCapacity);
       }
-      if (this.disposed || source.disposed || cancelled())
-        throw new DOMException('GPU stock copy cancelled', 'AbortError');
     } catch (error) {
       failure = error;
     } finally {

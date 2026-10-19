@@ -1,11 +1,12 @@
-import type { InsertShape } from './SimulationMetadata';
+import type { InsertShape, ToolIdentifier } from './SimulationMetadata';
 import { getInsertTipAngle } from './InsertOutline';
 import type { LibraryToolDefinition } from './ToolLibraryTypes';
 
 const DIAMETERS_MM = Array.from({ length: 40 }, (_, index) => (index + 1) * 0.5);
 const TURNING_INSERT_SHAPES: InsertShape[] = ['C', 'D', 'V', 'W', 'T', 'S', 'R', 'E', 'H', 'O', 'P', 'L', 'A', 'B', 'K'];
-const FRONT_ORIENTATION: [number, number, number] = [0, 90, 0];
-const COUNTER_FACE_ORIENTATION: [number, number, number] = [270, 0, 0];
+const CROSS_ORIENTATION: [number, number, number] = [0, 90, 0];
+const FRONT_ORIENTATION: [number, number, number] = [0, 180, 0];
+const COUNTER_FACE_ORIENTATION: [number, number, number] = [0, 90, 0];
 
 function formatDiameter(diameter: number): string {
   return Number.isInteger(diameter) ? String(diameter) : diameter.toFixed(1);
@@ -22,7 +23,7 @@ function baseTool(id: string, description: string, tags: string[]): Omit<Library
 function createEndMill(
   diameter: number,
   variant: { idPrefix: string; namePrefix: string; tags: readonly string[]; orientation?: readonly [number, number, number] } = {
-    idPrefix: 'default', namePrefix: '', tags: [],
+    idPrefix: 'default', namePrefix: '', tags: [], orientation: CROSS_ORIENTATION,
   },
 ): LibraryToolDefinition {
   const label = formatDiameter(diameter);
@@ -38,7 +39,7 @@ function createEndMill(
 function createDrill(
   diameter: number,
   variant: { idPrefix: string; namePrefix: string; tags: readonly string[]; orientation?: readonly [number, number, number] } = {
-    idPrefix: 'default', namePrefix: '', tags: [],
+    idPrefix: 'default', namePrefix: '', tags: [], orientation: CROSS_ORIENTATION,
   },
 ): LibraryToolDefinition {
   const label = formatDiameter(diameter);
@@ -107,12 +108,70 @@ const TURNING_PRESETS: TurningPreset[] = [
   },
 ];
 
+const SHAPE_TURN_DEGREES: Partial<Record<InsertShape, number>> = {
+  V: 19,
+  D: 28,
+  C: 47,
+  L: -45,
+};
+
+const HOLDER_Z_OFFSET: Partial<Record<InsertShape, number>> = {
+  V: 3,
+  D: 5,
+  C: 2,
+  L: 10,
+  A: 10,
+  B: 10,
+  K: 10,
+};
+
 /** Plate turn about Y so its leading edge meets the feed direction at the approach angle. */
-function plateTurn(shape: InsertShape, preset: TurningPreset): number {
+export function plateTurn(shape: InsertShape, preset: Pick<TurningPreset, 'mount' | 'approachAngle'>): number {
   const tip = getInsertTipAngle(shape);
   if (preset.mount === 'center' || tip === undefined) return 0;
-  const turn = preset.approachAngle + tip / 2 - 180 + (preset.mount === 'back' ? 180 : 0);
+  const frontTurn = SHAPE_TURN_DEGREES[shape] ?? roundMillimeters(tip / 2 + (preset.approachAngle - 90));
+  const turn = frontTurn + (preset.mount === 'back' ? 180 : 0);
   return roundMillimeters(turn > 180 ? turn - 360 : turn <= -180 ? turn + 360 : turn);
+}
+
+export function getDefaultInsertPlacement(
+  shape: InsertShape,
+  mount: 'front' | 'back' | 'center' = 'front',
+  approachAngle = 93,
+): {
+  cuttingPosition?: [number, number, number];
+  cuttingRotation?: [number, number, number];
+  holderPosition?: [number, number, number];
+} {
+  const isOblong = ['L', 'A', 'B', 'K'].includes(shape);
+  const turn = plateTurn(shape, { mount, approachAngle });
+  const cuttingPosition: [number, number, number] | undefined =
+    isOblong || mount === 'center'
+      ? undefined
+      : mount === 'front'
+        ? [-8, 0, 0]
+        : [8, 0, 0];
+  const holderZ = HOLDER_Z_OFFSET[shape] ?? 3;
+  const holderPosition: [number, number, number] | undefined =
+    mount === 'center'
+      ? undefined
+      : [0, 0, mount === 'front' ? holderZ : -holderZ];
+  return {
+    ...(cuttingPosition ? { cuttingPosition } : {}),
+    ...(turn ? { cuttingRotation: [0, turn, 0] } : {}),
+    ...(holderPosition ? { holderPosition } : {}),
+  };
+}
+
+/** Suggests the matching standard library tool ID for a numeric STAR/lathe tool station. */
+export function recommendLibraryToolId(toolNumber: ToolIdentifier): string | undefined {
+  if (typeof toolNumber !== 'number' || !Number.isFinite(toolNumber)) return undefined;
+  if (toolNumber >= 100 && toolNumber < 200) return 'default-turning-insert-L';
+  if (toolNumber >= 200 && toolNumber < 1000) return 'default-turning-insert-V';
+  if (toolNumber >= 1000 && toolNumber < 1300) return 'default-front-drill-3mm';
+  if (toolNumber >= 1300 && toolNumber <= 1500) return 'default-counter-face-endmill-3mm';
+  if (toolNumber > 1500) return 'default-counter-face-endmill-2mm';
+  return undefined;
 }
 
 function createTurningInsert(shape: InsertShape, preset: TurningPreset): LibraryToolDefinition {
@@ -120,7 +179,11 @@ function createTurningInsert(shape: InsertShape, preset: TurningPreset): Library
   const baseId = `default-turning-insert-${shape}`;
   const suffix = preset.id === 'front-right' ? '' : `-${preset.id}`;
   const label = preset.id === 'front-right' ? '' : ` ${preset.label}`;
-  const turn = plateTurn(shape, preset);
+  const { cuttingPosition, cuttingRotation, holderPosition } = getDefaultInsertPlacement(
+    shape,
+    preset.mount,
+    preset.approachAngle,
+  );
   return {
     ...baseTool(
       `${baseId}${suffix}`,
@@ -133,7 +196,8 @@ function createTurningInsert(shape: InsertShape, preset: TurningPreset): Library
       type: 'insert', shape, ic: 4.7625, thickness: 1.59, noseRadius: 0.2, clearanceAngle: 7,
       ...(isOblong ? { width: 3, length: 6.25 } : {}),
       zeroVertex: 0,
-      ...(turn ? { rotation: [0, turn, 0] as [number, number, number] } : {}),
+      ...(cuttingPosition ? { position: cuttingPosition } : {}),
+      ...(cuttingRotation ? { rotation: cuttingRotation } : {}),
     }],
     holder: [{
       type: 'turningHolderProfile',
@@ -141,6 +205,7 @@ function createTurningInsert(shape: InsertShape, preset: TurningPreset): Library
       depth: 12,
       outline: preset.outline,
       stickOut: 15,
+      ...(holderPosition ? { position: holderPosition } : {}),
     }],
     turning: {
       hand: preset.hand,

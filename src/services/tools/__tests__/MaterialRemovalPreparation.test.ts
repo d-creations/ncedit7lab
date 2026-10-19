@@ -293,4 +293,34 @@ describe('material removal prerequisites', () => {
     expect(result.simulation?.motions).toHaveLength(0);
     expect(result.simulation?.stop?.message).toContain('not sufficiently sampled');
   });
+
+  it('normalizes coaxial main-spindle drilling (M3 + G18 + drill with millingTip) into an axial milling cut', () => {
+    const original = input('1', stock);
+    const drill: ProgramToolDefinition = {
+      toolNumber: 1200,
+      description: 'Front Drill 3 mm',
+      orientation: [0, 180, 0],
+      cutting: [{ type: 'drill', diameter: 3, length: 18, tipAngle: 118 }],
+    };
+    original.snapshot = tools.captureProgramSnapshot(
+      original.snapshot.identity,
+      1,
+      codec.encodeSetup({ machineName: 'test', material: stock }, syntax) + '\n' + codec.encodeTool(drill, syntax),
+      syntax,
+    );
+    const drilling = move({
+      toolNumber: 1200,
+      machiningMode: 'turning',
+      sourceCode: 'G1',
+      poses: [
+        { position: [0, 0, -1], orientation: [0, 1, 0, 0], reference: 'millingTip', frameId: setup.binding.frameId },
+        { position: [0, 0, 20], orientation: [0, 1, 0, 0], reference: 'millingTip', frameId: setup.binding.frameId },
+      ],
+    });
+    const result = prepareMaterialRemoval([original], metadata(drilling), setup);
+    expect(result.status).toBe('ready');
+    expect(result.simulation?.stop).toBeUndefined();
+    expect(result.simulation?.motions).toHaveLength(1);
+    expect(result.simulation?.motions[0].mode).toBe('milling');
+  });
 });

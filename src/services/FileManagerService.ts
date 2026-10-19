@@ -15,6 +15,9 @@ export class FileManagerService implements IFileManagerService {
   ) {
     if (this.useLocalStorage) {
       this.loadFromStorage();
+      if (this.files.length === 0) {
+        this.newFile();
+      }
     }
     const activeFile = this.getActiveFile();
     const activeProgram = this.getActiveProgram(this.stateService?.getWorkbenchSelectedChannel() ?? '1')

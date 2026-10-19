@@ -404,6 +404,66 @@ fn gpuDexelAxisSample(p: vec3f, axis: u32, size: vec3f, dims: vec3f, capacity: u
   return result;
 }
 fn gpuDexelNormal(p: vec3f, size: vec3f, dims: vec3f, capacity: u32, cylinder: u32) -> vec3f {
+  let clamped = clamp(p, -size * 0.5, size * 0.5);
+  let r0 = gpuRayIndex(clamped, 0u, size, dims);
+  let r1 = gpuRayIndex(clamped, 1u, size, dims);
+  let r2 = gpuRayIndex(clamped, 2u, size, dims);
+  if (dexelTileSweeps.value[r0 / 1024u] == 0xffffffffu &&
+      dexelTileSweeps.value[r1 / 1024u] == 0xffffffffu &&
+      dexelTileSweeps.value[r2 / 1024u] == 0xffffffffu) {
+    let header = gpuRayCount(dims) / 1024u;
+    let slabs = dexelTileSweeps.value[header];
+    if (slabs > 0u) {
+      var first = 0u; var last = slabs;
+      loop {
+        if (first >= last) { break; }
+        let mid = first + (last - first) / 2u;
+        let upper = bitcast<f32>(dexelTileSweeps.value[header + 2u + mid * 4u]);
+        if (upper <= p.z) { first = mid + 1u; } else { last = mid; }
+      }
+      if (first < slabs) {
+        let table = header + 1u + first * 4u;
+        let za = bitcast<f32>(dexelTileSweeps.value[table]);
+        let zb = bitcast<f32>(dexelTileSweeps.value[table + 1u]);
+        let bands = dexelTileSweeps.value[table + 3u];
+        let r = length(p.xy);
+        let radialDir = select(vec2f(1.0, 0.0), p.xy / max(r, 1e-12), r > 1e-8);
+        var bestDist = 1e20;
+        var bestNormal = vec3f(radialDir, 0.0);
+        let dZa = abs(p.z - za);
+        if (dZa < bestDist) { bestDist = dZa; bestNormal = vec3f(0.0, 0.0, -1.0); }
+        let dZb = abs(zb - p.z);
+        if (dZb < bestDist) { bestDist = dZb; bestNormal = vec3f(0.0, 0.0, 1.0); }
+        for (var b = 0u; b < bands; b++) {
+          let index = header + dexelTileSweeps.value[table + 2u] + b * 4u;
+          let lower = vec2f(bitcast<f32>(dexelTileSweeps.value[index]), bitcast<f32>(dexelTileSweeps.value[index + 1u]));
+          let upper = vec2f(bitcast<f32>(dexelTileSweeps.value[index + 2u]), bitcast<f32>(dexelTileSweeps.value[index + 3u]));
+          let rLow = max(0.0, lower.x * p.z + lower.y);
+          let rHigh = max(0.0, upper.x * p.z + upper.y);
+          let dHigh = abs(r - rHigh) / sqrt(1.0 + upper.x * upper.x);
+          if (dHigh < bestDist) {
+            bestDist = dHigh;
+            bestNormal = normalize(vec3f(radialDir, -upper.x));
+          }
+          if (rLow > 0.0) {
+            let dLow = abs(r - rLow) / sqrt(1.0 + lower.x * lower.x);
+            if (dLow < bestDist) {
+              bestDist = dLow;
+              bestNormal = normalize(vec3f(-radialDir, lower.x));
+            }
+          }
+        }
+        return bestNormal;
+      }
+    } else if (cylinder != 0u) {
+      let r = length(p.xy);
+      let radialDir = select(vec2f(1.0, 0.0), p.xy / max(r, 1e-12), r > 1e-8);
+      if (size.z * 0.5 - abs(p.z) < abs(size.x * 0.5 - r)) {
+        return vec3f(0.0, 0.0, select(-1.0, 1.0, p.z >= 0.0));
+      }
+      return vec3f(radialDir, 0.0);
+    }
+  }
   var surface = vec4f(0.0, 0.0, 0.0, -1e20);
   for (var axis = 0u; axis < 3u; axis++) {
     let sample = gpuDexelAxisSample(p, axis, size, dims, capacity, cylinder);
@@ -428,7 +488,7 @@ fn gpuTraceDexels(origin: vec3f, surface: vec3f, size: vec3f, dims: vec3f, capac
   var t = max(0.0, max(low.x, max(low.y, low.z))); let end = min(high.x, min(high.y, high.z));
   if (t > end) { return vec4f(0.0); }
   let h = size / dims; let epsilon = min(h.x, min(h.y, h.z)) * 0.0001;
-  for (var iteration = 0u; iteration < 32768u; iteration++) {
+  for (var iteration = 0u; iteration < 2048u; iteration++) {
     if (t + epsilon >= end) { return vec4f(0.0); }
     let p = origin + direction * (t + epsilon);
     let clamped = clamp(p, -size * 0.5, size * 0.5);
@@ -582,6 +642,7 @@ fn gpuTraceDexels(origin: vec3f, surface: vec3f, size: vec3f, dims: vec3f, capac
     }
     for (var axis = 0u; axis < 3u; axis++) {
       let ray = select(select(r0, r1, axis == 1u), r2, axis == 2u);
+      if (axis == 2u && s2 == 0xffffffffu) { continue; }
       var inMaterial = false; var entry = end - t;
       var spans: array<vec2f, 64>;
       let count = gpuDexelIntervals(ray, size, dims, capacity, cylinder, &spans);
@@ -607,7 +668,7 @@ fn gpuTraceDexels(origin: vec3f, surface: vec3f, size: vec3f, dims: vec3f, capac
     if (occupied) { return vec4f(p, 1.0); }
     t += max(safeSkip, epsilon);
   }
-  return vec4f(origin + direction * min(t, end), -1.0);
+    return vec4f(origin + direction * min(t, end), -1.0);
 }
 `;
 
@@ -663,6 +724,7 @@ export class GpuDexelStock {
   readonly rotationalBase?: RotationalDexelBase;
   private readonly copyKey: string;
   private readonly baseTransitionSource?: object;
+  private readonly memoryLimitBytes: number;
 
   constructor(
     private readonly renderer: WebGPURenderer,
@@ -683,8 +745,11 @@ export class GpuDexelStock {
       arena?: GpuDexelTileArena;
       rotationalBase?: RotationalDexelBase;
       updateBase?: boolean;
+      memoryLimitBytes?: number;
     },
   ) {
+    const memoryLimitBytes = sparse?.memoryLimitBytes ?? DEXEL_MEMORY_BYTES;
+    this.memoryLimitBytes = memoryLimitBytes;
     this.rotationalBase = sparse?.rotationalBase;
     if ((this.rotationalBase?.maxIntervals ?? 0) > intervalCapacity)
       throw new GpuDexelIntervalOverflowError(intervalCapacity);
@@ -718,12 +783,16 @@ export class GpuDexelStock {
       pitchMm,
       intervalCapacity,
       sparse
-        ? { bounds: sweeps.map((sweep) => sweep.bounds), retainedTiles: sparse.retainedTiles }
+        ? {
+            bounds: sweeps.map((sweep) => sweep.bounds),
+            retainedTiles: sparse.retainedTiles,
+            memoryLimitBytes,
+          }
         : undefined,
     );
     this.analyticalFlatSweeps = sweeps.filter(usesAnalyticalFlatRayCuts).length;
     this.analyticalProfileSweeps = sweeps.filter(usesAnalyticalProfileRayCuts).length;
-    const index = indexDexelTiles(this.layout, sweeps);
+    const index = indexDexelTiles(this.layout, sweeps, memoryLimitBytes);
     this.tileRanges = index.ranges;
     this.tileSlots = new Uint32Array(this.layout.tiles).fill(0xffffffff);
     const source = sparse?.source;
@@ -758,6 +827,7 @@ export class GpuDexelStock {
       new GpuDexelTileArena(
         Math.max(this.layout.storedTiles.length, sparse?.arenaTiles ?? 0),
         intervalCapacity,
+        memoryLimitBytes,
       );
     const privateSet = new Set(this.privateTiles);
     this.tileArena.acquire();
@@ -798,7 +868,7 @@ export class GpuDexelStock {
       2 * (recordData.byteLength + boundData.byteLength) +
       sweeps.reduce((sum, sweep) => sum + sweep.data.byteLength + 256, 0);
     this.estimatedBytes += (this.rotationalBase?.estimatedBytes ?? 0) + baseWords.byteLength * 2;
-    if (this.estimatedBytes > DEXEL_MEMORY_BYTES) {
+    if (this.estimatedBytes > memoryLimitBytes) {
       this.tileArena.release(this.layout.storedTiles.map((tile) => this.tileSlots[tile]));
       throw new SimulationCapabilityError(
         'GPU stock and cutter data exceed the combined CPU/GPU memory estimate',
@@ -1306,7 +1376,13 @@ export class GpuDexelStock {
         captured.set(chunk, offset);
         offset += chunk.length;
       }
-      this.history = new GpuDexelHistory(captured, this.layout.rays, this.sweeps, this.historyKey);
+      this.history = new GpuDexelHistory(
+        captured,
+        this.layout.rays,
+        this.sweeps,
+        this.historyKey,
+        this.memoryLimitBytes,
+      );
       this.historyUnavailable = undefined;
     }
     this.calculated = true;

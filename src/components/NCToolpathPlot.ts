@@ -1,5 +1,6 @@
 import * as THREE from 'three';
-import { WebGPURenderer } from 'three/webgpu';
+import { MeshBasicNodeMaterial, WebGPURenderer, type Node } from 'three/webgpu';
+import { Fn, normalView, positionViewDirection, vec4, wgslFn } from 'three/tsl';
 import { GpuDexelStock } from '@services/simulation/strategies/gpu-dexel/GpuDexelStock';
 import { createReplayStrategy } from '@services/simulation/replay/createReplayStrategy';
 import type { MaterialReplayStrategy, MaterialReplayFrame } from '@services/simulation/replay/MaterialReplayStrategy';
@@ -13,7 +14,14 @@ import {
   PROGRAM_TOOL_SERVICE_TOKEN,
   FILE_MANAGER_SERVICE_TOKEN,
   PROGRAM_METADATA_EDIT_SERVICE_TOKEN,
+  CONFIG_SERVICE_TOKEN,
 } from '@core/ServiceTokens';
+import {
+  DEFAULT_SIMULATION_CONFIG,
+  type AppConfiguration,
+  type IConfigService,
+  type SimulationConfiguration,
+} from '@services/config/IConfigService';
 import { PlotService } from '@services/PlotService';
 import { EventBus, EVENT_NAMES, type EventSubscription } from '@services/EventBus';
 import { ExecutedProgramService } from '@services/ExecutedProgramService';
@@ -47,6 +55,21 @@ import type { StockBinding, SimulationInput, SimulationResult } from '@services/
 import { rotationQuaternion } from '@services/simulation/shared/SimulationTransforms';
 import { recordGpuDiagnostic, gpuDiagnosticSnapshot, gpuDiagnosticContext } from '@services/simulation/strategies/gpu-dexel/GpuDiagnostics';
 
+const STOCK_MATCAP_WGSL = `
+fn gpuStockMatcap(normal: vec3f, viewDirection: vec3f) -> vec3f {
+  let view = normalize(viewDirection);
+  var right = vec3f(view.z, 0.0, -view.x);
+  if (dot(right, right) < 1e-10) { right = vec3f(1.0, 0.0, 0.0); }
+  right = normalize(right);
+  let up = cross(view, right);
+  let uv = vec2f(dot(right, normal), dot(up, normal));
+  let highlight = exp(-3.0 * dot(uv - vec2f(-0.35, 0.4), uv - vec2f(-0.35, 0.4)));
+  let fill = exp(-2.0 * dot(uv - vec2f(0.55, 0.0), uv - vec2f(0.55, 0.0)));
+  let brightness = 0.46 + 0.10 * uv.y + 0.25 * highlight + 0.10 * fill;
+  return vec3f(0.93, 0.94, 0.96) * brightness;
+}
+`;
+
 export class NCToolpathPlot extends HTMLElement {
   private scene?: THREE.Scene;
   private camera?: THREE.PerspectiveCamera;
@@ -58,7 +81,7 @@ export class NCToolpathPlot extends HTMLElement {
   private gpuComputeError?: string;
   private gpuRenderPending = false;
   /** Ray-marched dexel stock costs scale with pixels × detail; bound pixels, adapt to measured time. */
-  private gpuStockPixelBudget = 400_000;
+  private gpuStockPixelBudget = DEFAULT_SIMULATION_CONFIG.gpuStockPixelBudget.default;
   private gpuRendererLost = false;
   private controls?: OrbitControls;
   private plotService: PlotService;
@@ -72,6 +95,7 @@ export class NCToolpathPlot extends HTMLElement {
     else this.requestRender();
   };
   private isVisible = false;
+  private tabActive = true;
   private resizeObserver?: ResizeObserver;
   private isPlotting = false;
   private highlightObject: THREE.Object3D | null = null;
@@ -108,7 +132,10 @@ export class NCToolpathPlot extends HTMLElement {
   private replayTimer?: ReturnType<typeof setTimeout>;
   private cursorReplayTimer?: ReturnType<typeof setTimeout>;
   private replayPrepared = false;
-  private readonly stockMeshes = new Map<number, THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>>();
+  private readonly stockMeshes = new Map<number, THREE.Mesh<THREE.BufferGeometry, THREE.Material>>();
+  private configService?: IConfigService;
+  private simulationConfig: SimulationConfiguration = structuredClone(DEFAULT_SIMULATION_CONFIG);
+  private simulationConfigApplied = false;
 
   constructor() {
     super();
@@ -122,10 +149,14 @@ export class NCToolpathPlot extends HTMLElement {
     this.programTools = registry.get(PROGRAM_TOOL_SERVICE_TOKEN);
     this.fileManager = registry.get(FILE_MANAGER_SERVICE_TOKEN);
     this.metadataEdits = registry.get(PROGRAM_METADATA_EDIT_SERVICE_TOKEN);
+    if (registry.has(CONFIG_SERVICE_TOKEN)) {
+      this.configService = registry.get(CONFIG_SERVICE_TOKEN);
+    }
   }
 
   connectedCallback() {
     this.render();
+    this.loadSimulationConfig();
     this.rendererReady = this.initThree();
     this.setupEventListeners();
     document.addEventListener('visibilitychange', this.handleVisibilityChange);
@@ -257,6 +288,100 @@ export class NCToolpathPlot extends HTMLElement {
     this.eventBus.publish(EVENT_NAMES.PLOT_SELECTION_CHANGED, { runId: this.displayedRunId, status: 'cleared' });
   }
 
+  private loadSimulationConfig(): void {
+    const apply = (cfg: AppConfiguration) => {
+      const sim = cfg.simulation;
+      this.simulationConfig = {
+        gpuDefaultEnabled: sim?.gpuDefaultEnabled ?? DEFAULT_SIMULATION_CONFIG.gpuDefaultEnabled,
+        gpuPitchMm: {
+          min: sim?.gpuPitchMm?.min ?? DEFAULT_SIMULATION_CONFIG.gpuPitchMm.min,
+          max: sim?.gpuPitchMm?.max ?? DEFAULT_SIMULATION_CONFIG.gpuPitchMm.max,
+          default: sim?.gpuPitchMm?.default ?? DEFAULT_SIMULATION_CONFIG.gpuPitchMm.default,
+        },
+        cpuResolutionMm: {
+          min: sim?.cpuResolutionMm?.min ?? DEFAULT_SIMULATION_CONFIG.cpuResolutionMm.min,
+          max: sim?.cpuResolutionMm?.max ?? DEFAULT_SIMULATION_CONFIG.cpuResolutionMm.max,
+          default: sim?.cpuResolutionMm?.default ?? DEFAULT_SIMULATION_CONFIG.cpuResolutionMm.default,
+        },
+        stockMemoryMiB: sim?.stockMemoryMiB ?? DEFAULT_SIMULATION_CONFIG.stockMemoryMiB,
+        gpuStockPixelBudget: {
+          min: sim?.gpuStockPixelBudget?.min ?? DEFAULT_SIMULATION_CONFIG.gpuStockPixelBudget.min,
+          max: sim?.gpuStockPixelBudget?.max ?? DEFAULT_SIMULATION_CONFIG.gpuStockPixelBudget.max,
+          default: sim?.gpuStockPixelBudget?.default ?? DEFAULT_SIMULATION_CONFIG.gpuStockPixelBudget.default,
+          nativeSharpness:
+            sim?.gpuStockPixelBudget?.nativeSharpness ??
+            DEFAULT_SIMULATION_CONFIG.gpuStockPixelBudget.nativeSharpness,
+        },
+      };
+      if (!this.simulationConfigApplied) {
+        this.gpuStockPixelBudget = this.simulationConfig.gpuStockPixelBudget.default;
+      } else {
+        this.gpuStockPixelBudget = Math.min(
+          this.simulationConfig.gpuStockPixelBudget.max,
+          Math.max(this.simulationConfig.gpuStockPixelBudget.min, this.gpuStockPixelBudget),
+        );
+      }
+      this.applySimulationConfigToControls(!this.simulationConfigApplied);
+      this.simulationConfigApplied = true;
+    };
+    if (!this.configService) {
+      this.applySimulationConfigToControls(true);
+      this.simulationConfigApplied = true;
+      return;
+    }
+    void this.configService.getConfig().then(apply).catch(() => {});
+    this.configService.onConfigChanged(apply);
+  }
+
+  private applySimulationConfigToControls(applyDefaults: boolean): void {
+    const gpuToggle = this.shadowRoot?.querySelector<HTMLInputElement>('#gpu-stock');
+    if (gpuToggle && applyDefaults) gpuToggle.checked = this.simulationConfig.gpuDefaultEnabled;
+    const gpuPitch = this.shadowRoot?.querySelector<HTMLInputElement>('#gpu-fine-resolution');
+    if (gpuPitch) {
+      gpuPitch.min = String(this.simulationConfig.gpuPitchMm.min);
+      gpuPitch.max = String(this.simulationConfig.gpuPitchMm.max);
+      if (applyDefaults) gpuPitch.value = String(this.simulationConfig.gpuPitchMm.default);
+    }
+    const cpuRes = this.shadowRoot?.querySelector<HTMLInputElement>('#removal-resolution');
+    if (cpuRes) {
+      cpuRes.min = String(this.simulationConfig.cpuResolutionMm.min);
+      cpuRes.max = String(this.simulationConfig.cpuResolutionMm.max);
+      if (applyDefaults) cpuRes.value = String(this.simulationConfig.cpuResolutionMm.default);
+    }
+    const memory = this.shadowRoot?.querySelector<HTMLInputElement>('#stock-memory-limit');
+    if (memory && applyDefaults) memory.value = String(this.simulationConfig.stockMemoryMiB);
+  }
+
+  private getConfiguredStockMemoryBytes(): number {
+    const field = this.shadowRoot?.querySelector<HTMLInputElement>('#stock-memory-limit');
+    const mib = field && Number.isFinite(field.valueAsNumber) && field.valueAsNumber >= 16
+      ? field.valueAsNumber
+      : this.simulationConfig.stockMemoryMiB;
+    return Math.round(mib * 1024 * 1024);
+  }
+
+  private createStockSurfaceMaterial(): THREE.Material {
+    if (this.renderer instanceof WebGPURenderer) {
+      const material = new MeshBasicNodeMaterial();
+      const matcap = wgslFn(STOCK_MATCAP_WGSL);
+      material.fragmentNode = Fn(() =>
+        vec4(
+          matcap({
+            normal: normalView.normalize(),
+            viewDirection: positionViewDirection,
+          }) as Node<'vec3'>,
+          1,
+        ),
+      )();
+      return material;
+    }
+    return new THREE.MeshStandardMaterial({
+      color: 0xd8dce0,
+      metalness: 0.15,
+      roughness: 0.5,
+    });
+  }
+
   private updateMaterialRemovalStatus(): void {
     const element = this.shadowRoot?.getElementById('material-removal-status');
     if (!element) return;
@@ -277,7 +402,7 @@ export class NCToolpathPlot extends HTMLElement {
     const input = run?.inputs[0];
     const manual = input && this.stockBindingScope(input) === this.removalSetupScope
       ? this.removalSetup : input?.materialSimulation;
-    resolution.value = String(manual?.resolutionMm ?? run?.materialRemoval?.simulation?.resolutionMm ?? 0.05);
+    resolution.value = String(manual?.resolutionMm ?? this.simulationConfig.cpuResolutionMm.default);
   }
 
   private async changeRemovalResolution(): Promise<void> {
@@ -316,21 +441,28 @@ export class NCToolpathPlot extends HTMLElement {
 
   private async createReplaySession(runId: string): Promise<MaterialReplayStrategy> {
     await this.rendererReady;
-    const enabled = this.shadowRoot?.querySelector<HTMLInputElement>('#gpu-stock')?.checked;
+    const enabled =
+      !this.gpuRendererLost &&
+      !this.gpuComputeError &&
+      this.shadowRoot?.querySelector<HTMLInputElement>('#gpu-stock')?.checked;
     this.gpuFallbackReason = '';
     const field = this.shadowRoot?.querySelector<HTMLInputElement>('#gpu-fine-resolution');
+    const finePitchMm = field?.valueAsNumber ?? this.simulationConfig.gpuPitchMm.default;
     return createReplayStrategy({
       runId,
       gpuEnabled: Boolean(enabled),
       renderer: this.renderer,
       device: this.gpuDevice,
       gpuUnavailableReason: this.gpuComputeError,
-      finePitchMm: field?.valueAsNumber ?? 0.02,
+      finePitchMm,
       residentBytes: this.gpuWarmupStock?.estimatedBytes ?? 0,
+      memoryLimitBytes: this.getConfiguredStockMemoryBytes(),
       isCurrent: (session) => this.materialReplay === session && !this.stale,
       onFallback: (reason) => { this.gpuFallbackReason = reason; },
       onRefined: (frame, session) => {
-        if (this.materialReplay === session && !this.stale && this.replayPrepared && this.replayRequestedPosition === frame.requestedPosition) this.installReplayFrame(frame);
+        if (this.materialReplay === session && !this.stale && this.replayPrepared && this.replayRequestedPosition === frame.requestedPosition) {
+          this.installReplayFrame(frame);
+        }
       },
       onRefinementError: (error, session) => {
         if (this.materialReplay !== session || this.stale) return;
@@ -345,14 +477,25 @@ export class NCToolpathPlot extends HTMLElement {
   private async startMaterialRemoval(preparation: DeepReadonly<MaterialRemovalPreparation>): Promise<void> {
     if (!preparation.simulation || !this.displayedRunId || !this.scene) return;
     this.cancelMaterialRemoval();
-    this.removalPreparation = preparation;
+    const run = this.executedProgramService.getPlotRun(this.displayedRunId);
+    const input = run?.inputs[0];
+    const manual = input && this.stockBindingScope(input) === this.removalSetupScope
+      ? this.removalSetup : input?.materialSimulation;
+    const configuredResolution = manual?.resolutionMm ?? this.simulationConfig.cpuResolutionMm.default;
+    const effectivePreparation: DeepReadonly<MaterialRemovalPreparation> =
+      preparation.simulation.resolutionMm === configuredResolution
+        ? preparation
+        : {
+            ...preparation,
+            simulation: { ...preparation.simulation, resolutionMm: configuredResolution },
+          };
+    this.removalPreparation = effectivePreparation;
     this.updateReplayControls();
     const generation = this.removalGeneration;
     const status = this.shadowRoot?.getElementById('material-removal-status');
     const cancel = this.shadowRoot?.querySelector<HTMLButtonElement>('#cancel-removal');
     if (cancel) cancel.hidden = false;
     try {
-      const run = this.executedProgramService.getPlotRun(this.displayedRunId);
       if (!run) throw new Error('Material removal requires a retained executed run');
       const timeline = createPlotReplayTimeline(run);
       const session = await this.createReplaySession(this.displayedRunId);
@@ -361,8 +504,8 @@ export class NCToolpathPlot extends HTMLElement {
       this.replayTimeline = timeline;
       this.replayBusy = true;
       this.updateReplayControls();
-      this.showInitialStock(preparation.simulation);
-      const frame = await session.start(preparation.simulation,
+      this.showInitialStock(effectivePreparation.simulation!);
+      const frame = await session.start(effectivePreparation.simulation!,
         timeline.occurrences.map((occurrence) => occurrence.executionStep), (processed, total) => {
         if (generation !== this.removalGeneration || !status) return;
         this.updateSimulationProgress(processed, total);
@@ -438,6 +581,12 @@ export class NCToolpathPlot extends HTMLElement {
   private showInitialStock(input: DeepReadonly<SimulationInput>): void {
     const raw = this.toolGeometryFactory.createMaterialMesh(input.stock);
     if (raw) {
+      if (this.renderer instanceof WebGPURenderer) {
+        const matcapMaterial = this.createStockSurfaceMaterial();
+        raw.traverse((obj) => {
+          if (obj instanceof THREE.Mesh) obj.material = matcapMaterial;
+        });
+      }
       raw.matrixAutoUpdate = false;
       raw.matrix.compose(
         new THREE.Vector3(...input.binding.position),
@@ -464,9 +613,7 @@ export class NCToolpathPlot extends HTMLElement {
     group.name = 'machined-stock';
     group.matrixAutoUpdate = false;
     group.matrix.fromArray(result.stockToWorkpiece);
-    const material = result.chunks.length ? new THREE.MeshStandardMaterial({
-      color: 0xd9c7a6, metalness: 0.25, roughness: 0.8,
-    }) : undefined;
+    const material = result.chunks.length ? this.createStockSurfaceMaterial() : undefined;
     for (const chunk of result.chunks) {
       const geometry = new THREE.BufferGeometry();
       geometry.setAttribute('position', new THREE.BufferAttribute(chunk.positions, 3));
@@ -477,7 +624,7 @@ export class NCToolpathPlot extends HTMLElement {
     }
     this.replaceMaterialObject(group);
     for (const mesh of group.children) {
-      if (mesh instanceof THREE.Mesh && mesh.material instanceof THREE.MeshStandardMaterial)
+      if (mesh instanceof THREE.Mesh && mesh.material instanceof THREE.Material)
         this.stockMeshes.set(mesh.userData.stockChunkId, mesh);
     }
   }
@@ -587,6 +734,8 @@ export class NCToolpathPlot extends HTMLElement {
     if (final) final.disabled = !available || !active || !this.replayPrepared;
     const resolution = this.shadowRoot?.querySelector<HTMLInputElement>('#removal-resolution');
     if (resolution) resolution.disabled = !available || this.replayBusy;
+    const memory = this.shadowRoot?.querySelector<HTMLInputElement>('#stock-memory-limit');
+    if (memory) memory.disabled = !available || this.replayBusy;
     const progress = this.shadowRoot?.querySelector<HTMLProgressElement>('#simulation-progress');
     if (progress) {
       if (controls.hidden || !active || this.stale) progress.hidden = true;
@@ -820,7 +969,7 @@ export class NCToolpathPlot extends HTMLElement {
           this.stockMeshes.delete(chunk.id);
         }
         if (!chunk.positions.length) continue;
-        material ??= new THREE.MeshStandardMaterial({ color: 0xd9c7a6, metalness: 0.25, roughness: 0.8 });
+        material ??= this.createStockSurfaceMaterial();
         const geometry = new THREE.BufferGeometry();
         geometry.setAttribute('position', new THREE.BufferAttribute(chunk.positions, 3));
         geometry.setAttribute('normal', new THREE.BufferAttribute(chunk.normals, 3));
@@ -1169,6 +1318,7 @@ export class NCToolpathPlot extends HTMLElement {
             <label title="Experimental GPU simulation; unsupported operations explicitly fall back to CPU"><input id="gpu-stock" type="checkbox" checked> GPU progressive</label>
             <label>GPU fine pitch (mm) <input id="gpu-fine-resolution" type="number" min="0.001" max="5" step="0.001" value="0.02" style="width:65px"></label>
             <label>CPU resolution (mm) <input id="removal-resolution" type="number" min="0.05" max="5" step="0.05" value="0.05" style="width:65px" disabled></label>
+            <label>Memory (MiB) <input id="stock-memory-limit" type="number" min="16" max="2048" step="16" value="256" style="width:65px"></label>
             <button class="plot-button" id="replay-start" disabled title="Return to initial stock">Replay</button>
             <button class="plot-button" id="replay-previous" disabled>Previous</button>
             <button class="plot-button" id="replay-play" aria-pressed="false" disabled>Play</button>
@@ -1220,7 +1370,7 @@ export class NCToolpathPlot extends HTMLElement {
     const materialButton = this.shadowRoot?.getElementById('toggle-material');
     materialButton?.addEventListener('click', () => this.toggleMaterial());
     this.shadowRoot?.getElementById('removal-resolution')?.addEventListener('change', () => void this.changeRemovalResolution());
-    for (const id of ['gpu-stock', 'gpu-fine-resolution']) this.shadowRoot?.getElementById(id)?.addEventListener('change', () => {
+    for (const id of ['gpu-stock', 'gpu-fine-resolution', 'stock-memory-limit']) this.shadowRoot?.getElementById(id)?.addEventListener('change', () => {
       const preparation = this.removalPreparation;
       if (preparation && !this.stale) void this.startMaterialRemoval(preparation);
     });
@@ -1730,10 +1880,19 @@ export class NCToolpathPlot extends HTMLElement {
         recordGpuDiagnostic(device, 'render-complete', { elapsedMs });
         if (dexelStock) {
           console.info('[NC-Edit7 GPU] Render complete ' + JSON.stringify({ elapsedMs }));
-          if (elapsedMs > 300)
-            this.gpuStockPixelBudget = Math.max(180_000, this.gpuStockPixelBudget * Math.min(0.85, 220 / elapsedMs));
-          else if (elapsedMs < 120)
-            this.gpuStockPixelBudget = Math.min(600_000, this.gpuStockPixelBudget * 1.25);
+          const budgetCfg = this.simulationConfig.gpuStockPixelBudget;
+          if (!budgetCfg.nativeSharpness) {
+            if (elapsedMs > 400)
+              this.gpuStockPixelBudget = Math.max(
+                budgetCfg.min,
+                this.gpuStockPixelBudget * Math.min(0.85, 280 / elapsedMs),
+              );
+            else if (elapsedMs < 280)
+              this.gpuStockPixelBudget = Math.min(
+                budgetCfg.max,
+                this.gpuStockPixelBudget * 1.25,
+              );
+          }
         }
         if (elapsedMs > 500)
           console.warn('[NC-Edit7 GPU] Slow render/queue completion ' + JSON.stringify({
@@ -1747,6 +1906,11 @@ export class NCToolpathPlot extends HTMLElement {
   private applyGpuStockRenderScale(): void {
     const renderer = this.renderer;
     if (!renderer) return;
+    if (this.simulationConfig.gpuStockPixelBudget.nativeSharpness) {
+      if (Math.abs(renderer.getPixelRatio() - window.devicePixelRatio) > 0.02)
+        renderer.setPixelRatio(window.devicePixelRatio);
+      return;
+    }
     const size = renderer.getSize(new THREE.Vector2());
     const ratio = Math.min(
       window.devicePixelRatio,
@@ -2201,8 +2365,14 @@ export class NCToolpathPlot extends HTMLElement {
     this.controls.update();
   }
 
+  setTabActive(active: boolean): void {
+    if (this.tabActive === active) return;
+    this.tabActive = active;
+    this.updateVisibility();
+  }
+
   private updateVisibility() {
-    if (this.isVisible) {
+    if (this.isVisible && this.tabActive) {
       const wasHidden = this.hidden;
       this.removeAttribute('hidden');
       if (wasHidden) this.requestRender();

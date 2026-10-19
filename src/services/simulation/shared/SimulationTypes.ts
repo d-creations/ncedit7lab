@@ -40,6 +40,8 @@ export interface SimulationInput {
   stop?: RemovalStop;
   /** Defaults to true; false forces the regular 3D stock for controlled comparisons. */
   rotationalProfile?: boolean;
+  /** Optional override for the per-run stock memory budget (defaults to SIMULATION_LIMITS.stockBytes). */
+  stockBytes?: number;
 }
 
 export const SIMULATION_LIMITS = Object.freeze({

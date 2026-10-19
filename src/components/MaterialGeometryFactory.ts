@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import type { DeepReadonly, ProgramMaterialDefinition } from '@services/tools/SimulationMetadata';
 import { materialPlacement } from '@services/simulation/shared/SimulationTransforms';
 
-const STOCK_MATERIAL = new THREE.MeshStandardMaterial({ color: 0xd9c7a6, metalness: 0.25, roughness: 0.8 });
+const STOCK_MATERIAL = new THREE.MeshStandardMaterial({ color: 0xd8dce0, metalness: 0.15, roughness: 0.5 });
 
 export interface MaterialPickPoint {
   index: number;

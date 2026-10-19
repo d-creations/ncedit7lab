@@ -12,5 +12,25 @@
   "templateStorageMode": "local",
   "templateSeedUrl": "/templates.json",
   "transferPlacement": "side-panel",
-  "transferProtocol": "none"
+  "transferProtocol": "none",
+  "simulation": {
+    "gpuDefaultEnabled": true,
+    "gpuPitchMm": {
+      "min": 0.001,
+      "max": 5,
+      "default": 0.02
+    },
+    "cpuResolutionMm": {
+      "min": 0.05,
+      "max": 5,
+      "default": 0.05
+    },
+    "stockMemoryMiB": 256,
+    "gpuStockPixelBudget": {
+      "min": 250000,
+      "max": 1500000,
+      "default": 800000,
+      "nativeSharpness": false
+    }
+  }
 }

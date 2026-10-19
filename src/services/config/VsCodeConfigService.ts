@@ -1,4 +1,4 @@
-import { IConfigService, AppConfiguration } from './IConfigService';
+import { IConfigService, AppConfiguration, DEFAULT_SIMULATION_CONFIG } from './IConfigService';
 
 export class VsCodeConfigService implements IConfigService {
   private config: AppConfiguration = {
@@ -18,6 +18,13 @@ export class VsCodeConfigService implements IConfigService {
     seedDefaultTemplates: true,
     templateStorageMode: 'local',
     templateSeedUrl: '/templates.json',
+    simulation: {
+      gpuDefaultEnabled: DEFAULT_SIMULATION_CONFIG.gpuDefaultEnabled,
+      gpuPitchMm: { ...DEFAULT_SIMULATION_CONFIG.gpuPitchMm },
+      cpuResolutionMm: { ...DEFAULT_SIMULATION_CONFIG.cpuResolutionMm },
+      stockMemoryMiB: DEFAULT_SIMULATION_CONFIG.stockMemoryMiB,
+      gpuStockPixelBudget: { ...DEFAULT_SIMULATION_CONFIG.gpuStockPixelBudget },
+    },
   }; // Defaults
   private listeners: ((cfg: AppConfiguration) => void)[] = [];
 
@@ -35,7 +42,7 @@ export class VsCodeConfigService implements IConfigService {
     
     // VS Code passes some settings initially via the webview HTML
     if ((window as any).vscodeConfig) {
-      this.config = { ...this.config, ...(window as any).vscodeConfig };
+      this.mergeConfig((window as any).vscodeConfig);
     }
 
     if ((window as any).ncedit7labHostMode) {
@@ -46,10 +53,36 @@ export class VsCodeConfigService implements IConfigService {
     window.addEventListener('message', (event) => {
       const message = event.data;
       if (message.type === 'UPDATE_CONFIG') {
-        this.config = { ...this.config, ...message.config };
+        this.mergeConfig(message.config);
         this.notifyListeners();
       }
     });
+  }
+
+  private mergeConfig(incoming: Partial<AppConfiguration>): void {
+    this.config = {
+      ...this.config,
+      ...incoming,
+      simulation: {
+        ...this.config.simulation,
+        ...incoming?.simulation,
+        gpuPitchMm: {
+          ...DEFAULT_SIMULATION_CONFIG.gpuPitchMm,
+          ...this.config.simulation?.gpuPitchMm,
+          ...incoming?.simulation?.gpuPitchMm,
+        },
+        cpuResolutionMm: {
+          ...DEFAULT_SIMULATION_CONFIG.cpuResolutionMm,
+          ...this.config.simulation?.cpuResolutionMm,
+          ...incoming?.simulation?.cpuResolutionMm,
+        },
+        gpuStockPixelBudget: {
+          ...DEFAULT_SIMULATION_CONFIG.gpuStockPixelBudget,
+          ...this.config.simulation?.gpuStockPixelBudget,
+          ...incoming?.simulation?.gpuStockPixelBudget,
+        },
+      },
+    };
   }
 
   async getConfig(): Promise<AppConfiguration> {

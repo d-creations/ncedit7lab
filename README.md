@@ -4,11 +4,12 @@ CNC NC code editor view with plot interface.
 
 The editor integrates the ACE text editor and enables the plotting of toolpaths with the three.js library.
 
-In the browser, **New** creates a file with an independent blank program in each
-of the three channel memories. Each program becomes active in its channel, so
-code entered there is stored and available to **Plot**. Existing programs remain
-available in **Loaded Programs**; creating or selecting a blank file does not
-change which channels are visible.
+In the browser, opening the editor with no saved tabs automatically creates an
+initial `Untitled.mpf` tab, and **New** creates a file with an independent blank
+program in each of the three channel memories. Each program becomes active in
+its channel, so code entered there is stored and available to **Plot**. Existing
+programs remain available in **Loaded Programs**; creating or selecting a blank
+file does not change which channels are visible.
 
 **Plot** stores the selected machine in each non-empty plotted program's
 `@NCE-SIM:1` setup comments, preserving existing material and tool definitions.

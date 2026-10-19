@@ -18,6 +18,7 @@ export class GpuDexelHistory {
     readonly rays: number,
     sweeps: readonly CompiledGpuSweep[],
     readonly stockKey = '',
+    memoryLimitBytes: number = DEXEL_MEMORY_BYTES,
   ) {
     if (
       raw.length % 4 ||
@@ -61,7 +62,7 @@ export class GpuDexelHistory {
     const rangeBytes = (tiles + changedTiles.length * 1024) * 8;
     if (
       rangeBytes > DEXEL_BINDING_BYTES ||
-      2 * (rangeBytes + events.byteLength) > DEXEL_MEMORY_BYTES
+      2 * (rangeBytes + events.byteLength) > memoryLimitBytes
     )
       throw new SimulationCapabilityError('GPU removal history exceeds storage or memory limits');
     const ranges = new Uint32Array(rangeBytes / 4);

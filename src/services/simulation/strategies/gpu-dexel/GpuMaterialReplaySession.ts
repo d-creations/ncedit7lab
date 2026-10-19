@@ -62,6 +62,7 @@ export interface GpuReplayOptions {
   finePitchMm: number;
   refinementDelayMs?: number;
   residentBytes?: number;
+  memoryLimitBytes?: number;
   onRefined(frame: GpuReplayFrame): void;
   onRefinementError(error: Error): void;
 }
@@ -104,6 +105,7 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
   >();
   private readonly pinned = new Set<GpuDexelStock>();
   private readonly checkpointStocks = new Set<GpuDexelStock>();
+  private readonly memoryLimitBytes: number;
   private progress: (processed: number, total: number) => void = () => {};
 
   constructor(
@@ -112,15 +114,18 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
     private readonly device: GPUDevice,
     private readonly options: GpuReplayOptions,
   ) {
+    this.memoryLimitBytes = options.memoryLimitBytes ?? DEXEL_MEMORY_BYTES;
     if (
       !Number.isFinite(options.finePitchMm) ||
       options.finePitchMm < 0.001 ||
       options.finePitchMm > 5 ||
       !Number.isSafeInteger(options.refinementDelayMs ?? 350) ||
       (options.refinementDelayMs ?? 350) < 0 ||
+      !Number.isSafeInteger(this.memoryLimitBytes) ||
+      this.memoryLimitBytes < 16 * 1024 * 1024 ||
       !Number.isSafeInteger(options.residentBytes ?? 0) ||
       (options.residentBytes ?? 0) < 0 ||
-      (options.residentBytes ?? 0) > DEXEL_MEMORY_BYTES
+      (options.residentBytes ?? 0) > this.memoryLimitBytes
     ) {
       throw new SimulationCapabilityError(
         'GPU fine pitch must be between 0.001 and 5 mm and the idle delay must be nonnegative',
@@ -411,8 +416,9 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
         const layout = createDexelLayout(size, pitch, intervalCapacity, {
           bounds: sweeps.map((sweep) => sweep.bounds),
           retainedTiles,
+          memoryLimitBytes: this.memoryLimitBytes,
         });
-        const index = indexDexelTiles(layout, sweeps);
+        const index = indexDexelTiles(layout, sweeps, this.memoryLimitBytes);
         const staging = layout.tiles * 96 + index.sweeps.length * 16;
         const records = sweeps.length * (GPU_SWEEP_STRIDE * 12 + 320);
         const cutTiles = history
@@ -455,7 +461,7 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
         this.makeRoom(baseBytes, source ?? (arena ? arenaProvider : undefined));
         const capture = !history && (!source || reusedPosition === 0) && motionCount > 0;
         const tileBytes = 2 * 1024 * (intervalCapacity * 8 + 4) + 12;
-        const spare = Math.max(0, DEXEL_MEMORY_BYTES - this.residentBytes() - baseBytes);
+        const spare = Math.max(0, this.memoryLimitBytes - this.residentBytes() - baseBytes);
         // Reserve a bounded atlas, leaving most spare memory for streamed history.
         const arenaTiles = !arena
           ? Math.min(
@@ -497,6 +503,7 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
             changedTiles,
             rotationalBase,
             updateBase,
+            memoryLimitBytes: this.memoryLimitBytes,
           },
         );
         const attemptStarted = performance.now();
@@ -525,7 +532,7 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
           const recorded = stock.takeHistory();
           stock.releasePreparation();
           if (recorded) {
-            if (this.residentBytes() + recorded.estimatedBytes <= DEXEL_MEMORY_BYTES) {
+            if (this.residentBytes() + recorded.estimatedBytes <= this.memoryLimitBytes) {
               this.histories.get(phase)?.history.dispose();
               this.histories.set(phase, {
                 history: recorded,
@@ -610,7 +617,7 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
             continue;
           if (
             this.residentBytes() + stock.estimatedBytes - (stock.tileArena?.estimatedBytes ?? 0) >
-            DEXEL_MEMORY_BYTES
+            this.memoryLimitBytes
           )
             break;
           try {
@@ -831,14 +838,14 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
   private makeRoom(extra: number, protectedStock?: GpuDexelStock | RevolvedStock): void {
     let bytes = this.residentBytes();
     if (
-      bytes + extra <= DEXEL_MEMORY_BYTES &&
+      bytes + extra <= this.memoryLimitBytes &&
       this.revolved.size < 4 &&
       this.coarse.size < 4 &&
       this.fine.size < 4
     )
       return;
     for (const [key, entry] of this.revolved) {
-      if (bytes + extra <= DEXEL_MEMORY_BYTES && this.revolved.size < 4) break;
+      if (bytes + extra <= this.memoryLimitBytes && this.revolved.size < 4) break;
       if (entry.stock.group.parent || entry.stock === protectedStock) continue;
       this.revolved.delete(key);
       this.ownedRevolved.delete(entry.stock);
@@ -854,7 +861,7 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
         );
       });
       for (const [position, stock] of candidates) {
-        if (bytes + extra <= DEXEL_MEMORY_BYTES && cache.size < 4) break;
+        if (bytes + extra <= this.memoryLimitBytes && cache.size < 4) break;
         if (stock.group.parent || stock === protectedStock || this.pinned.has(stock)) continue;
         cache.delete(position);
         this.owned.delete(stock);
@@ -863,9 +870,9 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
         bytes = this.residentBytes();
       }
     }
-    if (bytes + extra > DEXEL_MEMORY_BYTES)
+    if (bytes + extra > this.memoryLimitBytes)
       throw new GpuReplayBudgetError(
-        'Hybrid replay/refinement exceeds the 256 MiB CPU/GPU buffer budget alongside displayed stock. Requested pitch is not reduced.',
+        `Hybrid replay/refinement exceeds the ${Math.round(this.memoryLimitBytes / 1048576)} MiB CPU/GPU buffer budget alongside displayed stock. Requested pitch is not reduced.`,
       );
   }
 

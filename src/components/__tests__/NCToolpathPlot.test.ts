@@ -721,15 +721,15 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
     vi.spyOn(renderer, 'getSize').mockImplementation((target) => target.set(1075, 628));
     const ratio = vi.spyOn(renderer, 'setPixelRatio').mockImplementation(() => {});
     vi.spyOn(renderer, 'getPixelRatio').mockReturnValue(1.5);
-    plot.gpuStockPixelBudget = 400_000;
+    plot.gpuStockPixelBudget = 450_000;
     const now = vi.spyOn(performance, 'now');
     now.mockReturnValueOnce(0).mockReturnValue(2000);
     plot.renderScene();
     const applied = ratio.mock.calls[0][0] as number;
-    expect(applied * applied * 1075 * 628).toBeCloseTo(400_000, -2);
+    expect(applied * applied * 1075 * 628).toBeCloseTo(450_000, -2);
     await vi.waitFor(() => expect(plot.gpuRenderPending).toBe(false));
-    expect(plot.gpuStockPixelBudget).toBeLessThan(400_000 * 0.85);
-    expect(plot.gpuStockPixelBudget).toBeGreaterThanOrEqual(180_000);
+    expect(plot.gpuStockPixelBudget).toBeLessThan(450_000 * 0.85);
+    expect(plot.gpuStockPixelBudget).toBeGreaterThanOrEqual(250_000);
     now.mockRestore();
   });
 

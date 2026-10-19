@@ -120,9 +120,10 @@ export class MaterialReplayEngine {
     this.options = { ...REPLAY_LIMITS, ...options };
     this.surfaces = new ReplaySurfaceCache(this.options.surfaceCacheBytes);
     this.timelineBytes = 2049 + steps.length * 24 + input.motions.length * 9;
+    const stockBytes = input.stockBytes ?? SIMULATION_LIMITS.stockBytes;
     if (
       !Number.isSafeInteger(this.timelineBytes) ||
-      this.timelineBytes > SIMULATION_LIMITS.stockBytes
+      this.timelineBytes > stockBytes
     )
       throw new Error('Replay timeline exceeds the stock/workspace memory budget');
     this.surfaceVisits = new Uint8Array(input.motions.length + 1);

@@ -129,7 +129,9 @@ export class NCEditorApp extends HTMLElement {
   }
 
   private normalizeInitialChannels(): void {
-    if (this.fileManager.getFiles().length > 0) {
+    const files = this.fileManager.getFiles();
+    const hasOnlyInitialBlankFile = files.length === 1 && files[0].content === '';
+    if (files.length > 0 && !hasOnlyInitialBlankFile) {
       return;
     }
 
@@ -956,6 +958,8 @@ export class NCEditorApp extends HTMLElement {
       const transferToggle = this.querySelector('#transfer-toggle') as HTMLButtonElement;
       if (transferToggle) transferToggle.classList.add('active');
     }
+    const plotElement = plotView?.querySelector('nc-toolpath-plot') as (HTMLElement & { setTabActive?(active: boolean): void }) | null;
+    plotElement?.setTabActive?.(view === 'plot');
   }
 
   private setPlotViewerVisible(visible: boolean): void {

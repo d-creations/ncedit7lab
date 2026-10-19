@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import type { SimulationInput } from '../../shared/SimulationTypes';
+import { SIMULATION_LIMITS, type SimulationInput } from '../../shared/SimulationTypes';
 import { materialSize, stockPlacement } from '../../shared/SimulationTransforms';
 import { StockModel } from './StockModel';
 import { boxVolume, cylinderVolume } from '../../shared/ImplicitGeometry';
@@ -30,6 +30,7 @@ export class WorkpieceFactory {
       Math.abs(Math.abs(axis.z) - 1) <= 64 * Number.EPSILON
         ? new RotationalProfile(material.diameter / 2, material.length)
         : undefined;
+    const stockBytes = input.stockBytes ?? SIMULATION_LIMITS.stockBytes;
     const stock = new StockModel(
       size,
       input.resolutionMm,
@@ -37,7 +38,7 @@ export class WorkpieceFactory {
         (material.type === 'cylinder'
           ? cylinderVolume(material.diameter / 2, material.length)
           : boxVolume(size)),
-      undefined,
+      { ...SIMULATION_LIMITS, stockBytes },
       undefined,
       profile,
     );

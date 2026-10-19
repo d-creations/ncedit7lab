@@ -391,6 +391,33 @@ G0 Y20`;
   });
 
   describe('browser persistence', () => {
+    it('creates an initial Untitled.mpf file tab and channel programs on first browser startup when storage is empty', () => {
+      const initialService = new FileManagerService(mockEventBus, mockStateService as any);
+
+      const files = initialService.getFiles();
+      expect(files).toHaveLength(1);
+      expect(files[0]).toMatchObject({
+        name: 'Untitled.mpf',
+        content: '',
+        channels: ['', '', ''],
+        isMultiChannel: true,
+      });
+      expect(initialService.getActiveFile()).toEqual(files[0]);
+
+      ['1', '2', '3'].forEach(channelId => {
+        const program = initialService.getActiveProgram(channelId);
+        expect(program).toMatchObject({
+          channelId,
+          sourceFileId: files[0].id,
+          name: `Untitled.mpf (CH${channelId})`,
+          content: '',
+        });
+      });
+
+      initialService.updateActiveProgramContent('1', 'G0 X10');
+      expect(initialService.getActiveProgram('1')?.content).toBe('G0 X10');
+    });
+
     it('should restore stored files and the active program when StateService is provided', () => {
       const file = {
         id: 'persisted-file',

@@ -162,6 +162,8 @@ describe('NCToolManagerPanel', () => {
     expect(panel.shadowRoot?.textContent).toContain('Tool Manager');
     expect(panel.shadowRoot?.textContent).toContain('Library');
     expect(panel.shadowRoot?.textContent).toContain('Program Tools');
+    expect(panel.shadowRoot?.querySelector('[data-manager-tab="program"]')?.classList.contains('active')).toBe(true);
+    (panel.shadowRoot?.querySelector('[data-manager-tab="library"]') as HTMLButtonElement).click();
     (panel.shadowRoot?.querySelector('#new-library-tool') as HTMLButtonElement).click();
     (panel.shadowRoot?.querySelector('#tool-description') as HTMLInputElement).value = 'Finisher 10';
     (panel.shadowRoot?.querySelector('#tool-q') as HTMLInputElement).value = '3';
@@ -175,6 +177,7 @@ describe('NCToolManagerPanel', () => {
   });
 
   it('drives the live preview from the form and stores a picked zero vertex with the tool', async () => {
+    (panel.shadowRoot?.querySelector('[data-manager-tab="library"]') as HTMLButtonElement).click();
     (panel.shadowRoot?.querySelector('#new-library-tool') as HTMLButtonElement).click();
     const field = <T extends HTMLElement>(selector: string) => panel.shadowRoot!.querySelector(selector) as T;
     const change = (element: HTMLElement) => element.dispatchEvent(new Event('change', { bubbles: true }));
@@ -206,6 +209,7 @@ describe('NCToolManagerPanel', () => {
   });
 
   it('keeps turning metadata and the holder profile when a library tool is saved', async () => {
+    (panel.shadowRoot?.querySelector('[data-manager-tab="library"]') as HTMLButtonElement).click();
     await vi.waitFor(() => expect(panel.shadowRoot?.querySelector('[data-library-id="default-turning-insert-A"]')).toBeTruthy());
     (panel.shadowRoot!.querySelector('[data-library-id="default-turning-insert-A"]') as HTMLButtonElement).click();
     (panel.shadowRoot!.querySelector('#tool-form') as HTMLFormElement).requestSubmit();

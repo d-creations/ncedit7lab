@@ -45,18 +45,18 @@ describe('web tool library', () => {
       'Front End Mill 0.5 mm', 'Front Drill 20 mm',
       'Counter Face End Mill 0.5 mm', 'Counter Face Drill 20 mm',
     ]));
-    expect(seeded.tools.find((entry) => entry.id === 'default-front-endmill-10mm')?.orientation).toEqual([0, 90, 0]);
-    expect(seeded.tools.find((entry) => entry.id === 'default-counter-face-drill-10mm')?.orientation).toEqual([270, 0, 0]);
+    expect(seeded.tools.find((entry) => entry.id === 'default-front-endmill-10mm')?.orientation).toEqual([0, 180, 0]);
+    expect(seeded.tools.find((entry) => entry.id === 'default-counter-face-drill-10mm')?.orientation).toEqual([0, 90, 0]);
     expect(seeded.tools.find((entry) => entry.id === 'default-turning-insert-C')?.orientation).toEqual([0, 90, 0]);
     expect(seeded.tools.find((entry) => entry.id === 'default-turning-insert-C')?.holder?.[0]).toMatchObject({
-      type: 'turningHolderProfile', width: 12, depth: 12, stickOut: 15,
+      type: 'turningHolderProfile', width: 12, depth: 12, stickOut: 15, position: [0, 0, 2],
     });
     expect(seeded.tools.find((entry) => entry.id === 'default-turning-insert-C')?.turning).toEqual({
       hand: 'right', mount: 'front', approachAngle: 93,
       activeCorner: 'front-right', reference: 'virtualTip',
     });
     expect(seeded.tools.find((entry) => entry.id === 'default-turning-insert-C')?.cutting?.[0]).toMatchObject({
-      type: 'insert', shape: 'C', ic: 4.7625, thickness: 1.59, noseRadius: 0.2, zeroVertex: 0, rotation: [0, -47, 0],
+      type: 'insert', shape: 'C', ic: 4.7625, thickness: 1.59, noseRadius: 0.2, zeroVertex: 0, position: [-8, 0, 0], rotation: [0, 47, 0],
     });
     const turningVariants = ['C', 'D', 'V', 'W', 'T'].flatMap((shape) => [
       seeded.tools.find((entry) => entry.id === `default-turning-insert-${shape}`),
@@ -69,7 +69,15 @@ describe('web tool library', () => {
       'front', 'back', 'center', 'front', 'back', 'center', 'front', 'back', 'center',
       'front', 'back', 'center', 'front', 'back', 'center',
     ]);
-    expect(new Set(turningVariants.map((entry) => JSON.stringify(entry?.holder?.[0]))).size).toBe(3);
+    expect(
+      new Set(
+        turningVariants.map((entry) =>
+          entry?.holder?.[0]?.type === 'turningHolderProfile'
+            ? JSON.stringify(entry.holder[0].outline)
+            : '',
+        ),
+      ).size,
+    ).toBe(3);
     const changed = vi.fn();
     bus.subscribe(EVENT_NAMES.TOOL_LIBRARY_CHANGED, changed);
     const saved = await catalog.saveTool(tool());
@@ -112,7 +120,7 @@ describe('web tool library', () => {
     const upgraded = await repository.loadLibrary();
 
     expect(upgraded.revision).toBe(initial.revision + 1);
-    expect(upgraded.tools.find((entry) => entry.id === 'default-turning-insert-D')?.cutting?.[0]).toMatchObject({ zeroVertex: 0, rotation: [0, -59.5, 0] });
+    expect(upgraded.tools.find((entry) => entry.id === 'default-turning-insert-D')?.cutting?.[0]).toMatchObject({ zeroVertex: 0, position: [-8, 0, 0], rotation: [0, 28, 0] });
     expect(upgraded.tools.find((entry) => entry.id === 'default-turning-insert-V')).toMatchObject({
       revision: 2, cutting: [{ rotation: [0, 0, 180] }],
     });

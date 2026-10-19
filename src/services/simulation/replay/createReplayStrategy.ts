@@ -20,6 +20,7 @@ export interface ReplayStrategyOptions {
   gpuUnavailableReason?: string;
   finePitchMm: number;
   residentBytes: number;
+  memoryLimitBytes?: number;
   isCurrent(strategy: MaterialReplayStrategy): boolean;
   onFallback(reason: string): void;
   onRefined(frame: GpuReplayFrame, strategy: MaterialReplayStrategy): void;
@@ -72,22 +73,22 @@ export function createReplayStrategy(options: ReplayStrategyOptions): MaterialRe
     },
     async start(captured, timeline, progress: ReplayProgress = () => {}, prepareFinal = false) {
       if (cancelled) throw new DOMException('Material replay cancelled', 'AbortError');
-      input = captured;
+      input = options.memoryLimitBytes ? { ...captured, stockBytes: options.memoryLimitBytes } : captured;
       steps = [...timeline];
       if (
         options.gpuEnabled &&
         selected.backend === 'cpu-hybrid' &&
-        options.finePitchMm < captured.resolutionMm
+        options.finePitchMm < input.resolutionMm
       )
         throw new SimulationCapabilityError(
-          `Requested ${options.finePitchMm} mm detail cannot use the ${captured.resolutionMm} mm CPU fallback; requested detail is not reduced`,
+          `Requested ${options.finePitchMm} mm detail cannot use the ${input.resolutionMm} mm CPU fallback; requested detail is not reduced`,
         );
       const token = ++request;
       try {
-        return await selected.start(captured, steps, progress, prepareFinal);
+        return await selected.start(input, steps, progress, prepareFinal);
       } catch (error) {
         fallback(error, 'start', token);
-        return selected.start(captured, steps, progress, prepareFinal);
+        return selected.start(input, steps, progress, prepareFinal);
       }
     },
     async seek(position) {
@@ -119,6 +120,7 @@ export function createReplayStrategy(options: ReplayStrategyOptions): MaterialRe
     const gpu = new GpuMaterialReplaySession(options.runId, options.renderer, options.device, {
       finePitchMm: options.finePitchMm,
       residentBytes: options.residentBytes,
+      memoryLimitBytes: options.memoryLimitBytes,
       onRefined: (frame) => {
         if (selected === gpu && current()) options.onRefined(frame, strategy);
       },

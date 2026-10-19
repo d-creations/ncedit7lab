@@ -23,9 +23,10 @@ function isStaleDefault(tool: LibraryToolDefinition, current?: LibraryToolDefini
   const insertGeometryChanged = cutting?.type === 'insert' && curCutting?.type === 'insert' &&
     (cutting.ic !== curCutting.ic || cutting.thickness !== curCutting.thickness);
   const descriptionChanged = tool.description !== current.description;
+  const cuttingChanged = JSON.stringify(tool.cutting ?? []) !== JSON.stringify(current.cutting ?? []);
   const holderChanged = JSON.stringify(tool.holder ?? []) !== JSON.stringify(current.holder ?? []);
   const turningChanged = JSON.stringify(tool.turning ?? null) !== JSON.stringify(current.turning ?? null);
-  return missingZeroVertex || orientationChanged || qOrRChanged || insertGeometryChanged || descriptionChanged || holderChanged || turningChanged;
+  return missingZeroVertex || orientationChanged || qOrRChanged || insertGeometryChanged || descriptionChanged || cuttingChanged || holderChanged || turningChanged;
 }
 
 function createId(): string {

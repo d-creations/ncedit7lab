@@ -10,9 +10,18 @@ import type {
 import { buildInsertContour } from '@services/tools/InsertOutline';
 import { MaterialGeometryFactory } from './MaterialGeometryFactory';
 import { getInsertQShift } from '@services/simulation/shared/TurningReference';
+import { rotationQuaternion } from '@services/simulation/shared/SimulationTransforms';
 import { createMillingCutterGeometry } from './MillingCutterGeometry';
 export { getInsertQShift, TURN_Q_VECTORS } from '@services/simulation/shared/TurningReference';
 
+function applyExtrinsicEuler(target: THREE.Euler, degrees: readonly number[]): void {
+  target.order = 'ZYX';
+  target.set(
+    THREE.MathUtils.degToRad(degrees[0] ?? 0),
+    THREE.MathUtils.degToRad(degrees[1] ?? 0),
+    THREE.MathUtils.degToRad(degrees[2] ?? 0),
+  );
+}
 const TOOL_COLOR = 0xf4c542;
 const TOOL_MATERIAL = new THREE.MeshStandardMaterial({ color: TOOL_COLOR, metalness: 0.8, roughness: 0.3 });
 const CUTTING_MATERIAL = new THREE.MeshStandardMaterial({ color: TOOL_COLOR, metalness: 0.55, roughness: 0.25 });
@@ -73,15 +82,10 @@ export function getInsertPickPoints(tool: DeepReadonly<ProgramToolDefinition>): 
   if (!part) return [];
   const { sharp, zeroIndex } = insertContour(part, tool.turning?.activeCorner);
   const qShift = getInsertQShift(tool);
-  const euler = new THREE.Euler(
-    THREE.MathUtils.degToRad(part.rotation?.[0] ?? 0),
-    THREE.MathUtils.degToRad(part.rotation?.[1] ?? 0),
-    THREE.MathUtils.degToRad(part.rotation?.[2] ?? 0),
-    'ZYX',
-  );
+  const quaternion = rotationQuaternion(part.rotation ?? [0, 0, 0]);
   const offset = new THREE.Vector3(...(part.position ?? [0, 0, 0])).add(qShift);
   return sharp.map(([x, y], index) => {
-    const point = new THREE.Vector3(x, 0, y).applyEuler(euler).add(offset);
+    const point = new THREE.Vector3(x, 0, y).applyQuaternion(quaternion).add(offset);
     return { index, position: point.toArray() as [number, number, number], active: index === zeroIndex };
   });
 }
@@ -154,12 +158,7 @@ function addPart(
     (part.position?.[2] ?? (turningHolder || fromTip ? 0 : (('stickOut' in part ? part.stickOut : 0) ?? 0) + length / 2)) + (shift?.z ?? 0),
   );
   if (part.rotation) {
-    mesh.rotation.order = 'ZYX';
-    mesh.rotation.set(
-      THREE.MathUtils.degToRad(part.rotation[0]),
-      THREE.MathUtils.degToRad(part.rotation[1]),
-      THREE.MathUtils.degToRad(part.rotation[2]),
-    );
+    applyExtrinsicEuler(mesh.rotation, part.rotation);
   }
   group.add(mesh);
 }
@@ -179,12 +178,7 @@ export class ToolGeometryFactory {
     cutting.forEach((part) => addPart(group, part, CUTTING_MATERIAL, true, tool.turning?.activeCorner, 0, qShift));
     tool.holder?.forEach((part) => addPart(group, part, TOOL_MATERIAL, false, tool.turning?.activeCorner, seatY, qShift));
     if (tool.orientation) {
-      group.rotation.order = 'ZYX';
-      group.rotation.set(
-        THREE.MathUtils.degToRad(tool.orientation[0]),
-        THREE.MathUtils.degToRad(tool.orientation[1]),
-        THREE.MathUtils.degToRad(tool.orientation[2]),
-      );
+      applyExtrinsicEuler(group.rotation, tool.orientation);
     }
     return group;
   }

@@ -30,6 +30,7 @@ import type {
 import { validateProgramMaterial, validateProgramTool } from '@services/tools/SimulationMetadata';
 import type { LibraryToolDefinition } from '@services/tools/ToolLibraryTypes';
 import { toProgramToolDefinition } from '@services/tools/ToolLibraryTypes';
+import { recommendLibraryToolId } from '@services/tools/DefaultToolLibrary';
 import { ToolCatalogService } from '@services/tools/ToolCatalogService';
 import type {
   ProgramOffsetsUpdateRequest,
@@ -79,7 +80,7 @@ export class NCToolManagerPanel extends HTMLElement {
   private hostChannelListener?: (event: Event) => void;
   private hostMessageListener?: (event: MessageEvent) => void;
   private bridgeListener?: (event: Event) => void;
-  private activeTab: ManagerTab = 'library';
+  private activeTab: ManagerTab = 'program';
   private channelId: ChannelId = '1';
   private libraryTools: LibraryToolDefinition[] = [];
   private selectedLibraryId?: string;
@@ -133,7 +134,10 @@ export class NCToolManagerPanel extends HTMLElement {
       this.eventBus.subscribe(EVENT_NAMES.MACHINE_CHANGED, () => void this.loadProgram()),
       this.eventBus.subscribe(EVENT_NAMES.PARSE_COMPLETED, (data: { channelId: string; artifacts: ParseArtifacts }) => {
         if (data.channelId !== this.channelId) return;
-        this.detectedIdentifiers = this.uniqueIdentifiers(data.artifacts.toolRegisters.map((tool) => tool.toolNumber));
+        this.detectedIdentifiers = this.uniqueIdentifiers([
+          ...data.artifacts.toolRegisters.map((tool) => tool.toolNumber),
+          ...this.programDefinitions.map((tool) => tool.toolNumber),
+        ]);
       }),
       this.eventBus.subscribe(
         EVENT_NAMES.TOOL_MANAGER_OPEN_REQUEST,
@@ -399,8 +403,8 @@ export class NCToolManagerPanel extends HTMLElement {
           </div>
         </header>
         <nav class="manager-tabs" aria-label="Tool manager views">
-          <button class="manager-tab ${this.activeTab === 'library' ? 'active' : ''}" data-manager-tab="library">Library</button>
           <button class="manager-tab ${this.activeTab === 'program' ? 'active' : ''}" data-manager-tab="program">Program Tools</button>
+          <button class="manager-tab ${this.activeTab === 'library' ? 'active' : ''}" data-manager-tab="library">Library</button>
           <button class="manager-tab ${this.activeTab === 'material' ? 'active' : ''}" data-manager-tab="material">Raw Material</button>
           <button class="manager-tab ${this.activeTab === 'offsets' ? 'active' : ''}" data-manager-tab="offsets">Offsets</button>
           <button class="manager-tab ${this.activeTab === 'simulation' ? 'active' : ''}" data-manager-tab="simulation">Simulation</button>
@@ -476,7 +480,15 @@ export class NCToolManagerPanel extends HTMLElement {
           <div class="assign-bar">
             <select id="assign-library-tool">
               <option value="">Choose library tool...</option>
-              ${this.libraryTools.map((tool) => `<option value="${this.escape(tool.id)}">${this.escape(tool.description || 'Unnamed tool')}</option>`).join('')}
+              ${(() => {
+                const recommendedId = recommendLibraryToolId(this.programDraft.toolNumber);
+                return this.libraryTools
+                  .map(
+                    (tool) =>
+                      `<option value="${this.escape(tool.id)}" ${tool.id === recommendedId ? 'selected' : ''}>${this.escape(tool.description || 'Unnamed tool')}</option>`,
+                  )
+                  .join('');
+              })()}
             </select>
             <button class="button" id="copy-library-tool">Use Library Geometry</button>
           </div>

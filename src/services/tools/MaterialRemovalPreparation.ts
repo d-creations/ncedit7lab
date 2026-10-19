@@ -268,13 +268,47 @@ export function prepareMaterialRemoval(
       );
       break;
     }
-    const turning = segment.machiningMode === 'turning';
+    const isInsert = tool.cutting[0].type === 'insert';
+    const stationarySpindleDrill =
+      segment.machiningMode === 'turning' &&
+      !isInsert &&
+      start.reference === 'millingTip' &&
+      end.reference === 'millingTip';
+    let effectiveMode: 'turning' | 'milling' = segment.machiningMode;
+    if (stationarySpindleDrill) {
+      const checkCoaxial = () => {
+        if (
+          new THREE.Quaternion(...start.orientation).angleTo(
+            new THREE.Quaternion(...end.orientation),
+          ) > 1e-6
+        )
+          return false;
+        const c = new CuttingToolModel(structuredClone(tool), undefined);
+        for (const pose of [start, end]) {
+          const matrix = inverse
+            .clone()
+            .multiply(
+              new THREE.Matrix4().compose(
+                new THREE.Vector3(...pose.position),
+                new THREE.Quaternion(...pose.orientation),
+                new THREE.Vector3(1, 1, 1),
+              ),
+            )
+            .multiply(c.partToAssembly);
+          const pos = new THREE.Vector3().setFromMatrixPosition(matrix);
+          const dir = new THREE.Vector3(0, 0, 1).transformDirection(matrix);
+          const rel = pos.sub(spindleOrigin);
+          const radial = rel.clone().sub(spindleAxis.clone().multiplyScalar(rel.dot(spindleAxis)));
+          if (radial.length() > 1e-6 || Math.abs(Math.abs(dir.dot(spindleAxis)) - 1) > 1e-6)
+            return false;
+        }
+        return true;
+      };
+      if (checkCoaxial()) effectiveMode = 'milling';
+    }
+    const turning = effectiveMode === 'turning';
     const reference = turning ? 'turningVirtualTip' : 'millingTip';
-    if (
-      start.reference !== reference ||
-      end.reference !== reference ||
-      turning !== (tool.cutting[0].type === 'insert')
-    ) {
+    if (start.reference !== reference || end.reference !== reference || turning !== isInsert) {
       stopAt(
         'turning-reference-unverified',
         'Machining mode, cutter type and pose reference do not agree',
@@ -352,7 +386,7 @@ export function prepareMaterialRemoval(
       break;
     }
     simulation.motions.push({
-      mode: segment.machiningMode,
+      mode: effectiveMode,
       start: structuredClone(start),
       end: structuredClone(end),
       tool: capturedTools.get(tool.toolNumber)!,

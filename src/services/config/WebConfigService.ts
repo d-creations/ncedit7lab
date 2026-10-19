@@ -1,4 +1,4 @@
-import { IConfigService, AppConfiguration } from './IConfigService';
+import { IConfigService, AppConfiguration, DEFAULT_SIMULATION_CONFIG } from './IConfigService';
 
 export class WebConfigService implements IConfigService {
   private config: AppConfiguration = {
@@ -18,6 +18,13 @@ export class WebConfigService implements IConfigService {
     templateStorageMode: 'local',
     templateSeedUrl: '/templates.json',
     backendTimeout: 10000,
+    simulation: {
+      gpuDefaultEnabled: DEFAULT_SIMULATION_CONFIG.gpuDefaultEnabled,
+      gpuPitchMm: { ...DEFAULT_SIMULATION_CONFIG.gpuPitchMm },
+      cpuResolutionMm: { ...DEFAULT_SIMULATION_CONFIG.cpuResolutionMm },
+      stockMemoryMiB: DEFAULT_SIMULATION_CONFIG.stockMemoryMiB,
+      gpuStockPixelBudget: { ...DEFAULT_SIMULATION_CONFIG.gpuStockPixelBudget },
+    },
   }; // Defaults
   private listeners: ((cfg: AppConfiguration) => void)[] = [];
   private loadPromise: Promise<AppConfiguration>;
@@ -30,8 +37,30 @@ export class WebConfigService implements IConfigService {
     try {
       const response = await fetch('/config.json');
       if (response.ok) {
-        const loaded = await response.json();
-        this.config = { ...this.config, ...loaded };
+        const loaded = (await response.json()) as Partial<AppConfiguration>;
+        this.config = {
+          ...this.config,
+          ...loaded,
+          simulation: {
+            ...this.config.simulation,
+            ...loaded.simulation,
+            gpuPitchMm: {
+              ...DEFAULT_SIMULATION_CONFIG.gpuPitchMm,
+              ...this.config.simulation?.gpuPitchMm,
+              ...loaded.simulation?.gpuPitchMm,
+            },
+            cpuResolutionMm: {
+              ...DEFAULT_SIMULATION_CONFIG.cpuResolutionMm,
+              ...this.config.simulation?.cpuResolutionMm,
+              ...loaded.simulation?.cpuResolutionMm,
+            },
+            gpuStockPixelBudget: {
+              ...DEFAULT_SIMULATION_CONFIG.gpuStockPixelBudget,
+              ...this.config.simulation?.gpuStockPixelBudget,
+              ...loaded.simulation?.gpuStockPixelBudget,
+            },
+          },
+        };
         this.notifyListeners();
       }
     } catch (e) {

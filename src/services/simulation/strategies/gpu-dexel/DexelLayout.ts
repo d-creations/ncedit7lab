@@ -40,8 +40,9 @@ export function createDexelLayout(
   size: THREE.Vector3,
   pitchMm: number,
   intervalCapacity: DexelIntervalCapacity = DEXEL_INTERVALS,
-  sparse?: { bounds: readonly THREE.Box3[]; retainedTiles?: Uint32Array },
+  sparse?: { bounds: readonly THREE.Box3[]; retainedTiles?: Uint32Array; memoryLimitBytes?: number },
 ): DexelLayout {
+  const memoryLimitBytes = sparse?.memoryLimitBytes ?? DEXEL_MEMORY_BYTES;
   if (![4, 8, 16, 32, 64].includes(intervalCapacity))
     throw new SimulationCapabilityError('GPU interval capacity must be 4, 8, 16, 32 or 64');
   if (
@@ -65,9 +66,9 @@ export function createDexelLayout(
   const rayCounts = tileCounts.map((n) => n * DEXEL_TILE_SIZE ** 2) as [number, number, number];
   const rays = rayCounts.reduce((sum, n) => sum + n, 0);
   const tiles = tileCounts.reduce((sum, n) => sum + n, 0);
-  if (!Number.isSafeInteger(rays) || rays > 0xffffffff || tiles * 128 > DEXEL_MEMORY_BYTES)
+  if (!Number.isSafeInteger(rays) || rays > 0xffffffff || tiles * 128 > memoryLimitBytes)
     throw new SimulationCapabilityError(
-      'GPU ray metadata exceeds the 256 MiB memory budget; use a larger pitch',
+      `GPU ray metadata exceeds the ${Math.round(memoryLimitBytes / 1048576)} MiB memory budget; use a larger pitch`,
     );
   const geometry = { size, dimensions, tileCounts };
   const selected = sparse ? new Set(sparse.retainedTiles ?? []) : undefined;
@@ -89,7 +90,7 @@ export function createDexelLayout(
   if (
     !Number.isSafeInteger(rays) ||
     intervalBytes > DEXEL_BINDING_BYTES ||
-    estimatedBytes > DEXEL_MEMORY_BYTES
+    estimatedBytes > memoryLimitBytes
   ) {
     throw new SimulationCapabilityError(
       `GPU stock at ${pitchMm} mm needs approximately ${(estimatedBytes / 1048576).toFixed(1)} MiB including CPU/GPU buffers, or exceeds the 128 MiB storage binding limit. Use a larger pitch or smaller stock; resolution is not silently reduced.`,
@@ -195,22 +196,23 @@ export interface DexelTileIndex {
 export function indexDexelTiles(
   layout: DexelLayout,
   sweeps: readonly CompiledGpuSweep[],
+  memoryLimitBytes: number = DEXEL_MEMORY_BYTES,
 ): DexelTileIndex {
   const lists: number[][] = Array.from({ length: layout.tiles }, () => []);
   let stagingEntries = 0;
   const stagingBase = layout.tiles * 96;
-  if (layout.estimatedBytes + stagingBase > DEXEL_MEMORY_BYTES)
+  if (layout.estimatedBytes + stagingBase > memoryLimitBytes)
     throw new SimulationCapabilityError('GPU tile-index staging exceeds the memory budget');
   for (let i = 0; i < sweeps.length; i++) {
     const touched = dexelTilesForBounds(layout, sweeps[i].bounds);
     stagingEntries += touched.length;
-    if (layout.estimatedBytes + stagingBase + stagingEntries * 16 > DEXEL_MEMORY_BYTES)
+    if (layout.estimatedBytes + stagingBase + stagingEntries * 16 > memoryLimitBytes)
       throw new SimulationCapabilityError('GPU tile-index staging exceeds the memory budget');
     for (const tile of touched) lists[tile].push(i);
   }
   const entries = lists.reduce((sum, list) => sum + list.length, 0);
   const bytes = 2 * (layout.tiles * 8 + Math.max(1, entries) * 4);
-  if (bytes + layout.estimatedBytes > DEXEL_MEMORY_BYTES)
+  if (bytes + layout.estimatedBytes > memoryLimitBytes)
     throw new SimulationCapabilityError('GPU cutter-to-tile index exceeds the stock memory budget');
   const ranges = new Uint32Array(layout.tiles * 2),
     indices = new Uint32Array(Math.max(1, entries));

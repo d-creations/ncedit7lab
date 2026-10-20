@@ -437,8 +437,9 @@ def list_machines() -> Dict[str, Any]:
         simulation_comment_syntax = get_simulation_comment_syntax(machine["controlType"])
         if simulation_comment_syntax:
             machine["simulationCommentSyntax"] = simulation_comment_syntax
-        file_extensions = getattr(config, "file_extensions", {})
-        machine["fileExtensions"] = file_extensions if isinstance(file_extensions, dict) else {}
+        file_extensions = getattr(config, "file_extensions", None)
+        if isinstance(file_extensions, dict) and file_extensions:
+            machine["fileExtensions"] = file_extensions
 
     return {
         "machines": machines,
@@ -531,16 +532,21 @@ def expand_stationary_linear_motion(segment: Dict[str, Any]) -> None:
     suffix = str(context.get("channelId") or "")
     complete_axes = {f"{axis}{suffix}" for axis in ("X", "Y", "Z")}
     if (not isinstance(points, list) or len(points) != 1
-            or not isinstance(poses, list) or len(poses) != 1
             or not isinstance(start, dict) or not start or start != end
             or not complete_axes.issubset(start)
             or any(type(value) not in (int, float) or not math.isfinite(value) for value in start.values())):
         return
-    pose = poses[0]
     position = [points[0].get(axis) for axis in ("x", "y", "z")]
+    if any(type(value) not in (int, float) or not math.isfinite(value) for value in position):
+        return
+    if segment.get("toolNumber") in (None, "unknown", 0, "0") and not poses:
+        segment["points"] = [points[0], dict(points[0])]
+        return
+    if not isinstance(poses, list) or len(poses) != 1:
+        return
+    pose = poses[0]
     orientation = pose.get("orientation")
     if (pose.get("position") != position
-            or any(type(value) not in (int, float) or not math.isfinite(value) for value in position)
             or not isinstance(orientation, list) or len(orientation) != 4
             or any(type(value) not in (int, float) or not math.isfinite(value) for value in orientation)
             or abs(math.hypot(*orientation) - 1) > 1e-6
@@ -598,7 +604,15 @@ def annotate_execution_record_kinds(control: Any, canal_number: int, segments: L
         variable = getattr(node, "variable_command", None)
         # A parsed assignment cannot contain axis/modal words. Never infer state from point count.
         assignment = variable is not None and not codes and words.keys() <= {"N"}
-        setup = codes == {"G266"} and words.keys() <= {"N"}
+        g266_words = words.keys() - {"N"}
+        setup = codes == {"G266"} and (
+            not g266_words
+            or (
+                {"A", "X", "W", "S", "Z", "B", "F"}
+                <= g266_words
+                <= {"A", "X", "W", "S", "Z", "B", "F", "K", "Q", "T"}
+            )
+        )
         # Modal plane/feed/unit setup on a certified stationary spindle/tool block
         # is not missing cutter geometry (e.g. G0 G18 G99 G97 ... M3 T11).
         command = bool(words.keys() & {"T", "M", "S"}) and codes <= {

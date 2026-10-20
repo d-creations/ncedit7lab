@@ -251,28 +251,34 @@ async def get_machines():
                 if isinstance(config, dict):
                     base_configs[key] = config
                     control_type = config.get("control_type", "FANUC")
-                    machines.append({
+                    file_extensions = config.get("file_extensions")
+                    machine_entry = {
                         "machineName": key,
                         "controlType": control_type,
                         "channels": config.get("channels", 1),
                         "machineType": config.get("machine_type", "MILL"),
-                        "fileExtensions": config.get("file_extensions", {}),
                         "simulationCommentSyntax": get_simulation_comment_syntax(control_type),
-                    })
+                    }
+                    if isinstance(file_extensions, dict) and file_extensions:
+                        machine_entry["fileExtensions"] = file_extensions
+                    machines.append(machine_entry)
 
             # Second pass: resolve aliases
             for key, config in machines_data.items():
                 if isinstance(config, str) and config in base_configs:
                     base_cfg = base_configs[config]
                     control_type = base_cfg.get("control_type", "FANUC")
-                    machines.append({
+                    file_extensions = base_cfg.get("file_extensions")
+                    machine_entry = {
                         "machineName": key,
                         "controlType": control_type,
                         "channels": base_cfg.get("channels", 1),
                         "machineType": base_cfg.get("machine_type", "MILL"),
-                        "fileExtensions": base_cfg.get("file_extensions", {}),
                         "simulationCommentSyntax": get_simulation_comment_syntax(control_type),
-                    })
+                    }
+                    if isinstance(file_extensions, dict) and file_extensions:
+                        machine_entry["fileExtensions"] = file_extensions
+                    machines.append(machine_entry)
     except Exception as e:
         logging.error("Failed to read machines.json for /api/machines: %s", e)
 

@@ -1207,23 +1207,39 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
     expect(create).not.toHaveBeenCalled();
   });
 
-  it('places resolution and replay actions together in compact bottom controls', () => {
+  it('places resolution sliders and replay actions together, showing only GPU or CPU resolution for the active mode', () => {
     const controls = plot.shadowRoot!.getElementById('stock-replay')!;
     expect(controls.closest('.plot-info')).not.toBeNull();
-    expect(controls.querySelector<HTMLInputElement>('#removal-resolution')!.value).toBe('0.05');
+    expect(controls.querySelector('#stock-memory-limit')).toBeNull();
+    const gpuToggle = controls.querySelector<HTMLInputElement>('#gpu-stock')!;
+    const gpuControl = controls.querySelector<HTMLElement>('#gpu-resolution-control')!;
+    const cpuControl = controls.querySelector<HTMLElement>('#cpu-resolution-control')!;
+    const gpuSlider = controls.querySelector<HTMLInputElement>('#gpu-fine-resolution')!;
+    const cpuSlider = controls.querySelector<HTMLInputElement>('#removal-resolution')!;
+    expect(gpuSlider.type).toBe('range');
+    expect(cpuSlider.type).toBe('range');
+    expect(cpuSlider.value).toBe('0.05');
+    expect(gpuToggle.checked).toBe(true);
+    expect(gpuControl.hidden).toBe(false);
+    expect(cpuControl.hidden).toBe(true);
+    gpuToggle.checked = false;
+    gpuToggle.dispatchEvent(new Event('change'));
+    expect(gpuControl.hidden).toBe(true);
+    expect(cpuControl.hidden).toBe(false);
     expect(controls.querySelector('#replay-start')!.textContent).toBe('Replay');
     expect(controls.querySelector('#replay-play')!.textContent).toBe('Play');
     expect(plot.shadowRoot!.querySelector('details')).toBeNull();
   });
 
-  it.each(['', '0.01', '6'])('reports invalid resolution %j without replacing the completed stock', async (value) => {
+  it.each([NaN, 0.01, 6])('reports invalid resolution %j without replacing the completed stock', async (value) => {
     const { worker } = await readyReplay();
     const stock = plot.scene!.children.find((child) => child.name === 'machined-stock');
     const calls = vi.mocked(worker.postMessage).mock.calls.length;
     const resolution = plot.shadowRoot!.querySelector<HTMLInputElement>('#removal-resolution')!;
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
-    resolution.value = value;
+    const spy = vi.spyOn(resolution, 'valueAsNumber', 'get').mockReturnValue(value);
     resolution.dispatchEvent(new Event('change'));
+    spy.mockRestore();
     expect(plot.shadowRoot!.getElementById('material-removal-status')!.textContent)
       .toBe('\u26d4');
     expect(error).toHaveBeenCalledWith(expect.stringContaining('Material removal unavailable'));

@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import type { ChannelId, PlotMetadata, PoseSample } from '@core/types';
+import type { ChannelId, PlotMetadata, PlotSegment, PoseSample } from '@core/types';
 import type { PlotRunInput } from './PlotRunSnapshot';
 import type { DeepReadonly, ProgramMaterialDefinition } from './SimulationMetadata';
 import { MetadataValidationError } from './SimulationMetadata';
@@ -175,7 +175,32 @@ export function prepareMaterialRemoval(
   );
   const cutters = new Map<string, CuttingToolModel>();
   const capturedTools = new Map([...tools].map(([id, tool]) => [id, structuredClone(tool)]));
-  const rawStop = metadata.removalStops?.find((stop) => stop.channelId === channelIds[0]);
+  const hasSelectedToolId = (toolNumber: PlotSegment['toolNumber']): boolean =>
+    toolNumber !== undefined &&
+    toolNumber !== null &&
+    toolNumber !== 'unknown' &&
+    toolNumber !== 0 &&
+    toolNumber !== '0' &&
+    toolNumber !== '';
+  const firstToolSegment = metadata.segments.find((segment) =>
+    hasSelectedToolId(segment.toolNumber),
+  );
+  const hasPreToolSegments =
+    firstToolSegment !== undefined &&
+    metadata.segments.some(
+      (segment) =>
+        !hasSelectedToolId(segment.toolNumber) &&
+        (segment.sourceSegmentIndex ?? Infinity) <
+          (firstToolSegment.sourceSegmentIndex ?? Infinity),
+    );
+  const firstToolSourceSegmentIndex = hasPreToolSegments
+    ? (firstToolSegment?.sourceSegmentIndex ?? 0)
+    : 0;
+  const rawStop = metadata.removalStops?.find(
+    (stop) =>
+      stop.channelId === channelIds[0] &&
+      stop.sourceSegmentIndex >= firstToolSourceSegmentIndex,
+  );
   const stopAt = (
     code: MaterialRemovalDiagnostic['code'],
     message: string,
@@ -184,7 +209,11 @@ export function prepareMaterialRemoval(
     add(code, message);
     simulation.stop = { ...stop, message };
   };
+  let hasSelectedTool = false;
   for (const segment of metadata.segments) {
+    if (hasSelectedToolId(segment.toolNumber)) {
+      hasSelectedTool = true;
+    }
     if (rawStop && (segment.sourceSegmentIndex ?? Infinity) > rawStop.sourceSegmentIndex) {
       stopAt('unsupported-operation', rawStop.message, {
         executionStep: rawStop.executionStep ?? undefined,
@@ -193,7 +222,12 @@ export function prepareMaterialRemoval(
       });
       break;
     }
-    if (segment.type === 'rapid') continue;
+    const isNoToolActive =
+      !hasSelectedTool ||
+      segment.toolNumber === 'unknown' ||
+      segment.toolNumber === 0 ||
+      segment.toolNumber === '0';
+    if (segment.type === 'rapid' || isNoToolActive) continue;
     const context = {
       executionStep: segment.executionStep ?? undefined,
       lineNumber: segment.startPoint.lineNumber,

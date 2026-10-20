@@ -348,16 +348,29 @@ export class NCToolpathPlot extends HTMLElement {
       cpuRes.max = String(this.simulationConfig.cpuResolutionMm.max);
       if (applyDefaults) cpuRes.value = String(this.simulationConfig.cpuResolutionMm.default);
     }
-    const memory = this.shadowRoot?.querySelector<HTMLInputElement>('#stock-memory-limit');
-    if (memory && applyDefaults) memory.value = String(this.simulationConfig.stockMemoryMiB);
+    this.syncResolutionLabels();
+    this.updateResolutionControlVisibility();
+  }
+
+  private syncResolutionLabels(): void {
+    const gpuPitch = this.shadowRoot?.querySelector<HTMLInputElement>('#gpu-fine-resolution');
+    const gpuValue = this.shadowRoot?.getElementById('gpu-fine-resolution-value');
+    if (gpuPitch && gpuValue) gpuValue.textContent = `${gpuPitch.value} mm`;
+    const cpuRes = this.shadowRoot?.querySelector<HTMLInputElement>('#removal-resolution');
+    const cpuValue = this.shadowRoot?.getElementById('removal-resolution-value');
+    if (cpuRes && cpuValue) cpuValue.textContent = `${cpuRes.value} mm`;
+  }
+
+  private updateResolutionControlVisibility(): void {
+    const gpuSelected = Boolean(this.shadowRoot?.querySelector<HTMLInputElement>('#gpu-stock')?.checked);
+    const gpuControl = this.shadowRoot?.getElementById('gpu-resolution-control');
+    const cpuControl = this.shadowRoot?.getElementById('cpu-resolution-control');
+    if (gpuControl) gpuControl.hidden = !gpuSelected;
+    if (cpuControl) cpuControl.hidden = gpuSelected;
   }
 
   private getConfiguredStockMemoryBytes(): number {
-    const field = this.shadowRoot?.querySelector<HTMLInputElement>('#stock-memory-limit');
-    const mib = field && Number.isFinite(field.valueAsNumber) && field.valueAsNumber >= 16
-      ? field.valueAsNumber
-      : this.simulationConfig.stockMemoryMiB;
-    return Math.round(mib * 1024 * 1024);
+    return Math.round(this.simulationConfig.stockMemoryMiB * 1024 * 1024);
   }
 
   private createStockSurfaceMaterial(): THREE.Material {
@@ -403,6 +416,7 @@ export class NCToolpathPlot extends HTMLElement {
     const manual = input && this.stockBindingScope(input) === this.removalSetupScope
       ? this.removalSetup : input?.materialSimulation;
     resolution.value = String(manual?.resolutionMm ?? this.simulationConfig.cpuResolutionMm.default);
+    this.syncResolutionLabels();
   }
 
   private async changeRemovalResolution(): Promise<void> {
@@ -734,8 +748,10 @@ export class NCToolpathPlot extends HTMLElement {
     if (final) final.disabled = !available || !active || !this.replayPrepared;
     const resolution = this.shadowRoot?.querySelector<HTMLInputElement>('#removal-resolution');
     if (resolution) resolution.disabled = !available || this.replayBusy;
-    const memory = this.shadowRoot?.querySelector<HTMLInputElement>('#stock-memory-limit');
-    if (memory) memory.disabled = !available || this.replayBusy;
+    const gpuResolution = this.shadowRoot?.querySelector<HTMLInputElement>('#gpu-fine-resolution');
+    if (gpuResolution) gpuResolution.disabled = !available || this.replayBusy;
+    this.updateResolutionControlVisibility();
+    this.syncResolutionLabels();
     const progress = this.shadowRoot?.querySelector<HTMLProgressElement>('#simulation-progress');
     if (progress) {
       if (controls.hidden || !active || this.stale) progress.hidden = true;
@@ -1199,6 +1215,9 @@ export class NCToolpathPlot extends HTMLElement {
           align-items: center;
           gap: 4px;
         }
+        .simulation-controls label[hidden] {
+          display: none;
+        }
         .orbit-hint {
           position: absolute;
           bottom: 8px;
@@ -1316,9 +1335,8 @@ export class NCToolpathPlot extends HTMLElement {
           <div id="replay-status" role="status" style="max-height:60px;overflow:auto;margin-top:6px" hidden>Cursor following is automatic. Repeated source lines are separate executed occurrences.</div>
           <div id="stock-replay" class="simulation-controls" role="group" aria-label="Stock simulation controls" hidden>
             <label title="Experimental GPU simulation; unsupported operations explicitly fall back to CPU"><input id="gpu-stock" type="checkbox" checked> GPU progressive</label>
-            <label>GPU fine pitch (mm) <input id="gpu-fine-resolution" type="number" min="0.001" max="5" step="0.001" value="0.02" style="width:65px"></label>
-            <label>CPU resolution (mm) <input id="removal-resolution" type="number" min="0.05" max="5" step="0.05" value="0.05" style="width:65px" disabled></label>
-            <label>Memory (MiB) <input id="stock-memory-limit" type="number" min="16" max="2048" step="16" value="256" style="width:65px"></label>
+            <label id="gpu-resolution-control">GPU pitch <input id="gpu-fine-resolution" type="range" min="0.001" max="5" step="0.001" value="0.02" style="width:90px"> <span id="gpu-fine-resolution-value">0.02 mm</span></label>
+            <label id="cpu-resolution-control" hidden>CPU resolution <input id="removal-resolution" type="range" min="0.05" max="5" step="0.05" value="0.05" style="width:90px" disabled> <span id="removal-resolution-value">0.05 mm</span></label>
             <button class="plot-button" id="replay-start" disabled title="Return to initial stock">Replay</button>
             <button class="plot-button" id="replay-previous" disabled>Previous</button>
             <button class="plot-button" id="replay-play" aria-pressed="false" disabled>Play</button>
@@ -1369,8 +1387,15 @@ export class NCToolpathPlot extends HTMLElement {
 
     const materialButton = this.shadowRoot?.getElementById('toggle-material');
     materialButton?.addEventListener('click', () => this.toggleMaterial());
-    this.shadowRoot?.getElementById('removal-resolution')?.addEventListener('change', () => void this.changeRemovalResolution());
-    for (const id of ['gpu-stock', 'gpu-fine-resolution', 'stock-memory-limit']) this.shadowRoot?.getElementById(id)?.addEventListener('change', () => {
+    this.shadowRoot?.getElementById('removal-resolution')?.addEventListener('input', () => this.syncResolutionLabels());
+    this.shadowRoot?.getElementById('removal-resolution')?.addEventListener('change', () => {
+      this.syncResolutionLabels();
+      void this.changeRemovalResolution();
+    });
+    this.shadowRoot?.getElementById('gpu-fine-resolution')?.addEventListener('input', () => this.syncResolutionLabels());
+    for (const id of ['gpu-stock', 'gpu-fine-resolution']) this.shadowRoot?.getElementById(id)?.addEventListener('change', () => {
+      this.updateResolutionControlVisibility();
+      this.syncResolutionLabels();
       const preparation = this.removalPreparation;
       if (preparation && !this.stale) void this.startMaterialRemoval(preparation);
     });

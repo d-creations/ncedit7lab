@@ -16,18 +16,33 @@ PATH_DIR_CANDIDATES = {
     3: ("PATH3", "P3", "CH3"),
 }
 ALLOWED_SUFFIXES = {"", ".mpf", ".spf", ".nc", ".txt", ".p1", ".p2", ".p3", ".pa", ".eia", ".min", ".m", ".s"}
+MAX_PROGRAM_FILE_BYTES = 10 * 1024 * 1024
+DRIVE_ONLY_RE = re.compile(r"^[A-Za-z]:$")
 
 
 class UsbTransferClient(ProtocolClient):
     def __init__(self):
         self.root_path: Optional[Path] = None
 
+    @staticmethod
+    def _normalize_usb_path(raw_path: str) -> Path:
+        cleaned = raw_path.strip().strip('"').strip("'")
+        if DRIVE_ONLY_RE.match(cleaned):
+            cleaned = f"{cleaned}/"
+        return Path(cleaned).expanduser()
+
     def connect(self, ip: str, port: Optional[int] = None, timeout: int = 10, **kwargs) -> bool:
         if not ip or ip.strip() == "" or ip == "DEMO":
              raise TransferError(USB_ERROR, "Please enter or select a valid local folder path.", "invalid path")
-             
-        root_path = Path(ip).expanduser()
-        if not root_path.exists() or not root_path.is_dir():
+
+        try:
+            root_path = self._normalize_usb_path(ip)
+            exists_and_dir = root_path.exists() and root_path.is_dir()
+        except OSError as exc:
+            self.root_path = None
+            raise TransferError(USB_ERROR, f"USB Path '{ip}' cannot be accessed: {exc}", "invalid path") from exc
+
+        if not exists_and_dir:
             self.root_path = None
             raise TransferError(USB_ERROR, f"USB Path '{ip}' does not exist or is not a directory.", "invalid path")
         self.root_path = root_path
@@ -65,7 +80,10 @@ class UsbTransferClient(ProtocolClient):
             # Legacy fallback
             ext = f"P{path_no}" if path_no > 0 else "PA"
             target_file = storage_dir / f"O{program_number:04d}.{ext}"
-        target_file.write_text(normalized, encoding="utf-8", newline="\n")
+        try:
+            target_file.write_text(normalized, encoding="utf-8", newline="\n")
+        except OSError as exc:
+            raise TransferError(USB_ERROR, f"Failed to write program to '{target_file}': {exc}", "write error") from exc
 
     def upload_program(self, prog_num: int, path_no: int = 0, file_extensions: Optional[List[str]] = None) -> str:
         storage_dir = self._get_storage_dir(path_no or 1)
@@ -83,8 +101,8 @@ class UsbTransferClient(ProtocolClient):
         programs: List[Dict[str, Any]] = []
         seen_numbers = set()
         for storage_dir in storage_dirs:
-            for file_path in sorted(storage_dir.iterdir()):
-                if not file_path.is_file() or file_path.suffix.lower() not in ALLOWED_SUFFIXES:
+            for file_path in self._iter_storage_files(storage_dir):
+                if file_path.suffix.lower() not in ALLOWED_SUFFIXES:
                     continue
                 if allowed_suffixes is not None and file_path.suffix.lower() not in allowed_suffixes:
                     continue
@@ -103,6 +121,22 @@ class UsbTransferClient(ProtocolClient):
 
         return sorted(programs, key=lambda item: item["number"])
 
+    @staticmethod
+    def _iter_storage_files(storage_dir: Path) -> List[Path]:
+        try:
+            entries = sorted(storage_dir.iterdir(), key=lambda p: p.name.lower())
+        except OSError:
+            return []
+
+        files: List[Path] = []
+        for entry in entries:
+            try:
+                if entry.is_file():
+                    files.append(entry)
+            except OSError:
+                continue
+        return files
+
     def _get_list_dirs(self, path_no: int) -> List[Path]:
         return [self._require_root_path()]
 
@@ -118,8 +152,8 @@ class UsbTransferClient(ProtocolClient):
         configured_extensions = self._normalize_extensions(file_extensions)
         preferred_extensions = list(configured_extensions) if configured_extensions is not None else [f".p{path_no}".lower()]
         fallback_entry = None
-        for file_path in sorted(storage_dir.iterdir()):
-            if not file_path.is_file() or file_path.suffix.lower() not in ALLOWED_SUFFIXES:
+        for file_path in self._iter_storage_files(storage_dir):
+            if file_path.suffix.lower() not in ALLOWED_SUFFIXES:
                 continue
             program_entry = self._parse_program_file(file_path)
             if program_entry and program_entry["number"] == prog_num:
@@ -137,9 +171,15 @@ class UsbTransferClient(ProtocolClient):
 
     def _parse_program_file(self, file_path: Path) -> Optional[Dict[str, Any]]:
         try:
-            program_text = file_path.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            program_text = file_path.read_text(encoding="latin-1")
+            stat = file_path.stat()
+            if stat.st_size > MAX_PROGRAM_FILE_BYTES:
+                return None
+            try:
+                program_text = file_path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                program_text = file_path.read_text(encoding="latin-1")
+        except OSError:
+            return None
 
         normalized = self._normalize_program_text(program_text)
         number = self._extract_program_number(normalized)

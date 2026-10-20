@@ -113,3 +113,31 @@ def test_usb_transfer_rejects_missing_root(tmp_path):
 
     with pytest.raises(TransferError, match="does not exist or is not a directory"):
         client.connect(str(tmp_path / "missing"))
+
+
+def test_usb_transfer_normalizes_drive_only_path():
+    normalized = UsbTransferClient._normalize_usb_path("D:")
+    assert str(normalized) in ("D:\\", "D:/")
+
+
+def test_usb_transfer_skips_unreadable_entries(tmp_path, monkeypatch):
+    root = tmp_path / "usb"
+    root.mkdir()
+    good_file = root / "O1234.P1"
+    bad_file = root / "O9999.P1"
+    good_file.write_text("O1234\n(GOOD)\nM30\n", encoding="utf-8")
+    bad_file.write_text("O9999\n(LOCKED)\nM30\n", encoding="utf-8")
+
+    original_read_text = type(good_file).read_text
+
+    def patched_read_text(self, *args, **kwargs):
+        if self.name == "O9999.P1":
+            raise PermissionError("Access is denied")
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(good_file), "read_text", patched_read_text)
+
+    client = UsbTransferClient()
+    assert client.connect(str(root)) is True
+    programs = client.list_programs(1)
+    assert [p["number"] for p in programs] == [1234]

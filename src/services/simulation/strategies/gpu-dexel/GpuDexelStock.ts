@@ -488,9 +488,98 @@ fn gpuTraceDexels(origin: vec3f, surface: vec3f, size: vec3f, dims: vec3f, capac
   var t = max(0.0, max(low.x, max(low.y, low.z))); let end = min(high.x, min(high.y, high.z));
   if (t > end) { return vec4f(0.0); }
   let h = size / dims; let epsilon = min(h.x, min(h.y, h.z)) * 0.0001;
-  for (var iteration = 0u; iteration < 2048u; iteration++) {
+  let header = gpuRayCount(dims) / 1024u;
+  let slabs = dexelTileSweeps.value[header];
+  var prevT = t;
+  var lastStride = 1.0;
+  var fineSteps = 0u;
+  for (var iteration = 0u; iteration < 4096u; iteration++) {
     if (t + epsilon >= end) { return vec4f(0.0); }
     let p = origin + direction * (t + epsilon);
+    // Milling/drilling only subtracts from the rotational base; outside the turned envelope is always empty.
+    if (slabs > 0u) {
+      var first = 0u; var last = slabs;
+      loop {
+        if (first >= last) { break; }
+        let mid = first + (last - first) / 2u;
+        let upper = bitcast<f32>(dexelTileSweeps.value[header + 2u + mid * 4u]);
+        if (upper <= p.z) { first = mid + 1u; } else { last = mid; }
+      }
+      var maxR = 0.0; var slabBound = select(-size.z * 0.5, size.z * 0.5, direction.z > 0.0);
+      if (first < slabs) {
+        let table = header + 1u + first * 4u;
+        let za = bitcast<f32>(dexelTileSweeps.value[table]);
+        let zb = bitcast<f32>(dexelTileSweeps.value[table + 1u]);
+        if (p.z < za) {
+          slabBound = select(-size.z * 0.5, za, direction.z > 0.0);
+        } else {
+          slabBound = select(za, zb, direction.z > 0.0);
+          let bands = dexelTileSweeps.value[table + 3u];
+          for (var b = 0u; b < bands; b++) {
+            let index = header + dexelTileSweeps.value[table + 2u] + b * 4u;
+            let upper = vec2f(bitcast<f32>(dexelTileSweeps.value[index + 2u]), bitcast<f32>(dexelTileSweeps.value[index + 3u]));
+            maxR = max(maxR, max(0.0, max(upper.x * za + upper.y, upper.x * zb + upper.y)));
+          }
+        }
+      } else if (direction.z < 0.0) {
+        slabBound = bitcast<f32>(dexelTileSweeps.value[header + 2u + (slabs - 1u) * 4u]);
+      }
+      var slabSkip = end - t;
+      if (abs(direction.z) >= 1e-15) {
+        let dz = (slabBound - p.z) / direction.z + epsilon;
+        if (dz > 0.0) { slabSkip = min(slabSkip, dz); }
+      }
+      if (maxR <= 0.0) {
+        t += max(slabSkip, epsilon);
+        prevT = t;
+        lastStride = 1.0;
+        fineSteps = 0u;
+        continue;
+      }
+      let paddedR = maxR + max(h.x, h.y);
+      let r2xy = dot(p.xy, p.xy);
+      if (r2xy > paddedR * paddedR) {
+        var cylSkip = slabSkip;
+        let a = dot(direction.xy, direction.xy);
+        let halfB = dot(p.xy, direction.xy);
+        let c = r2xy - paddedR * paddedR;
+        if (a > 1e-15) {
+          if (halfB < 0.0) {
+            let disc = halfB * halfB - a * c;
+            if (disc >= 0.0) {
+              let hit = (-halfB - sqrt(disc)) / a + epsilon;
+              if (hit > 0.0) { cylSkip = min(cylSkip, hit); }
+            }
+          }
+        }
+        t += max(cylSkip, epsilon);
+        prevT = t;
+        lastStride = 1.0;
+        fineSteps = 0u;
+        continue;
+      }
+    } else if (cylinder != 0u) {
+      let paddedR = size.x * 0.5 + max(h.x, h.y);
+      let r2xy = dot(p.xy, p.xy);
+      if (r2xy > paddedR * paddedR) {
+        var cylSkip = end - t;
+        let a = dot(direction.xy, direction.xy);
+        let halfB = dot(p.xy, direction.xy);
+        let c = r2xy - paddedR * paddedR;
+        if (a > 1e-15 && halfB < 0.0) {
+          let disc = halfB * halfB - a * c;
+          if (disc >= 0.0) {
+            let hit = (-halfB - sqrt(disc)) / a + epsilon;
+            if (hit > 0.0) { cylSkip = min(cylSkip, hit); }
+          }
+        }
+        t += max(cylSkip, epsilon);
+        prevT = t;
+        lastStride = 1.0;
+        fineSteps = 0u;
+        continue;
+      }
+    }
     let clamped = clamp(p, -size * 0.5, size * 0.5);
     let cell = floor((p + size * 0.5) / h);
     let r0 = gpuRayIndex(clamped, 0u, size, dims);
@@ -501,8 +590,6 @@ fn gpuTraceDexels(origin: vec3f, surface: vec3f, size: vec3f, dims: vec3f, capac
     let s2 = dexelTileSweeps.value[r2 / 1024u];
     var occupied = true; var safeSkip = 0.0;
     if (s0 == 0xffffffffu && s1 == 0xffffffffu && s2 == 0xffffffffu) {
-      let header = gpuRayCount(dims) / 1024u;
-      let slabs = dexelTileSweeps.value[header];
       var zRayCenter = vec3f(-size.x * 0.5 + (clamp(cell.x, 0.0, dims.x - 1.0) + 0.5) * h.x,
                              -size.y * 0.5 + (clamp(cell.y, 0.0, dims.y - 1.0) + 0.5) * h.y, 0.0);
       let xRayCenter = vec3f(0.0, -size.y * 0.5 + (clamp(cell.y, 0.0, dims.y - 1.0) + 0.5) * h.y,
@@ -563,86 +650,34 @@ fn gpuTraceDexels(origin: vec3f, surface: vec3f, size: vec3f, dims: vec3f, capac
         }
       }
       if (!occupied) {
-        var tileSkip = end - t;
-        for (var a = 0u; a < 3u; a++) {
-          if (abs(direction[a]) < 1e-15) { continue; }
-          let tileCell = floor(clamp(cell[a], 0.0, dims[a] - 1.0) / 32.0) * 32.0;
-          let tileBound = -size[a] * 0.5 + (tileCell + select(0.0, 32.0, direction[a] > 0.0)) * h[a];
-          tileSkip = min(tileSkip, (tileBound - p[a]) / direction[a] + epsilon);
-        }
-        if (slabs > 0u) {
-          var first = 0u; var last = slabs;
-          loop {
-            if (first >= last) { break; }
-            let mid = first + (last - first) / 2u;
-            let upper = bitcast<f32>(dexelTileSweeps.value[header + 2u + mid * 4u]);
-            if (upper <= p.z) { first = mid + 1u; } else { last = mid; }
+        if (slabs == 0u && cylinder == 0u) {
+          var tileSkip = end - t;
+          for (var a = 0u; a < 3u; a++) {
+            if (abs(direction[a]) < 1e-15) { continue; }
+            let tileCell = floor(clamp(cell[a], 0.0, dims[a] - 1.0) / 32.0) * 32.0;
+            let tileBound = -size[a] * 0.5 + (tileCell + select(0.0, 32.0, direction[a] > 0.0)) * h[a];
+            tileSkip = min(tileSkip, (tileBound - p[a]) / direction[a] + epsilon);
           }
-          var maxR = 0.0; var slabBound = select(-size.z * 0.5, size.z * 0.5, direction.z > 0.0);
-          if (first < slabs) {
-            let table = header + 1u + first * 4u;
-            let za = bitcast<f32>(dexelTileSweeps.value[table]);
-            let zb = bitcast<f32>(dexelTileSweeps.value[table + 1u]);
-            if (p.z < za) {
-              slabBound = select(-size.z * 0.5, za, direction.z > 0.0);
-            } else {
-              slabBound = select(za, zb, direction.z > 0.0);
-              let bands = dexelTileSweeps.value[table + 3u];
-              for (var b = 0u; b < bands; b++) {
-                let index = header + dexelTileSweeps.value[table + 2u] + b * 4u;
-                let upper = vec2f(bitcast<f32>(dexelTileSweeps.value[index + 2u]), bitcast<f32>(dexelTileSweeps.value[index + 3u]));
-                maxR = max(maxR, max(0.0, max(upper.x * za + upper.y, upper.x * zb + upper.y)));
-              }
-            }
-          } else if (direction.z < 0.0) {
-            slabBound = bitcast<f32>(dexelTileSweeps.value[header + 2u + (slabs - 1u) * 4u]);
-          }
-          let paddedR = maxR + max(h.x, h.y);
-          let r2xy = dot(p.xy, p.xy);
-          if (r2xy > paddedR * paddedR) {
-            var cylSkip = end - t;
-            if (abs(direction.z) >= 1e-15) {
-              cylSkip = min(cylSkip, (slabBound - p.z) / direction.z + epsilon);
-            }
-            let a = dot(direction.xy, direction.xy);
-            let halfB = dot(p.xy, direction.xy);
-            let c = r2xy - paddedR * paddedR;
-            if (a > 1e-15 && halfB < 0.0) {
-              let disc = halfB * halfB - a * c;
-              if (disc >= 0.0) {
-                let hit = (-halfB - sqrt(disc)) / a;
-                if (hit > 0.0) { cylSkip = min(cylSkip, hit); }
-              }
-            }
-            safeSkip = max(safeSkip, min(tileSkip, cylSkip));
-          }
-        } else if (cylinder != 0u) {
-          let paddedR = size.x * 0.5 + max(h.x, h.y);
-          let r2xy = dot(p.xy, p.xy);
-          if (r2xy > paddedR * paddedR) {
-            var cylSkip = end - t;
-            let a = dot(direction.xy, direction.xy);
-            let halfB = dot(p.xy, direction.xy);
-            let c = r2xy - paddedR * paddedR;
-            if (a > 1e-15 && halfB < 0.0) {
-              let disc = halfB * halfB - a * c;
-              if (disc >= 0.0) {
-                let hit = (-halfB - sqrt(disc)) / a;
-                if (hit > 0.0) { cylSkip = min(cylSkip, hit); }
-              }
-            }
-            safeSkip = max(safeSkip, min(tileSkip, cylSkip));
-          }
-        } else {
           safeSkip = max(safeSkip, tileSkip);
         }
+        prevT = t;
+        lastStride = 1.0;
         t += max(safeSkip, epsilon);
         continue;
       }
+      if (lastStride > 1.0) {
+        t = prevT;
+        lastStride = 1.0;
+        fineSteps = 8u;
+        continue;
+      }
+      return vec4f(p, 1.0);
     }
+    let posStep = select(6.0, 1.0, fineSteps > 0u);
+    let negStep = select(-5.0, 0.0, fineSteps > 0u);
     for (var axis = 0u; axis < 3u; axis++) {
       let ray = select(select(r0, r1, axis == 1u), r2, axis == 2u);
-      if (axis == 2u && s2 == 0xffffffffu) { continue; }
+      if (axis == 2u && s2 == 0xffffffffu && slabs > 0u) { continue; }
       var inMaterial = false; var entry = end - t;
       var spans: array<vec2f, 64>;
       let count = gpuDexelIntervals(ray, size, dims, capacity, cylinder, &spans);
@@ -659,16 +694,31 @@ fn gpuTraceDexels(origin: vec3f, surface: vec3f, size: vec3f, dims: vec3f, capac
         // This ray proves empty material until its next interval or transverse column boundary.
         for (var transverse = 0u; transverse < 3u; transverse++) {
           if (transverse == axis || abs(direction[transverse]) < 1e-15) { continue; }
-          let grid = -size[transverse] * 0.5 + (cell[transverse] + select(0.0, 1.0, direction[transverse] > 0.0)) * h[transverse];
+          let grid = -size[transverse] * 0.5 + (cell[transverse] + select(negStep, posStep, direction[transverse] > 0.0)) * h[transverse];
           entry = min(entry, (grid - p[transverse]) / direction[transverse] + epsilon);
         }
         safeSkip = max(safeSkip, entry);
       }
     }
-    if (occupied) { return vec4f(p, 1.0); }
+    if (occupied) {
+      if (lastStride > 1.0) {
+        t = prevT;
+        lastStride = 1.0;
+        fineSteps = 8u;
+        continue;
+      }
+      return vec4f(p, 1.0);
+    }
+    prevT = t;
+    if (fineSteps > 0u) {
+      fineSteps--;
+      lastStride = 1.0;
+    } else {
+      lastStride = 6.0;
+    }
     t += max(safeSkip, epsilon);
   }
-    return vec4f(origin + direction * min(t, end), -1.0);
+  return vec4f(0.0);
 }
 `;
 

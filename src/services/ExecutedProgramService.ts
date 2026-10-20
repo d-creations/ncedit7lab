@@ -502,9 +502,15 @@ export class ExecutedProgramService {
                 });
               }
             } else if (
-              segment.traversal?.toUpperCase() !== 'RAPID' ||
-              segment.geometry?.toUpperCase() !== 'LINEAR' ||
-              (segment.sourceCode && !/^G0?0$/i.test(segment.sourceCode))
+              segment.toolNumber !== 'unknown' &&
+              segment.toolNumber !== 0 &&
+              segment.toolNumber !== '0' &&
+              !/^\s*(?:N\d+\s*)?G266\b/i.test(
+                (sourceLines?.[(segment.lineNumber ?? 0) - 1] ?? '').replace(/\([^()]*\)/g, ' '),
+              ) &&
+              (segment.traversal?.toUpperCase() !== 'RAPID' ||
+                segment.geometry?.toUpperCase() !== 'LINEAR' ||
+                (segment.sourceCode && !/^G0?0$/i.test(segment.sourceCode)))
             ) {
               (result.plotMetadata!.removalStops ??= []).push({
                 channelId: canalNr as ChannelId, sourceSegmentIndex,

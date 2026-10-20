@@ -323,4 +323,41 @@ describe('material removal prerequisites', () => {
     expect(result.simulation?.motions).toHaveLength(1);
     expect(result.simulation?.motions[0].mode).toBe('milling');
   });
+
+  it('skips G0 and G1 motions at the head of the program before the first tool is selected without error', () => {
+    const headRapid = move({
+      type: 'rapid',
+      toolNumber: 'unknown',
+      machiningMode: 'unknown',
+      executionStep: 0,
+      sourceSegmentIndex: 0,
+      poses: undefined,
+    });
+    const headFeed = move({
+      type: 'feed',
+      toolNumber: 'unknown',
+      machiningMode: 'turning',
+      sourceCode: 'G01',
+      executionStep: 1,
+      sourceSegmentIndex: 1,
+      poses: undefined,
+    });
+    const firstToolCut = move({
+      type: 'feed',
+      toolNumber: '1',
+      machiningMode: 'milling',
+      sourceCode: 'G01',
+      executionStep: 2,
+      sourceSegmentIndex: 2,
+    });
+    const result = prepareMaterialRemoval(
+      [input('1', stock)],
+      metadata(headRapid, headFeed, firstToolCut),
+      setup,
+    );
+    expect(result.status).toBe('ready');
+    expect(result.simulation?.stop).toBeUndefined();
+    expect(result.simulation?.motions).toHaveLength(1);
+    expect(result.simulation?.motions[0].executionStep).toBe(2);
+  });
 });

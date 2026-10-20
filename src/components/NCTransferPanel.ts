@@ -79,12 +79,12 @@ export class NCTransferPanel extends HTMLElement {
         if (message.type === 'DO_TRANSFER_UPLOAD') {
             this.uploadDroppedFile(message.content, message.pathId);
         } else if (message.type === 'USB_DIRECTORY_SELECTED') {
+            this.ipAddress = message.path;
             const ipInput = this.shadowRoot?.getElementById('ip-address') as HTMLInputElement;
             if (ipInput) {
                 ipInput.value = message.path;
-                this.ipAddress = message.path;
             }
-            this.handleConnect();
+            void this.handleConnect(message.path);
         }
     });
   }
@@ -98,12 +98,19 @@ export class NCTransferPanel extends HTMLElement {
   private applyTransferConfig(cfg: Awaited<ReturnType<IConfigService['getConfig']>>) {
     this.transferClient = TransferProtocolFactory.create(cfg.transferProtocol || 'none', this.backend, cfg.transferDriverPath);
     this.transferProtocol = cfg.transferProtocol || 'none';
-    this.ipAddress = cfg.transferDefaultIp || (String(this.transferProtocol).toLowerCase() === 'usb' ? '' : '192.168.1.1');
+    const configuredIp = cfg.transferDefaultIp || (String(this.transferProtocol).toLowerCase() === 'usb' ? '' : '192.168.1.1');
+    if (configuredIp || !this.ipAddress) {
+      this.ipAddress = configuredIp;
+    }
   }
 
-  private async handleConnect() {
+  private async handleConnect(addressOverride?: string) {
     const ipInput = this.shadowRoot?.getElementById('ip-address') as HTMLInputElement;
-    if (ipInput) this.ipAddress = ipInput.value;
+    if (typeof addressOverride === 'string' && addressOverride.trim()) {
+      this.ipAddress = addressOverride;
+    } else if (ipInput) {
+      this.ipAddress = ipInput.value;
+    }
 
     try {
       this.loading = true;
@@ -160,7 +167,11 @@ export class NCTransferPanel extends HTMLElement {
   private getCurrentMachineFileExtensions(): FileExtensionConfig | undefined {
     const { globalMachine } = this.stateService.getState();
     if (!globalMachine) return undefined;
-    return this.machineService.getMachine(globalMachine)?.fileExtensions;
+    const ext = this.machineService.getMachine(globalMachine)?.fileExtensions;
+    if (!ext || typeof ext.multifile !== 'boolean' || !ext.channels || typeof ext.channels !== 'object') {
+      return undefined;
+    }
+    return ext;
   }
 
   /**
@@ -197,14 +208,14 @@ export class NCTransferPanel extends HTMLElement {
   private getChannelFileExtension(channelNo: number): string {
     const ext = this.getCurrentMachineFileExtensions();
     if (!ext) return `.P${channelNo}`;
-    const channelExts = ext.channels[channelNo.toString()];
-    if (!channelExts || channelExts.length === 0) return ext.main[0] ?? '';
+    const channelExts = ext.channels?.[channelNo.toString()];
+    if (!channelExts || channelExts.length === 0) return ext.main?.[0] ?? '';
     // Prefer non-empty extension; "" means no extension (bare filename)
     return channelExts.find(e => e !== '') ?? channelExts[0] ?? '';
   }
 
   private getChannelFileExtensions(channelNo: number): string[] | undefined {
-    return this.getCurrentMachineFileExtensions()?.channels[channelNo.toString()];
+    return this.getCurrentMachineFileExtensions()?.channels?.[channelNo.toString()];
   }
 
   /** Returns the file extension used for PA (multi-channel assembly) programs. */
@@ -224,8 +235,8 @@ export class NCTransferPanel extends HTMLElement {
 
     const config = this.getCurrentMachineFileExtensions();
     const normalizedExtension = extension.toLowerCase();
-    const isMain = config?.main.some(item => item.toLowerCase() === normalizedExtension);
-    const isSub = config?.subprogram.some(item => item.toLowerCase() === normalizedExtension);
+    const isMain = config?.main?.some(item => item.toLowerCase() === normalizedExtension);
+    const isSub = config?.subprogram?.some(item => item.toLowerCase() === normalizedExtension);
     const role = isMain ? ' Main' : isSub ? ' Sub' : '';
     const extensionLabel = extension || 'no ext';
     return `${channelLabel}${role} (${extensionLabel})`;

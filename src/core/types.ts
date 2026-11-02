@@ -476,6 +476,8 @@ export interface TransferProgram {
   length: number;
   comment: string;
   file_extension?: string;
+  is_multipath?: boolean;
+  channels?: number[];
 }
 
 export interface TransferListResponse {

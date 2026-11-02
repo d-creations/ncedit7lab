@@ -14,12 +14,9 @@ import type { TransferProgram, FileExtensionConfig } from '@core/types';
 interface GroupedProgram {
   number: number;
   comment: string;
-  paths: {
-    1?: TransferProgram;
-    2?: TransferProgram;
-    3?: TransferProgram;
-  };
-  isPA: boolean; // Indicates if it exists on multiple paths identically
+  paths: Record<number, TransferProgram>;
+  containerProgram?: TransferProgram;
+  isPA: boolean; // Indicates if it exists on multiple paths or is a multipath container
 }
 
 export class NCTransferPanel extends HTMLElement {
@@ -228,15 +225,15 @@ export class NCTransferPanel extends HTMLElement {
    * Returns a channel-first label so filename conventions do not obscure the CNC path.
    * e.g. ".M" -> "P1 Main (.M)", ".S" -> "P2 Sub (.S)", ".p-2" -> "P2 (.p-2)".
    */
-  private getChannelLabel(channelNo: number): string {
-    const extension = this.getChannelFileExtension(channelNo);
+  private getChannelLabel(channelNo: number, sourceExtension?: string): string {
+    const extension = sourceExtension !== undefined ? sourceExtension : this.getChannelFileExtension(channelNo);
     const channelLabel = `P${channelNo}`;
     if (extension.toLowerCase() === `.p${channelNo}`) return channelLabel;
 
     const config = this.getCurrentMachineFileExtensions();
     const normalizedExtension = extension.toLowerCase();
-    const isMain = config?.main?.some(item => item.toLowerCase() === normalizedExtension);
-    const isSub = config?.subprogram?.some(item => item.toLowerCase() === normalizedExtension);
+    const isMain = config?.main?.some(item => item.toLowerCase() === normalizedExtension) || normalizedExtension === '.m';
+    const isSub = config?.subprogram?.some(item => item.toLowerCase() === normalizedExtension) || normalizedExtension === '.s';
     const role = isMain ? ' Main' : isSub ? ' Sub' : '';
     const extensionLabel = extension || 'no ext';
     return `${channelLabel}${role} (${extensionLabel})`;
@@ -244,20 +241,130 @@ export class NCTransferPanel extends HTMLElement {
 
   /** Build a save-file name for a channel program, preserving its USB source extension when available. */
   private buildChannelFileName(progNum: number, channelNo: number, sourceExtension?: string): string {
-    const ext = sourceExtension ?? this.getChannelFileExtension(channelNo);
+    const ext = sourceExtension !== undefined ? sourceExtension : this.getChannelFileExtension(channelNo);
     return `O${progNum.toString().padStart(4, '0')}${ext}`;
   }
 
   /** Build a save-file name for a PA program, e.g. "O0001.PA". */
-  private buildPAFileName(progNum: number): string {
-    const ext = this.getPAFileExtension();
+  private buildPAFileName(progNum: number, sourceExtension?: string): string {
+    const ext = sourceExtension !== undefined ? sourceExtension : this.getPAFileExtension();
     return `O${progNum.toString().padStart(4, '0')}${ext}`;
+  }
+
+  /** Maps a USB program entry and its file extension to a channel number (or 0 for multipath container). */
+  private resolveUsbProgramChannel(prog: TransferProgram, existingPaths: Record<number, TransferProgram>): number {
+    const ext = (prog.file_extension ?? '').toLowerCase();
+    if (prog.is_multipath || ext === '.pa') {
+      return 0;
+    }
+
+    const pathMatch = ext.match(/^\.p-?(\d+)$/i);
+    if (pathMatch) {
+      return parseInt(pathMatch[1], 10);
+    }
+
+    const machineExts = this.getCurrentMachineFileExtensions();
+    if (machineExts?.channels) {
+      for (const [chKey, chExts] of Object.entries(machineExts.channels)) {
+        const chNum = parseInt(chKey, 10);
+        if (!isNaN(chNum) && chExts.some(item => item.toLowerCase() === ext)) {
+          return chNum;
+        }
+      }
+    }
+
+    if (ext === '.m') return 1;
+    if (ext === '.s') return 2;
+
+    if (!existingPaths[1]) return 1;
+    const maxCh = Math.max(1, ...Object.keys(existingPaths).map(Number));
+    return maxCh + 1;
+  }
+
+  private getGroupChannels(prog: GroupedProgram): number[] {
+    return Object.keys(prog.paths)
+      .map(Number)
+      .filter(n => !isNaN(n) && n > 0)
+      .sort((a, b) => a - b);
+  }
+
+  private splitMultipathChannels(content: string): Record<number, string> {
+    const tagRegex = /<\s*(?:(O[A-Za-z0-9_]+)\.)?P(\d+)\s*>/gi;
+    let match: RegExpExecArray | null;
+    let lastIndex = 0;
+    let lastPath = -1;
+    let lastProgramName = '';
+    const pathContents: Record<number, string> = {};
+
+    while ((match = tagRegex.exec(content)) !== null) {
+      if (lastPath !== -1) {
+        pathContents[lastPath] = this.normalizeExtractedChannelBlock(lastProgramName, content.substring(lastIndex, match.index));
+      }
+      lastProgramName = match[1] || '';
+      lastPath = parseInt(match[2], 10);
+      lastIndex = tagRegex.lastIndex;
+    }
+    if (lastPath !== -1) {
+      pathContents[lastPath] = this.normalizeExtractedChannelBlock(lastProgramName, content.substring(lastIndex));
+    }
+    return pathContents;
+  }
+
+  private normalizeExtractedChannelBlock(programName: string, rawBlock: string): string {
+    let clean = rawBlock.trim();
+    if (clean.endsWith('%')) clean = clean.slice(0, -1).trimEnd();
+    if (clean.startsWith('%')) clean = clean.slice(1).trimStart();
+    if (programName && !new RegExp(`^${programName}\\b`, 'i').test(clean)) {
+      clean = `${programName}\n${clean}`.trimEnd();
+    }
+    return `%\n${clean}\n%\n`;
   }
 
   private async fetchPrograms() {
     const paths = this.getSupportedPaths();
     const multifile = this.isMultifileSupported();
+    const isUsb = String(this.transferProtocol).toLowerCase() === 'usb';
     this.cncPrograms.clear();
+
+    if (isUsb) {
+      try {
+        const response = await this.transferClient.listPrograms(this.ipAddress, 0);
+        for (const prog of response) {
+          if (!this.cncPrograms.has(prog.number)) {
+            this.cncPrograms.set(prog.number, {
+              number: prog.number,
+              comment: prog.comment,
+              paths: {},
+              isPA: false
+            });
+          }
+
+          const group = this.cncPrograms.get(prog.number)!;
+          const channelNo = this.resolveUsbProgramChannel(prog, group.paths);
+          if (channelNo === 0) {
+            group.containerProgram = prog;
+            group.isPA = true;
+            for (const ch of prog.channels ?? []) {
+              if (!group.paths[ch]) {
+                group.paths[ch] = prog;
+              }
+            }
+          } else {
+            group.paths[channelNo] = prog;
+            if (Object.keys(group.paths).length > 1) {
+              group.isPA = true;
+            }
+          }
+
+          if (!group.comment && prog.comment) {
+            group.comment = prog.comment;
+          }
+        }
+      } catch (e) {
+        console.warn('Failed to list programs on USB storage', e);
+      }
+      return;
+    }
 
     for (const path of paths) {
       try {
@@ -273,8 +380,7 @@ export class NCTransferPanel extends HTMLElement {
           }
           
           const group = this.cncPrograms.get(prog.number)!;
-          // @ts-ignore
-          group.paths[path as keyof typeof group.paths] = prog;
+          group.paths[path] = prog;
           
           // A pull is combined when the program exists in multiple channels.
           group.isPA = multifile && Object.keys(group.paths).length > 1;
@@ -288,20 +394,65 @@ export class NCTransferPanel extends HTMLElement {
     }
   }
 
+  private getUploadExtensionsForProgram(progNum: number, pathNo: number): string[] | undefined {
+    if (String(this.transferProtocol).toLowerCase() === 'usb') {
+      const group = this.cncPrograms.get(progNum);
+      const entry = pathNo === 0 ? group?.containerProgram : group?.paths[pathNo];
+      if (entry && entry.file_extension !== undefined) {
+        return [entry.file_extension];
+      }
+    }
+    return pathNo > 0 ? this.getChannelFileExtensions(pathNo) : undefined;
+  }
+
   private async handleUpload(progNum: number, pathNo: string) {
     try {
+      const isUsb = String(this.transferProtocol).toLowerCase() === 'usb';
       if (pathNo === 'PA') {
         const prog = this.cncPrograms.get(progNum);
         if (!prog) return;
+
+        // If this is a single multipath container file on USB (e.g. .PA or extensionless with <O1234.P1> tags)
+        if (isUsb && prog.containerProgram && Object.keys(prog.paths).every(ch => prog.paths[Number(ch)] === prog.containerProgram)) {
+          const containerExt = prog.containerProgram.file_extension;
+          const resp = await this.transferClient.uploadProgram(
+            this.ipAddress,
+            0,
+            progNum,
+            undefined,
+            containerExt !== undefined ? [containerExt] : undefined
+          );
+          const splitBlocks = this.splitMultipathChannels(resp);
+          const channelNums = Object.keys(splitBlocks).map(Number).sort((a, b) => a - b);
+          if (channelNums.length > 0) {
+            for (const ch of channelNums) {
+              this.fileManager.updateActiveProgramContent(ch.toString(), splitBlocks[ch]);
+            }
+          } else {
+            this.fileManager.updateActiveProgramContent('1', resp);
+          }
+
+          const fileName = this.buildPAFileName(progNum, containerExt);
+          if ((window as any).vscodeApi) {
+            (window as any).vscodeApi.postMessage({
+              type: 'SAVE_TRANSFER_FILE',
+              fileName: fileName,
+              content: resp
+            });
+          }
+          alert(`Program O${progNum} (PA) uploaded successfully to workspace!`);
+          return;
+        }
 
         let combinedContent = "%\n";
         
         // Include header information (assuming prog.comment is available)
         combinedContent += `&F=/O${progNum.toString().padStart(4, '0')}(${prog.comment || 'PA_PROG'})/\n`;
 
-        for (const p of this.getSupportedPaths()) {
-            if (prog.paths[p as 1|2|3]) {
-                const resp = await this.transferClient.uploadProgram(this.ipAddress, p, progNum, undefined, this.getChannelFileExtensions(p));
+        const channelsToPull = isUsb ? this.getGroupChannels(prog) : this.getSupportedPaths();
+        for (const p of channelsToPull) {
+            if (prog.paths[p]) {
+                const resp = await this.transferClient.uploadProgram(this.ipAddress, p, progNum, undefined, this.getUploadExtensionsForProgram(progNum, p));
                 this.fileManager.updateActiveProgramContent(p.toString(), resp);
                 
                 // Format block with <> XML-like tags matching the specified standard
@@ -339,14 +490,22 @@ export class NCTransferPanel extends HTMLElement {
 
       } else {
         const pNum = parseInt(pathNo, 10);
-        const resp = await this.transferClient.uploadProgram(this.ipAddress, pNum, progNum, undefined, this.getChannelFileExtensions(pNum));
+        const resp = await this.transferClient.uploadProgram(this.ipAddress, pNum, progNum, undefined, this.getUploadExtensionsForProgram(progNum, pNum));
         
-        // Load into matching local channel
-        const channelId = pNum.toString();
-        this.fileManager.updateActiveProgramContent(channelId, resp);
+        // If the single file pulled from USB actually contains multipath <...P1>/<...P2> blocks, populate each channel
+        const splitBlocks = isUsb ? this.splitMultipathChannels(resp) : {};
+        const splitChannelNums = Object.keys(splitBlocks).map(Number).sort((a, b) => a - b);
+        if (splitChannelNums.length > 1) {
+          for (const ch of splitChannelNums) {
+            this.fileManager.updateActiveProgramContent(ch.toString(), splitBlocks[ch]);
+          }
+        } else {
+          const channelId = pNum.toString();
+          this.fileManager.updateActiveProgramContent(channelId, resp);
+        }
         
-        const sourceExtension = String(this.transferProtocol).toLowerCase() === 'usb'
-          ? this.cncPrograms.get(progNum)?.paths[pNum as 1 | 2 | 3]?.file_extension
+        const sourceExtension = isUsb
+          ? this.cncPrograms.get(progNum)?.paths[pNum]?.file_extension
           : undefined;
         const fileName = this.buildChannelFileName(progNum, pNum, sourceExtension);
         if ((window as any).vscodeApi) {
@@ -366,18 +525,40 @@ export class NCTransferPanel extends HTMLElement {
 
   private async handleCompare(progNum: number, pathNo: string) {
     try {
+      const isUsb = String(this.transferProtocol).toLowerCase() === 'usb';
       if (pathNo === 'PA') {
         const prog = this.cncPrograms.get(progNum);
         if (!prog) return;
+
+        if (isUsb && prog.containerProgram && Object.keys(prog.paths).every(ch => prog.paths[Number(ch)] === prog.containerProgram)) {
+          const containerExt = prog.containerProgram.file_extension;
+          const resp = await this.transferClient.uploadProgram(
+            this.ipAddress,
+            0,
+            progNum,
+            undefined,
+            containerExt !== undefined ? [containerExt] : undefined
+          );
+          const fileName = this.buildPAFileName(progNum, containerExt);
+          if ((window as any).vscodeApi) {
+            (window as any).vscodeApi.postMessage({
+              type: 'COMPARE_TRANSFER_FILE',
+              fileName: fileName,
+              content: resp
+            });
+          }
+          return;
+        }
 
         let combinedContent = "%\n";
         
         // Include header information
         combinedContent += `&F=/O${progNum.toString().padStart(4, '0')}(${prog.comment || 'PA_PROG'})/\n`;
 
-        for (const p of this.getSupportedPaths()) {
-            if (prog.paths[p as 1|2|3]) {
-                const resp = await this.transferClient.uploadProgram(this.ipAddress, p, progNum, undefined, this.getChannelFileExtensions(p));
+        const channelsToCompare = isUsb ? this.getGroupChannels(prog) : this.getSupportedPaths();
+        for (const p of channelsToCompare) {
+            if (prog.paths[p]) {
+                const resp = await this.transferClient.uploadProgram(this.ipAddress, p, progNum, undefined, this.getUploadExtensionsForProgram(progNum, p));
                 
                 // Format block with <> XML-like tags matching the specified standard
                 combinedContent += `<O${progNum.toString().padStart(4, '0')}.P${p}>\n`;
@@ -412,9 +593,32 @@ export class NCTransferPanel extends HTMLElement {
 
       } else {
         const pNum = parseInt(pathNo, 10);
-        const resp = await this.transferClient.uploadProgram(this.ipAddress, pNum, progNum, undefined, this.getChannelFileExtensions(pNum));
-        
-        const fileName = this.buildChannelFileName(progNum, pNum);
+        const prog = this.cncPrograms.get(progNum);
+        if (isUsb && prog?.containerProgram && prog.paths[pNum] === prog.containerProgram) {
+          const containerExt = prog.containerProgram.file_extension;
+          const resp = await this.transferClient.uploadProgram(
+            this.ipAddress,
+            0,
+            progNum,
+            undefined,
+            containerExt !== undefined ? [containerExt] : undefined
+          );
+          const splitBlocks = this.splitMultipathChannels(resp);
+          const channelContent = splitBlocks[pNum] ?? resp;
+          const fileName = this.buildChannelFileName(progNum, pNum);
+          if ((window as any).vscodeApi) {
+            (window as any).vscodeApi.postMessage({
+              type: 'COMPARE_TRANSFER_FILE',
+              fileName: fileName,
+              content: channelContent
+            });
+          }
+          return;
+        }
+
+        const resp = await this.transferClient.uploadProgram(this.ipAddress, pNum, progNum, undefined, this.getUploadExtensionsForProgram(progNum, pNum));
+        const sourceExtension = isUsb ? prog?.paths[pNum]?.file_extension : undefined;
+        const fileName = this.buildChannelFileName(progNum, pNum, sourceExtension);
         if ((window as any).vscodeApi) {
           (window as any).vscodeApi.postMessage({
                 type: 'COMPARE_TRANSFER_FILE',
@@ -531,27 +735,33 @@ export class NCTransferPanel extends HTMLElement {
       ${this.isConnectedToCnc ? `
         <div class="list">
           <h3>${locationLabel}</h3>
-          ${Array.from(this.cncPrograms.values()).sort((a,b)=>a.number-b.number).map(prog => `
-            <div class="prog-item" draggable="true" data-drag-prog="${prog.number}" data-drag-pa="${prog.isPA ? 'true' : 'false'}">
+          ${Array.from(this.cncPrograms.values()).sort((a,b)=>a.number-b.number).map(prog => {
+            const progChannels = isUsbTransfer
+              ? this.getGroupChannels(prog)
+              : supportedPaths.filter(p => prog.paths[p]);
+            const showAsPA = isUsbTransfer ? prog.isPA : (prog.isPA && multifileSupported);
+            const badgeHtml = showAsPA
+              ? `<span class="pa-badge">PA Program${progChannels.length > 0 ? ` (${progChannels.map(p => `P${p}`).join(', ')})` : ''}</span>`
+              : `<span class="single-badge">${progChannels.map(p => this.getChannelLabel(p, isUsbTransfer ? prog.paths[p]?.file_extension : undefined)).join(', ')}</span>`;
+            const pullPath = showAsPA ? 'PA' : (progChannels[0] ?? 1);
+            return `
+            <div class="prog-item" draggable="true" data-drag-prog="${prog.number}" data-drag-pa="${showAsPA ? 'true' : 'false'}">
               <div class="prog-info">
                 <div>
                   <span class="prog-num">O${prog.number.toString().padStart(4, '0')}</span>
-                  ${prog.isPA && multifileSupported
-                    ? '<span class="pa-badge">PA Program</span>'
-                    : `<span class="single-badge">${supportedPaths.filter(p => prog.paths[p as 1|2|3]).map(p => this.getChannelLabel(p)).join(', ')}</span>`
-                  }
+                  ${badgeHtml}
                 </div>
                 <small>${prog.comment}</small>
               </div>
               <div class="actions">
-                <button class="btn-upl" data-path="${prog.isPA && multifileSupported ? 'PA' : supportedPaths.find(path => prog.paths[path as 1|2|3]) ?? 1}" data-prog="${prog.number}">Pull</button>
-                ${supportedPaths.map(path => prog.paths[path as 1|2|3] ?
-                  `${(window as any).vscodeApi ? `<button class="btn-cmp" data-path="${path}" data-prog="${prog.number}">Compare ${this.getChannelLabel(path)}</button>` : ''}` :
-                  ''
+                <button class="btn-upl" data-path="${pullPath}" data-prog="${prog.number}">Pull</button>
+                ${progChannels.map(path =>
+                  `${(window as any).vscodeApi ? `<button class="btn-cmp" data-path="${path}" data-prog="${prog.number}">Compare ${this.getChannelLabel(path, isUsbTransfer && prog.paths[path] !== prog.containerProgram ? prog.paths[path]?.file_extension : undefined)}</button>` : ''}`
                 ).join('')}
               </div>
             </div>
-          `).join('')}
+          `;
+          }).join('')}
           ${this.cncPrograms.size === 0 ? '<p>No programs found on machine.</p>' : ''}
         </div>
 

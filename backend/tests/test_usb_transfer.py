@@ -141,3 +141,62 @@ def test_usb_transfer_skips_unreadable_entries(tmp_path, monkeypatch):
     assert client.connect(str(root)) is True
     programs = client.list_programs(1)
     assert [p["number"] for p in programs] == [1234]
+
+
+def test_usb_transfer_lists_all_extensions_no_extension_and_multipath_containers(tmp_path):
+    root = tmp_path / "usb"
+    root.mkdir()
+    # Multipath .PA container with P1..P4
+    (root / "O1000.PA").write_text(
+        "%\n&F=/O1000/\n<O1000.P1>\n(MULTI PA)\nM99\n<O1000.P2>\nG0 X0\nM99\n<O1000.P3>\nG0 Z0\nM99\n<O1000.P4>\nM30\n%\n",
+        encoding="utf-8",
+    )
+    # Split P1..P4 files
+    (root / "O2000.P1").write_text("O2000\n(P1 PART)\nM30\n", encoding="utf-8")
+    (root / "O2000.P2").write_text("O2000\n(P2 PART)\nM30\n", encoding="utf-8")
+    (root / "O2000.P4").write_text("O2000\n(P4 PART)\nM30\n", encoding="utf-8")
+    # .M and .S files with same O-number
+    (root / "O3000.M").write_text("O3000\n(MAIN M)\nM30\n", encoding="utf-8")
+    (root / "O3000.S").write_text("O3000\n(SUB S)\nM99\n", encoding="utf-8")
+    # File without extension and file with custom extension
+    (root / "O4000").write_text("O4000\n(NO EXT)\nM30\n", encoding="utf-8")
+    (root / "O5000.PRG").write_text("O5000\n(CUSTOM EXT)\nM30\n", encoding="utf-8")
+    # Multipath file with no extension
+    (root / "O6000").write_text("<O6000.P1>\n(NO EXT MULTI)\nM30\n<O6000.P2>\nM30\n", encoding="utf-8")
+    # Binary file that must be ignored
+    (root / "driver.dll").write_bytes(b"\x00\x01\x02O9999")
+
+    client = UsbTransferClient()
+    assert client.connect(str(root)) is True
+
+    all_programs = client.list_programs(0)
+    by_num_ext = {(p["number"], p["file_extension"]): p for p in all_programs}
+
+    assert (1000, ".PA") in by_num_ext
+    assert by_num_ext[(1000, ".PA")]["is_multipath"] is True
+    assert by_num_ext[(1000, ".PA")]["channels"] == [1, 2, 3, 4]
+
+    assert (2000, ".P1") in by_num_ext
+    assert (2000, ".P2") in by_num_ext
+    assert (2000, ".P4") in by_num_ext
+
+    assert (3000, ".M") in by_num_ext
+    assert (3000, ".S") in by_num_ext
+
+    assert (4000, "") in by_num_ext
+    assert by_num_ext[(4000, "")]["comment"] == "NO EXT"
+
+    assert (5000, ".PRG") in by_num_ext
+    assert by_num_ext[(5000, ".PRG")]["comment"] == "CUSTOM EXT"
+
+    assert (6000, "") in by_num_ext
+    assert by_num_ext[(6000, "")]["is_multipath"] is True
+    assert by_num_ext[(6000, "")]["channels"] == [1, 2]
+
+    assert all(p["number"] != 9999 for p in all_programs)
+
+    # Verify upload by specific extension or container
+    assert "<O1000.P4>" in client.upload_program(1000, 0, [".PA"])
+    assert "(NO EXT)" in client.upload_program(4000, 1, [""])
+    assert "(P4 PART)" in client.upload_program(2000, 4, [".P4"])
+

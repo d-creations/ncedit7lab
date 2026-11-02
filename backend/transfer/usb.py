@@ -6,7 +6,8 @@ from .interface import ProtocolClient, TransferError
 
 USB_ERROR = 1
 PROGRAM_NUMBER_RE = re.compile(r"(?:^|\n)\s*O(\d+)\b", re.IGNORECASE)
-PA_MARKER_PROGRAM_RE = re.compile(r"<\s*O(\d+)\.P[1-3]\s*>", re.IGNORECASE)
+PA_MARKER_PROGRAM_RE = re.compile(r"<\s*O(\d+)\.P\d+\s*>", re.IGNORECASE)
+PA_SECTION_RE = re.compile(r"<\s*(?:O\d+\.)?P(\d+)\s*>", re.IGNORECASE)
 PA_FILE_ASSIGNMENT_RE = re.compile(r"&F=/O(\d+)/", re.IGNORECASE)
 COMMENT_RE = re.compile(r"\(([^)]*)\)")
 FILE_NUMBER_RE = re.compile(r"O(\d+)", re.IGNORECASE)
@@ -16,6 +17,12 @@ PATH_DIR_CANDIDATES = {
     3: ("PATH3", "P3", "CH3"),
 }
 ALLOWED_SUFFIXES = {"", ".mpf", ".spf", ".nc", ".txt", ".p1", ".p2", ".p3", ".pa", ".eia", ".min", ".m", ".s"}
+EXCLUDED_SUFFIXES = {
+    ".dll", ".exe", ".so", ".dylib", ".zip", ".tar", ".gz", ".7z", ".rar",
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".svg", ".webp",
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".db", ".sqlite", ".pyc",
+}
+PATH_SUFFIX_RE = re.compile(r"^\.p-?(\d+)$", re.IGNORECASE)
 MAX_PROGRAM_FILE_BYTES = 10 * 1024 * 1024
 DRIVE_ONLY_RE = re.compile(r"^[A-Za-z]:$")
 
@@ -87,7 +94,7 @@ class UsbTransferClient(ProtocolClient):
 
     def upload_program(self, prog_num: int, path_no: int = 0, file_extensions: Optional[List[str]] = None) -> str:
         storage_dir = self._get_storage_dir(path_no or 1)
-        program_entry = self._find_program_entry(storage_dir, prog_num, path_no or 1, file_extensions)
+        program_entry = self._find_program_entry(storage_dir, prog_num, path_no, file_extensions)
         if not program_entry:
             raise TransferError(USB_ERROR, f"Program O{prog_num} not found on USB path {path_no or 1}", "not found")
         return program_entry["program_text"]
@@ -99,27 +106,41 @@ class UsbTransferClient(ProtocolClient):
 
         allowed_suffixes = self._normalize_extensions(file_extensions)
         programs: List[Dict[str, Any]] = []
-        seen_numbers = set()
+        seen_keys = set()
         for storage_dir in storage_dirs:
             for file_path in self._iter_storage_files(storage_dir):
-                if file_path.suffix.lower() not in ALLOWED_SUFFIXES:
+                if not self._is_candidate_program_file(file_path):
                     continue
                 if allowed_suffixes is not None and file_path.suffix.lower() not in allowed_suffixes:
                     continue
 
                 program_entry = self._parse_program_file(file_path)
-                if program_entry is None or program_entry["number"] in seen_numbers:
+                if program_entry is None:
                     continue
 
-                seen_numbers.add(program_entry["number"])
-                programs.append({
+                # When scanning all USB files (path_no == 0 and no extension filter),
+                # keep every distinct (number, extension) entry so O1234.P1, O1234.P2, O1234.M, O1234.S, O1234.PA, and O1234 (no ext) are all listed.
+                dedup_key = (
+                    (program_entry["number"], file_path.suffix.lower())
+                    if path_no == 0 and allowed_suffixes is None
+                    else program_entry["number"]
+                )
+                if dedup_key in seen_keys:
+                    continue
+
+                seen_keys.add(dedup_key)
+                item: Dict[str, Any] = {
                     "number": program_entry["number"],
                     "length": len(program_entry["program_text"].encode("utf-8")),
                     "comment": program_entry["comment"],
                     "file_extension": program_entry["file_path"].suffix,
-                })
+                }
+                if program_entry.get("is_multipath"):
+                    item["is_multipath"] = True
+                    item["channels"] = program_entry["channels"]
+                programs.append(item)
 
-        return sorted(programs, key=lambda item: item["number"])
+        return sorted(programs, key=lambda item: (item["number"], item.get("file_extension", "").lower()))
 
     @staticmethod
     def _iter_storage_files(storage_dir: Path) -> List[Path]:
@@ -148,20 +169,40 @@ class UsbTransferClient(ProtocolClient):
             raise TransferError(USB_ERROR, "USB storage is not connected", "not connected")
         return self.root_path
 
+    @staticmethod
+    def _is_candidate_program_file(file_path: Path) -> bool:
+        if file_path.name.startswith("."):
+            return False
+        suffix = file_path.suffix.lower()
+        if suffix in EXCLUDED_SUFFIXES:
+            return False
+        if suffix in ALLOWED_SUFFIXES or PATH_SUFFIX_RE.match(suffix):
+            return True
+        return True
+
     def _find_program_entry(self, storage_dir: Path, prog_num: int, path_no: int, file_extensions: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
         configured_extensions = self._normalize_extensions(file_extensions)
-        preferred_extensions = list(configured_extensions) if configured_extensions is not None else [f".p{path_no}".lower()]
+        effective_path = path_no or 1
+        preferred_extensions = (
+            list(configured_extensions)
+            if configured_extensions is not None
+            else ([".pa"] if path_no == 0 else [f".p{effective_path}".lower(), f".p-{effective_path}".lower()])
+        )
         fallback_entry = None
+        multipath_fallback = None
         for file_path in self._iter_storage_files(storage_dir):
-            if file_path.suffix.lower() not in ALLOWED_SUFFIXES:
+            if not self._is_candidate_program_file(file_path):
                 continue
             program_entry = self._parse_program_file(file_path)
             if program_entry and program_entry["number"] == prog_num:
-                if file_path.suffix.lower() in preferred_extensions or (path_no == 0 and file_path.suffix.lower() == ".pa"):
+                suffix = file_path.suffix.lower()
+                if suffix in preferred_extensions or (path_no == 0 and (suffix == ".pa" or program_entry.get("is_multipath"))):
                     return program_entry
-                if configured_extensions is None:
+                if path_no == 0 and program_entry.get("is_multipath") and multipath_fallback is None:
+                    multipath_fallback = program_entry
+                if configured_extensions is None and fallback_entry is None:
                     fallback_entry = program_entry
-        return fallback_entry
+        return multipath_fallback or fallback_entry
 
     @staticmethod
     def _normalize_extensions(file_extensions: Optional[List[str]]) -> Optional[set[str]]:
@@ -172,13 +213,16 @@ class UsbTransferClient(ProtocolClient):
     def _parse_program_file(self, file_path: Path) -> Optional[Dict[str, Any]]:
         try:
             stat = file_path.stat()
-            if stat.st_size > MAX_PROGRAM_FILE_BYTES:
+            if stat.st_size == 0 or stat.st_size > MAX_PROGRAM_FILE_BYTES:
                 return None
             try:
                 program_text = file_path.read_text(encoding="utf-8")
             except UnicodeDecodeError:
                 program_text = file_path.read_text(encoding="latin-1")
         except OSError:
+            return None
+
+        if "\x00" in program_text:
             return None
 
         normalized = self._normalize_program_text(program_text)
@@ -189,12 +233,26 @@ class UsbTransferClient(ProtocolClient):
                 return None
             number = int(match.group(1))
 
+        channels = self._extract_multipath_channels(normalized)
+        is_multipath = len(channels) > 1 or (len(channels) == 1 and file_path.suffix.lower() == ".pa")
+
         return {
             "number": number,
             "comment": self._extract_comment(normalized, file_path.stem),
             "program_text": normalized,
             "file_path": file_path,
+            "is_multipath": is_multipath,
+            "channels": channels,
         }
+
+    @staticmethod
+    def _extract_multipath_channels(program_text: str) -> List[int]:
+        seen: List[int] = []
+        for match in PA_SECTION_RE.finditer(program_text):
+            ch = int(match.group(1))
+            if ch > 0 and ch not in seen:
+                seen.append(ch)
+        return sorted(seen)
 
     @staticmethod
     def _normalize_program_text(program_text: str) -> str:

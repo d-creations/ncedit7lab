@@ -261,8 +261,6 @@ export class FileManagerService implements IFileManagerService {
         }
 
         for (let i = 0; i < programs.length; i++) {
-            if (i > 2) break;
-            
             let programLines = programs[i].split("\n");
             let header = programLines[0];
             
@@ -274,15 +272,14 @@ export class FileManagerService implements IFileManagerService {
             let programNameS = header.substring(0, endNameIndex).replace("<", "");
             programNameS = programNameS.replace(/\..*\./, "");
             
-            // User logic: ret.push(programNameS + programs[programNr].replace(/.*>/, ""));
-            // Note: programs[i] still contains the header line if we didn't strip it.
-            // The user's regex replace(/.*>/, "") seems to intend to remove the header tag?
-            // But split("<") removes the separator.
-            // If the file is `<HEAD>...`, split gives `HEAD>...`.
-            // So `replace(/.*>/, "")` removes `HEAD>`.
-            
             let contentBody = programs[i].replace(/.*>/, "");
-            ret.push(programNameS + contentBody);
+            const channelText = programNameS + contentBody;
+            const channelMatch = header.match(/\.P(\d+)\s*>/i) ?? header.match(/^\s*P(\d+)\s*>/i);
+            const targetIndex = channelMatch ? Math.max(0, parseInt(channelMatch[1], 10) - 1) : i;
+            while (ret.length < targetIndex) {
+                ret.push("");
+            }
+            ret[targetIndex] = channelText;
         }
         return ret;
     } else if (options.channel === 2) {

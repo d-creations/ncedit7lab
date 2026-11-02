@@ -500,8 +500,16 @@ describe('bounded GPU dexel submissions', () => {
         expect(fragment).not.toContain('gpuDexelSpan(');
         expect(fragment).not.toContain('gpuOriginalCount(');
         expect(fragment).not.toContain('gpuOriginalSpan(');
+        expect(fragment).not.toContain('s2 == 0xffffffffu && slabs > 0u');
+        expect(fragment).not.toContain('posStep = select(6.0');
+        expect(fragment).toContain('gpuRefineDexelHit(');
+        expect(fragment).toContain('gpuBaseSurfaceNormal(');
+        expect(fragment).toContain('gpuIsOnIntactBase(');
+        expect(fragment).toContain('maxSmoothField > pitch * 0.35');
         expect(fragment).toContain('gpuDexelNormal(p, size, dims, capacity, cylinder)');
         expect(fragment).not.toMatch(/ptr\s*<\s*storage\b/);
+        expect(shaders.at(-1)).toContain('old.x + minSpan < cut.x');
+        expect(shaders.at(-1)).toContain('old.y - minSpan > cut.y');
       } finally {
         f.stock.dispose();
       }

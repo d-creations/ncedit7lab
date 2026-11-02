@@ -105,6 +105,17 @@ export function createReplayStrategy(options: ReplayStrategyOptions): MaterialRe
         return selected.seek(position);
       }
     },
+    async setFinePitchMm(finePitchMm) {
+      if (cancelled) throw new DOMException('Material replay cancelled', 'AbortError');
+      if (!selected.setFinePitchMm) return undefined;
+      options.finePitchMm = finePitchMm;
+      const token = ++request;
+      return selected.setFinePitchMm(finePitchMm).then((frame) => {
+        if (!current() || token !== request)
+          throw new DOMException('Replay seek superseded', 'AbortError');
+        return frame;
+      });
+    },
     cancel() {
       cancelled = true;
       request++;

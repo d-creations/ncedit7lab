@@ -110,6 +110,8 @@ export class NCToolpathPlot extends HTMLElement {
   private metadataEdits: ProgramMetadataEditService;
   private materialVisible = true;
   private materialObject: THREE.Group | null = null;
+  private toolpathVisible = true;
+  private toolpathObject: THREE.Object3D | null = null;
   private subscriptions: EventSubscription[] = [];
   private displayedRunId?: string;
   private resolveSelection?: ReturnType<typeof createPlotSelectionResolver>;
@@ -403,9 +405,13 @@ export class NCToolpathPlot extends HTMLElement {
       : undefined;
     element.hidden = true;
     element.textContent = '';
-    if (preparation && preparation.status !== 'not-configured' && preparation.diagnostics.length)
-      this.showSimulationNotice(element, preparation.diagnostics.map((diagnostic) => diagnostic.message).join(' '),
-        preparation.diagnostics.some((diagnostic) => diagnostic.severity === 'error') ? 'error' : 'warning');
+    const diagnostics =
+      preparation && preparation.status !== 'not-configured'
+        ? preparation.diagnostics.filter((diagnostic) => diagnostic.code !== 'spindle-state-unavailable')
+        : [];
+    if (diagnostics.length)
+      this.showSimulationNotice(element, diagnostics.map((diagnostic) => diagnostic.message).join(' '),
+        diagnostics.some((diagnostic) => diagnostic.severity === 'error') ? 'error' : 'warning');
   }
 
   private updateRemovalResolution(): void {
@@ -451,6 +457,51 @@ export class NCToolpathPlot extends HTMLElement {
         this.showSimulationNotice(status, `Material removal unavailable: ${error instanceof Error ? error.message : 'Invalid resolution'}`, 'error');
       }
     }
+  }
+
+  private async changeGpuFineResolution(): Promise<void> {
+    const preparation = this.removalPreparation;
+    if (!preparation || this.stale) return;
+    const session = this.materialReplay;
+    const field = this.shadowRoot?.querySelector<HTMLInputElement>('#gpu-fine-resolution');
+    const finePitchMm = field?.valueAsNumber ?? this.simulationConfig.gpuPitchMm.default;
+    if (
+      session &&
+      this.replayPrepared &&
+      session.backend === 'hybrid-turning' &&
+      session.setFinePitchMm &&
+      Number.isFinite(finePitchMm) &&
+      finePitchMm >= 0.001 &&
+      finePitchMm <= 5
+    ) {
+      if (this.cursorReplayTimer !== undefined) clearTimeout(this.cursorReplayTimer);
+      this.cursorReplayTimer = undefined;
+      this.pauseReplay();
+      const generation = ++this.replayGeneration;
+      this.replayBusy = true;
+      this.updateReplayControls();
+      this.updateSimulationProgress();
+      try {
+        const frame = await session.setFinePitchMm(finePitchMm);
+        if (generation !== this.replayGeneration || this.stale || session !== this.materialReplay) return;
+        if (frame) this.installReplayFrame(frame);
+      } catch (error) {
+        if (generation !== this.replayGeneration || (error instanceof DOMException && error.name === 'AbortError')) return;
+        console.error('Material removal resolution change failed:', error);
+        this.cancelReplay();
+        const status = this.shadowRoot?.getElementById('material-removal-status');
+        if (status) {
+          this.showSimulationNotice(status, `Material removal failed: ${error instanceof Error ? error.message : 'Worker failure'}. Initial stock is shown, not a completed result.`, 'error');
+        }
+      } finally {
+        if (generation === this.replayGeneration) {
+          this.replayBusy = false;
+          this.updateReplayControls();
+        }
+      }
+      return;
+    }
+    await this.startMaterialRemoval(preparation);
   }
 
   private async createReplaySession(runId: string): Promise<MaterialReplayStrategy> {
@@ -802,11 +853,12 @@ export class NCToolpathPlot extends HTMLElement {
     element.hidden = false;
     const other = this.shadowRoot?.getElementById(element.id === 'replay-status' ? 'material-removal-status' : 'replay-status');
     if (other) other.hidden = true;
-    element.textContent = severity === 'error' ? '\u26d4' : '\u26a0';
+    const icon = severity === 'error' ? '\u26d4' : '\u26a0';
+    element.textContent = `${icon} ${message}`;
     element.dataset.severity = severity;
-    const label = `Simulation ${severity}. See console log for details.`;
+    const label = `Simulation ${severity}: ${message}`;
     element.setAttribute('aria-label', label);
-    element.title = label;
+    element.title = message;
   }
 
   private replayStatus(text: string, informational = false, severity: 'warning' | 'error' = 'error'): void {
@@ -1101,10 +1153,20 @@ export class NCToolpathPlot extends HTMLElement {
           position: absolute;
           top: 8px;
           right: 8px;
+          left: 160px;
           display: flex;
+          flex-direction: column;
+          align-items: flex-end;
           gap: 4px;
           z-index: 10;
+          pointer-events: none;
+        }
+        .plot-controls-row {
+          display: flex;
           flex-wrap: wrap;
+          justify-content: flex-end;
+          gap: 4px;
+          pointer-events: auto;
         }
         .plot-button {
           padding: 4px 8px;
@@ -1158,7 +1220,7 @@ export class NCToolpathPlot extends HTMLElement {
         }
         .zoom-controls {
           position: absolute;
-          top: 40px;
+          top: 76px;
           right: 8px;
           display: flex;
           flex-direction: column;
@@ -1266,6 +1328,12 @@ export class NCToolpathPlot extends HTMLElement {
             gap: 4px;
             justify-content: center;
             width: 100%;
+            pointer-events: auto;
+          }
+
+          .plot-controls-row {
+            justify-content: center;
+            width: 100%;
           }
 
           .zoom-controls {
@@ -1303,12 +1371,17 @@ export class NCToolpathPlot extends HTMLElement {
         <button class="plot-button" id="toggle-mobile-menu">☰ Plot Options ▼</button>
         <div id="plot-menu-content">
           <div class="plot-controls">
-            <button class="plot-button" id="clear-plot">🗑️ Clear Plot</button>
-            <button class="plot-button" id="reset-camera">Reset View</button>
-            <button class="plot-button" id="toggle-axes">Axes</button>
-            <button class="plot-button active" id="toggle-orbit">🔄 Orbit</button>
-            <button class="plot-button active" id="toggle-material" aria-pressed="true" hidden>Hide Material</button>
-            <button class="plot-button" id="cancel-removal" hidden>Cancel Removal</button>
+            <div class="plot-controls-row">
+              <button class="plot-button" id="clear-plot">🗑️ Clear Plot</button>
+              <button class="plot-button" id="reset-camera">Reset View</button>
+              <button class="plot-button" id="toggle-axes">Axes</button>
+              <button class="plot-button active" id="toggle-orbit">🔄 Orbit</button>
+            </div>
+            <div class="plot-controls-row">
+              <button class="plot-button active" id="toggle-toolpath" aria-pressed="true" hidden>Hide Toolpath</button>
+              <button class="plot-button active" id="toggle-material" aria-pressed="true" hidden>Hide Material</button>
+              <button class="plot-button" id="cancel-removal" hidden>Cancel Removal</button>
+            </div>
           </div>
           <div class="view-controls">
             <button class="plot-button" id="view-xy">X-Y</button>
@@ -1387,17 +1460,25 @@ export class NCToolpathPlot extends HTMLElement {
 
     const materialButton = this.shadowRoot?.getElementById('toggle-material');
     materialButton?.addEventListener('click', () => this.toggleMaterial());
+
+    const toolpathButton = this.shadowRoot?.getElementById('toggle-toolpath');
+    toolpathButton?.addEventListener('click', () => this.toggleToolpath());
     this.shadowRoot?.getElementById('removal-resolution')?.addEventListener('input', () => this.syncResolutionLabels());
     this.shadowRoot?.getElementById('removal-resolution')?.addEventListener('change', () => {
       this.syncResolutionLabels();
       void this.changeRemovalResolution();
     });
     this.shadowRoot?.getElementById('gpu-fine-resolution')?.addEventListener('input', () => this.syncResolutionLabels());
-    for (const id of ['gpu-stock', 'gpu-fine-resolution']) this.shadowRoot?.getElementById(id)?.addEventListener('change', () => {
+    this.shadowRoot?.getElementById('gpu-stock')?.addEventListener('change', () => {
       this.updateResolutionControlVisibility();
       this.syncResolutionLabels();
       const preparation = this.removalPreparation;
       if (preparation && !this.stale) void this.startMaterialRemoval(preparation);
+    });
+    this.shadowRoot?.getElementById('gpu-fine-resolution')?.addEventListener('change', () => {
+      this.updateResolutionControlVisibility();
+      this.syncResolutionLabels();
+      void this.changeGpuFineResolution();
     });
     this.shadowRoot?.getElementById('cancel-removal')?.addEventListener('click', () => {
       const replay = Boolean(this.materialReplay);
@@ -2000,6 +2081,8 @@ export class NCToolpathPlot extends HTMLElement {
     toRemove.forEach((obj) => this.removeOwnedPlotObject(obj));
     this.materialObject = null;
     this.materialVisible = true;
+    this.toolpathObject = null;
+    this.toolpathVisible = true;
     this.stockMeshes.clear();
 
     // Remove highlight object if exists
@@ -2011,7 +2094,10 @@ export class NCToolpathPlot extends HTMLElement {
     // Add new plot
     const plotGroup = this.plotService.createSegmentedToolpath(plotMetadata);
     plotGroup.userData.isToolpath = true;
+    plotGroup.visible = this.toolpathVisible;
+    this.toolpathObject = plotGroup;
     this.scene.add(plotGroup);
+    this.updateToolpathControl();
 
     if (this.simulationEnabled && materials.length) {
       const materialGroup = new THREE.Group();
@@ -2227,6 +2313,25 @@ export class NCToolpathPlot extends HTMLElement {
     button.setAttribute('aria-pressed', String(this.materialVisible));
   }
 
+  private toggleToolpath() {
+    if (!this.toolpathObject) return;
+    this.toolpathVisible = !this.toolpathVisible;
+    this.toolpathObject.visible = this.toolpathVisible;
+    this.updateToolpathControl();
+    this.requestRender();
+  }
+
+  private updateToolpathControl() {
+    const button = this.shadowRoot?.querySelector<HTMLButtonElement>('#toggle-toolpath');
+    if (!button) return;
+    const available = this.toolpathObject !== null;
+    button.hidden = !available;
+    button.disabled = !available;
+    button.textContent = this.toolpathVisible ? 'Hide Toolpath' : 'Show Toolpath';
+    button.classList.toggle('active', this.toolpathVisible);
+    button.setAttribute('aria-pressed', String(this.toolpathVisible));
+  }
+
   private toggleOrbit() {
     if (!this.controls) return;
     this.controls.enabled = !this.controls.enabled;
@@ -2254,6 +2359,9 @@ export class NCToolpathPlot extends HTMLElement {
     this.updateReplayControls();
     this.materialVisible = true;
     this.updateMaterialControl();
+    this.toolpathObject = null;
+    this.toolpathVisible = true;
+    this.updateToolpathControl();
     if (!this.scene) return;
 
     // Remove highlight object if exists

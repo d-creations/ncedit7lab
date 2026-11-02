@@ -44,8 +44,8 @@ export interface AppConfiguration {
 
 export const DEFAULT_SIMULATION_CONFIG: SimulationConfiguration = {
   gpuDefaultEnabled: true,
-  gpuPitchMm: { min: 0.001, max: 5, default: 0.02 },
-  cpuResolutionMm: { min: 0.05, max: 5, default: 0.05 },
+  gpuPitchMm: { min: 0.001, max: 0.2, default: 0.02 },
+  cpuResolutionMm: { min: 0.05, max: 0.2, default: 0.05 },
   stockMemoryMiB: 256,
   gpuStockPixelBudget: {
     min: 250_000,

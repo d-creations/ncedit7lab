@@ -18,5 +18,6 @@ export interface MaterialReplayStrategy {
     prepareFinal?: boolean,
   ): Promise<MaterialReplayFrame>;
   seek(position: number): Promise<MaterialReplayFrame>;
+  setFinePitchMm?(finePitchMm: number): Promise<MaterialReplayFrame | undefined>;
   cancel(): void;
 }

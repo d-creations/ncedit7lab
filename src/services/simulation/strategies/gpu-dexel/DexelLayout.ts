@@ -198,31 +198,39 @@ export function indexDexelTiles(
   sweeps: readonly CompiledGpuSweep[],
   memoryLimitBytes: number = DEXEL_MEMORY_BYTES,
 ): DexelTileIndex {
-  const lists: number[][] = Array.from({ length: layout.tiles }, () => []);
-  let stagingEntries = 0;
   const stagingBase = layout.tiles * 96;
   if (layout.estimatedBytes + stagingBase > memoryLimitBytes)
     throw new SimulationCapabilityError('GPU tile-index staging exceeds the memory budget');
+  const counts = new Uint32Array(layout.tiles);
+  const touchedPerSweep: number[][] = new Array(sweeps.length);
+  let entries = 0;
   for (let i = 0; i < sweeps.length; i++) {
     const touched = dexelTilesForBounds(layout, sweeps[i].bounds);
-    stagingEntries += touched.length;
-    if (layout.estimatedBytes + stagingBase + stagingEntries * 16 > memoryLimitBytes)
+    touchedPerSweep[i] = touched;
+    entries += touched.length;
+    if (layout.estimatedBytes + stagingBase + entries * 16 > memoryLimitBytes)
       throw new SimulationCapabilityError('GPU tile-index staging exceeds the memory budget');
-    for (const tile of touched) lists[tile].push(i);
+    for (let j = 0; j < touched.length; j++) counts[touched[j]]++;
   }
-  const entries = lists.reduce((sum, list) => sum + list.length, 0);
   const bytes = 2 * (layout.tiles * 8 + Math.max(1, entries) * 4);
   if (bytes + layout.estimatedBytes > memoryLimitBytes)
     throw new SimulationCapabilityError('GPU cutter-to-tile index exceeds the stock memory budget');
   const ranges = new Uint32Array(layout.tiles * 2),
     indices = new Uint32Array(Math.max(1, entries));
   let offset = 0;
-  lists.forEach((list, tile) => {
+  for (let tile = 0; tile < layout.tiles; tile++) {
     ranges[tile * 2] = offset;
-    ranges[tile * 2 + 1] = list.length;
-    indices.set(list, offset);
-    offset += list.length;
-  });
+    ranges[tile * 2 + 1] = counts[tile];
+    counts[tile] = offset;
+    offset += ranges[tile * 2 + 1];
+  }
+  for (let i = 0; i < sweeps.length; i++) {
+    const touched = touchedPerSweep[i];
+    for (let j = 0; j < touched.length; j++) {
+      const tile = touched[j];
+      indices[counts[tile]++] = i;
+    }
+  }
   return { ranges, sweeps: indices, bytes };
 }
 

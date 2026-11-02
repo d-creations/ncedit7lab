@@ -264,6 +264,27 @@ describe('bounded GPU dexel submissions', () => {
       }
     }, 30000);
 
+    it('sizes the staging capture buffer to the actual dispatch pass capacity and degrades gracefully on readback RangeError', async () => {
+      const f = fixture(1, [sweep], 16, { historyEvents: 1048576, historyLimit: 1048576 });
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const capture = Reflect.get(f.stock, 'captureAttribute') as { array: Uint32Array };
+        expect(capture.array.byteLength).toBeLessThan(1048576 * 16);
+        let headers = 0;
+        f.read.mockImplementation(async (attribute) => {
+          if (attribute === capture) throw new RangeError('Array buffer allocation failed');
+          return new Uint32Array([0, 0, headers++ === 0 ? 1 : 0, 0]).buffer;
+        });
+        await expect(f.stock.calculate(1)).resolves.toBeGreaterThanOrEqual(0);
+        expect(f.stock.takeHistory()).toBeUndefined();
+        expect(f.stock.historyUnavailable).toContain('readback allocation failed');
+        expect(warn).toHaveBeenCalledOnce();
+      } finally {
+        warn.mockRestore();
+        f.stock.dispose();
+      }
+    });
+
     it('keeps actual 20 × 50 / 0.02 mm sparse allocations bounded and fingerprints the implicit base', async () => {
       const f = fixture(1);
       const profile = new RotationalProfile(10, 50);

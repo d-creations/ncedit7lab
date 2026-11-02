@@ -2,15 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [1.3.0] - 2026-11-02
 
 ### Added
+- **Plot Toolpath Visibility Toggle & Two-Row Top Toolbar (`NCToolpathPlot.ts`)**:
+  - Added `#toggle-toolpath` (`Hide Toolpath` / `Show Toolpath`) button to toggle the plotted toolpath lines independently of the simulated stock material (`Hide Material` / `Show Material`).
+  - Split `.plot-controls` into two right-aligned rows (`.plot-controls-row`) and adjusted `.zoom-controls` vertical offset (`top: 76px`) so simulation buttons never overlap the left view/axis buttons or the zoom controls.
+- **Analytical GPU Swept-Volume Ray Intersections for Moving Ball & Bull-Nose Endmills (`GpuSweepCompiler.ts`, `GpuDexelStock.ts`)**:
+  - Added closed-form analytical 3D capsule + sheared shaft ray clipping (`gpuBallSweepRayCuts` / `usesAnalyticalBallSweepRayCuts`) for translating ball endmills (`shape = 2`) and analytical 2D segment projection + torus corner drop (`gpuRoundedAxialRayCuts` / `usesAnalyticalRoundedRayCuts`) for axial rays on bull-nose / corner-radius endmills (`shape = 4`), replacing the 104-iteration ternary/bisection fallback on those cuts.
 - **Configurable Simulation Resolution, Defaults & Memory Budget (`IConfigService.ts`, `public/config.json`, `NCToolpathPlot.ts`)**:
   - Added `simulation` configuration section to `AppConfiguration` and `public/config.json` with `gpuDefaultEnabled`, `gpuPitchMm: { min, max, default }`, `cpuResolutionMm: { min, max, default }`, and `stockMemoryMiB` (default `256` MiB).
   - Wired `<nc-toolpath-plot>` to load these min/max/default settings into `#gpu-stock`, `#gpu-fine-resolution`, `#removal-resolution`, and a new `#stock-memory-limit` (`Memory (MiB)`) input in the Plot view, so defaults come from `config.json` while remaining live-adjustable in the UI for both GPU (`GpuMaterialReplaySession`) and CPU (`WorkpieceFactory` / `MaterialReplayEngine`).
   - Unified CPU stock surface shading (`createStockSurfaceMaterial` in `NCToolpathPlot.ts` and `MaterialGeometryFactory.ts`) to use the same studio matcap / silver-gray appearance as the GPU stock during replay and initial stock display.
 
 ### Fixed
+- **GPU Progressive Simulation Performance, Memory Safety, Crease-Split Shading & Frontend Diagnostics (`GpuDexelStock.ts`, `GpuMaterialReplaySession.ts`, `DexelLayout.ts`, `GpuDexelHistory.ts`, `createReplayStrategy.ts`, `NCToolpathPlot.ts`)**:
+  - **In-Place GPU Pitch Slider Updates (`setFinePitchMm`):** Changing `#gpu-fine-resolution` (`GPU pitch`) now updates the active GPU session in place—reusing compiled cutter sweeps, cached `0.1 mm` coarse stock/history, and known interval capacities instead of restarting from scratch.
+  - **12×–13× Faster Fine (`0.02 mm`) Refinement & Larger Analytical Dispatches:** Inherited the proven `coarse` `DexelIntervalCapacity` into `fine` (eliminating wasted `4 → 8 → 16` overflow retries at `0.02 mm`), increased `dexelDispatchRays` batch size by 4× when $\ge 90\%$ of sweeps are analytical, and skipped redundant per-batch history readbacks and checkpoint rebuilds on heavy `fine` passes (`> 512` sweeps).
+  - **Bounded `captureAttribute` Staging & Graceful `RangeError` Readback Fallback:** Sized `captureAttribute` to the single-pass dispatch capacity instead of a fixed 16 MiB buffer, released `StorageBufferAttribute` typed arrays immediately on `dispose()`, switched to full-speed dispatch batches when history overflows, and caught `RangeError` during optional history readback so stock calculation completes without failing.
+  - **CPU-Matched Crease-Split Multi-Axis Normals & Partial-Patch Slopes:** Updated `gpuDexelAxisSample`, `gpuDexelNormal`, and `gpuRefineDexelHit` to preserve smooth slopes across valid ray pairs next to cliffs, preserve exact outer normals on box/cylinder/turned stock, and fuse multi-axis normals only when `dot > 0.85` (matching `StockMeshBuilder.ts`).
+  - **Live GPU Progress Bar & Inline Frontend Error Notices:** Wired per-pass progress callbacks in `GpuDexelStock.calculate` so `#simulation-progress` advances smoothly during GPU passes, filtered out the routine `spindle-state-unavailable` (`"Rapids do not remove stock"`) warning banner, and rendered full error/warning messages inline next to `⛔` / `⚠️` in the plot status banner.
 - **Default Tool Library Turning Tip Positions/Rotations & Mill/Drill Orientations (`DefaultToolLibrary.ts`, `WebToolLibraryRepository.ts`)**:
   - Updated `FRONT_ORIENTATION` (`Front Drill` / `Front End Mill`, e.g. `T1100`, `T1200`) from `[0, 90, 0]` to `[0, 180, 0]` so front tools point along `+Z` into the main spindle face by default.
   - Updated `COUNTER_FACE_ORIENTATION` (`Counter Face End Mill` / `Counter Face Drill`, e.g. `T1300`, `T1400`, `T3300`) and standard cross mills/drills to `[0, 90, 0]` instead of `[270, 0, 0]` / `[0, 0, 0]`.

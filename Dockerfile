@@ -7,7 +7,7 @@ COPY . .
 RUN npm run build
 
 # Stage 2: Runtime
-FROM python:3.13-slim
+FROM python:3.15-slim
 WORKDIR /app
 
 # Install Python dependencies, including the ncplot7py package from Git.

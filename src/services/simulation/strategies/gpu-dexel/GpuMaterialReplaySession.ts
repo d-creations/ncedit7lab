@@ -17,7 +17,7 @@ import {
   DEXEL_MAX_INTERVALS,
   GpuDexelIntervalOverflowError,
   indexDexelTiles,
-  dexelTilesForBounds,
+  type DexelIntervalCapacity,
 } from './DexelLayout';
 import { materialSize, stockPlacement } from '../../shared/SimulationTransforms';
 import {
@@ -105,7 +105,10 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
   >();
   private readonly pinned = new Set<GpuDexelStock>();
   private readonly checkpointStocks = new Set<GpuDexelStock>();
+  private readonly knownCapacity = new Map<'coarse' | 'fine', DexelIntervalCapacity>();
   private readonly memoryLimitBytes: number;
+  private finePitchMm: number;
+  private currentPosition = 0;
   private progress: (processed: number, total: number) => void = () => {};
 
   constructor(
@@ -115,10 +118,11 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
     private readonly options: GpuReplayOptions,
   ) {
     this.memoryLimitBytes = options.memoryLimitBytes ?? DEXEL_MEMORY_BYTES;
+    this.finePitchMm = options.finePitchMm;
     if (
-      !Number.isFinite(options.finePitchMm) ||
-      options.finePitchMm < 0.001 ||
-      options.finePitchMm > 5 ||
+      !Number.isFinite(this.finePitchMm) ||
+      this.finePitchMm < 0.001 ||
+      this.finePitchMm > 5 ||
       !Number.isSafeInteger(options.refinementDelayMs ?? 350) ||
       (options.refinementDelayMs ?? 350) < 0 ||
       !Number.isSafeInteger(this.memoryLimitBytes) ||
@@ -239,6 +243,7 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
     )
       return Promise.reject(new Error('GPU replay position is outside the executed timeline'));
     this.epoch++;
+    this.currentPosition = position;
     if (this.timer !== undefined) clearTimeout(this.timer);
     this.timer = undefined;
     return new Promise((resolve, reject) => {
@@ -248,6 +253,64 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
         this.queued = pending;
       } else void this.run(pending);
     });
+  }
+
+  setFinePitchMm(finePitchMm: number): Promise<GpuReplayFrame | undefined> {
+    if (this.cancelled)
+      return Promise.reject(new DOMException('GPU replay cancelled', 'AbortError'));
+    if (!Number.isFinite(finePitchMm) || finePitchMm < 0.001 || finePitchMm > 5) {
+      return Promise.reject(
+        new SimulationCapabilityError(
+          'GPU fine pitch must be between 0.001 and 5 mm and the idle delay must be nonnegative',
+        ),
+      );
+    }
+    const previousCoarsePitch = Math.max(0.1, this.finePitchMm);
+    const nextCoarsePitch = Math.max(0.1, finePitchMm);
+    if (this.finePitchMm === finePitchMm) return Promise.resolve(undefined);
+    this.finePitchMm = finePitchMm;
+    if (this.timer !== undefined) clearTimeout(this.timer);
+    this.timer = undefined;
+    for (const stock of this.fine.values()) {
+      this.checkpointStocks.delete(stock);
+      if (!stock.group.parent) {
+        this.owned.delete(stock);
+        stock.dispose();
+      }
+    }
+    this.fine.clear();
+    for (const [key, entry] of this.revolved) {
+      if (!key.startsWith('fine:')) continue;
+      this.revolved.delete(key);
+      if (!entry.stock.group.parent) {
+        this.ownedRevolved.delete(entry.stock);
+        entry.stock.dispose();
+      }
+    }
+    this.histories.get('fine')?.history.dispose();
+    this.histories.delete('fine');
+    if (previousCoarsePitch !== nextCoarsePitch) {
+      for (const stock of this.coarse.values()) {
+        this.checkpointStocks.delete(stock);
+        if (!stock.group.parent) {
+          this.owned.delete(stock);
+          stock.dispose();
+        }
+      }
+      this.coarse.clear();
+      for (const [key, entry] of this.revolved) {
+        if (!key.startsWith('coarse:')) continue;
+        this.revolved.delete(key);
+        if (!entry.stock.group.parent) {
+          this.ownedRevolved.delete(entry.stock);
+          entry.stock.dispose();
+        }
+      }
+      this.histories.get('coarse')?.history.dispose();
+      this.histories.delete('coarse');
+    }
+    if (!this.input) return Promise.resolve(undefined);
+    return this.seek(this.currentPosition);
   }
 
   private async run(pending: PendingSeek): Promise<void> {
@@ -282,7 +345,7 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
   }
 
   private scheduleRefinement(position: number, epoch: number): void {
-    if (this.options.finePitchMm >= 0.1) return;
+    if (this.finePitchMm >= 0.1) return;
     this.timer = setTimeout(() => {
       this.timer = undefined;
       if (this.cancelled || epoch !== this.epoch || this.running) return;
@@ -320,8 +383,28 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
     if (motionCount <= this.rotationalThrough)
       return this.rotationalFrame(requestedPosition, phase, motionCount);
     const pitch =
-      phase === 'fine' ? this.options.finePitchMm : Math.max(0.1, this.options.finePitchMm);
+      phase === 'fine' ? this.finePitchMm : Math.max(0.1, this.finePitchMm);
     const cache = phase === 'fine' ? this.fine : this.coarse;
+    for (const stock of [...this.owned]) {
+      if (
+        !stock.group.parent &&
+        !this.pinned.has(stock) &&
+        ![...this.coarse.values()].includes(stock) &&
+        ![...this.fine.values()].includes(stock)
+      ) {
+        this.owned.delete(stock);
+        stock.dispose();
+      }
+    }
+    for (const stock of [...this.ownedRevolved]) {
+      if (
+        !stock.group.parent &&
+        ![...this.revolved.values()].some((entry) => entry.stock === stock)
+      ) {
+        this.ownedRevolved.delete(stock);
+        stock.dispose();
+      }
+    }
     let stock = cache.get(position),
       elapsedMs = 0;
     const rotationalBase =
@@ -397,7 +480,12 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
       const size = new THREE.Vector3(...materialSize(input.stock));
       const calculationEpoch = this.epoch;
       let intervalCapacity = dexelIntervalCapacity(
-        Math.max(source?.layout.intervalCapacity ?? 0, rotationalBase?.maxIntervals ?? 0),
+        Math.max(
+          this.knownCapacity.get(phase) ?? 0,
+          this.knownCapacity.get('coarse') ?? 0,
+          source?.layout.intervalCapacity ?? 0,
+          rotationalBase?.maxIntervals ?? 0,
+        ),
       );
       let retry: boolean;
       do {
@@ -428,9 +516,13 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
                 return tiles;
               }, []),
             )
-          : Uint32Array.from(
-              new Set(sweeps.flatMap((sweep) => dexelTilesForBounds(layout, sweep.bounds))),
-            );
+          : (() => {
+              const tiles: number[] = [];
+              for (let tile = 0; tile < layout.tiles; tile++) {
+                if (index.ranges[tile * 2 + 1] > 0) tiles.push(tile);
+              }
+              return Uint32Array.from(tiles);
+            })();
         const changedTiles = updateBase
           ? Uint32Array.from(new Set([...cutTiles, ...source!.layout.storedTiles]))
           : cutTiles;
@@ -459,7 +551,11 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
           4096 -
           (arena ? 2 * (layout.intervalBytes + Math.max(1, layout.storageRays) * 4) : 0);
         this.makeRoom(baseBytes, source ?? (arena ? arenaProvider : undefined));
-        const capture = !history && (!source || reusedPosition === 0) && motionCount > 0;
+        const capture =
+          !history &&
+          (!source || reusedPosition === 0) &&
+          motionCount > 0 &&
+          (phase === 'coarse' || sweeps.length <= 512);
         const tileBytes = 2 * 1024 * (intervalCapacity * 8 + 4) + 12;
         const spare = Math.max(0, this.memoryLimitBytes - this.residentBytes() - baseBytes);
         // Reserve a bounded atlas, leaving most spare memory for streamed history.
@@ -516,17 +612,35 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
             this.pinned.delete(stock);
           }
           const cancelled = () => this.cancelled || calculationEpoch !== this.epoch;
-          if (!checkpoint) this.progress(motionCount - newMotions, motionCount);
+          const baseMotions = motionCount - newMotions;
+          if (!checkpoint) this.progress(baseMotions, motionCount);
           const copyMs = source ? await stock.copyFrom(source, cancelled) : 0;
           const computeMs = history
             ? await stock.restoreHistory(history, step, cancelled, source ? sourceStep : -1)
             : sweeps.length || !source
-              ? await stock.calculate(sweeps.length, cancelled)
+              ? await stock.calculate(
+                  sweeps.length,
+                  cancelled,
+                  !checkpoint && newMotions > 0
+                    ? (done, total) => {
+                        if (done < total) {
+                          this.progress(
+                            baseMotions + Math.floor((done / total) * newMotions),
+                            motionCount,
+                          );
+                        }
+                      }
+                    : undefined,
+                )
               : 0;
           elapsedMs += copyMs + computeMs;
           if (this.cancelled || calculationEpoch !== this.epoch)
             throw new DOMException('GPU replay cancelled', 'AbortError');
           if (!checkpoint) this.progress(motionCount, motionCount);
+          this.knownCapacity.set(
+            phase,
+            dexelIntervalCapacity(Math.max(this.knownCapacity.get(phase) ?? 0, intervalCapacity)),
+          );
           cache.set(position, stock);
           if (checkpoint) this.checkpointStocks.add(stock);
           const recorded = stock.takeHistory();
@@ -552,7 +666,10 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
             console.warn('[NC-Edit7 GPU] ' + stock.historyUnavailable);
           }
           stock.group.userData.releaseGpuStock = () => {
-            if (this.cancelled) {
+            if (
+              this.cancelled ||
+              (this.coarse.get(position) !== stock && this.fine.get(position) !== stock)
+            ) {
               cache.delete(position);
               this.owned.delete(stock!);
               stock!.dispose();
@@ -591,6 +708,10 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
               }),
           );
           intervalCapacity = nextCapacity;
+          this.knownCapacity.set(
+            phase,
+            dexelIntervalCapacity(Math.max(this.knownCapacity.get(phase) ?? 0, nextCapacity)),
+          );
           retry = true;
         }
       } while (retry);
@@ -598,7 +719,7 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
       cache.delete(position);
       cache.set(position, stock);
     }
-    if (capturedHistory && position >= 64) {
+    if (capturedHistory && phase === 'coarse' && position >= 64) {
       this.pinned.add(stock);
       try {
         for (const checkpoint of this.histories
@@ -739,7 +860,7 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
     const position = Math.min(requestedPosition, this.safePosition);
     const key = `${phase}:${position}`;
     const pitch =
-      phase === 'fine' ? this.options.finePitchMm : Math.max(0.1, this.options.finePitchMm);
+      phase === 'fine' ? this.finePitchMm : Math.max(0.1, this.finePitchMm);
     const epoch = this.epoch;
     let entry = this.revolved.get(key);
     const cacheHit = !!entry;
@@ -783,7 +904,7 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
       this.ownedRevolved.add(stock);
       this.revolved.set(key, entry);
       stock.group.userData.releaseGpuStock = () => {
-        if (this.cancelled) {
+        if (this.cancelled || this.revolved.get(key) !== entry) {
           this.revolved.delete(key);
           this.ownedRevolved.delete(stock);
           stock.dispose();
@@ -912,6 +1033,7 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
     this.coarse.clear();
     this.fine.clear();
     this.checkpointStocks.clear();
+    this.knownCapacity.clear();
     for (const stock of this.ownedRevolved)
       if (!stock.group.parent) {
         this.ownedRevolved.delete(stock);

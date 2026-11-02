@@ -15,8 +15,10 @@ import {
   GPU_SWEEP_STRIDE,
   GPU_SWEEP_WGSL,
   GPU_SWEEP_RAY_WGSL,
+  usesAnalyticalBallSweepRayCuts,
   usesAnalyticalFlatRayCuts,
   usesAnalyticalProfileRayCuts,
+  usesAnalyticalRoundedRayCuts,
   type CompiledGpuSweep,
 } from '../GpuSweepCompiler';
 import { rotationQuaternion, stockPlacement } from '../../../shared/SimulationTransforms';
@@ -456,7 +458,7 @@ describe('bounded GPU ray sweep intervals', () => {
     return result;
   }
 
-  it('uses direct profile clipping for axial drills and stationary balls but retains other solvers', () => {
+  it('uses direct profile clipping for axial drills and stationary balls and analytical capsule clipping for moving balls', () => {
     expect(
       usesAnalyticalProfileRayCuts(compileGpuSweeps(input([motion(drill, v(), v(0, 0, -3))]))[0]),
     ).toBe(true);
@@ -469,7 +471,18 @@ describe('bounded GPU ray sweep intervals', () => {
     expect(
       usesAnalyticalProfileRayCuts(compileGpuSweeps(input([motion(ball, v(), v(0, 0, 1))]))[0]),
     ).toBe(false);
+    expect(
+      usesAnalyticalBallSweepRayCuts(compileGpuSweeps(input([motion(ball, v(), v(0, 0, 1))]))[0]),
+    ).toBe(true);
+    expect(
+      usesAnalyticalBallSweepRayCuts(compileGpuSweeps(input([motion(ball, v(), v(3, -1, 2))]))[0]),
+    ).toBe(true);
+    expect(
+      usesAnalyticalRoundedRayCuts(compileGpuSweeps(input([motion(rounded, v(), v(3, -1, 0))]))[0]),
+    ).toBe(true);
     expect(GPU_SWEEP_RAY_WGSL).toContain('return gpuProfileRayCuts');
+    expect(GPU_SWEEP_RAY_WGSL).toContain('return gpuBallSweepRayCuts');
+    expect(GPU_SWEEP_RAY_WGSL).toContain('gpuRoundedAxialRayCuts');
   });
   it('clips axial drill caps, conical side and stationary ball hemisphere at known roots', () => {
     const bore = compileGpuSweeps(input([motion(drill, v(), v(0, 0, -2))]))[0];
@@ -635,6 +648,24 @@ describe('bounded GPU ray sweep intervals', () => {
     expect(GPU_SWEEP_RAY_WGSL.indexOf('return gpuFlatRayCuts')).toBeLessThan(
       GPU_SWEEP_RAY_WGSL.indexOf('iteration < 48u'),
     );
+  });
+
+  it('preserves continuous ball sweep occupancy on rotated tools and oblique or reversed rays using analytical capsule clipping', () => {
+    const orientation = rotationQuaternion([20, 30, -10]);
+    const next = random();
+    for (const travel of [v(3, -1, 0), v(0, 0, -2), v(3, -1, 2), v(-3, 1, -2)]) {
+      const cut = motion(ball);
+      cut.start.orientation = orientation.toArray();
+      cut.end.orientation = orientation.toArray();
+      cut.end.position = travel.clone().applyQuaternion(orientation).toArray();
+      const sweep = compileGpuSweeps(input([cut]))[0];
+      expect(usesAnalyticalBallSweepRayCuts(sweep)).toBe(true);
+      for (const origin of sampled(sweep, 30)) {
+        const direction = v(next() - 0.5, next() - 0.5, next() - 0.5).normalize();
+        intervals(sweep, origin, direction);
+        intervals(sweep, origin, direction.negate());
+      }
+    }
   });
 
   it('localizes rounded cutters across the old internal equator zero seam', () => {

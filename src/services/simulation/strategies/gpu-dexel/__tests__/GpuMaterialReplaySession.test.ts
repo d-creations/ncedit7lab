@@ -681,4 +681,24 @@ describe('progressive GPU replay lifecycle', () => {
     expect(created.map((stock) => stock.intervalCapacity)).toEqual([4, 8, 16]);
     expect(created.every((stock) => stock.dispose.mock.calls.length === 1)).toBe(true);
   });
+  it('updates fine pitch in place without recalculating coarse stock or retrying known interval capacities', async () => {
+    const replay = session();
+    calculate.mockRejectedValueOnce(new GpuDexelIntervalOverflowError(4));
+    const coarse = await replay.start(input, [0, 1], () => {}, true);
+    expect(created.map((stock) => [stock.pitch, stock.intervalCapacity])).toEqual([
+      [0.1, 4],
+      [0.1, 8],
+    ]);
+    await vi.advanceTimersByTimeAsync(350);
+    expect(refined).toHaveBeenCalledOnce();
+    const firstFine = refined.mock.calls[0][0];
+    expect(firstFine).toMatchObject({ phase: 'fine', pitchMm: 0.02 });
+    const updated = await replay.setFinePitchMm(0.031);
+    expect(updated).toMatchObject({ phase: 'coarse', pitchMm: 0.1, cacheHit: true, stock: coarse.stock });
+    expect(firstFine.stock.dispose).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(350);
+    expect(refined).toHaveBeenCalledTimes(2);
+    expect(refined.mock.calls[1][0]).toMatchObject({ phase: 'fine', pitchMm: 0.031, position: 2 });
+    expect(calculate).toHaveBeenCalledTimes(4);
+  });
 });

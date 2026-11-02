@@ -188,5 +188,7 @@ export class GpuDexelHistory {
   dispose(): void {
     this.events.dispose();
     this.ranges.dispose();
+    this.events.array = new Uint32Array(4);
+    this.ranges.array = new Uint32Array(2);
   }
 }

@@ -37,6 +37,7 @@ import {
   GPU_SWEEP_WGSL,
   GPU_SWEEP_RAY_WGSL,
   type CompiledGpuSweep,
+  usesAnalyticalBallSweepRayCuts,
   usesAnalyticalFlatRayCuts,
   usesAnalyticalProfileRayCuts,
 } from './GpuSweepCompiler';
@@ -55,11 +56,12 @@ export function dexelHistorySubmission(capacity: number, tileSweeps: number, ray
   return { sweeps, rays: Math.max(1, Math.min(rays, Math.floor(capacity / (sweeps * 4)))) };
 }
 
-export function dexelDispatchRays(tileRanges: Uint32Array): number {
+export function dexelDispatchRays(tileRanges: Uint32Array, allAnalytical = false): number {
   let maxTileSweeps = 1;
   for (let i = 1; i < tileRanges.length; i += 2)
     maxTileSweeps = Math.max(maxTileSweeps, Math.min(DEXEL_PASS_SWEEPS, tileRanges[i]));
-  return Math.max(64, Math.min(DEXEL_DISPATCH_RAYS, Math.floor(65536 / maxTileSweeps / 64) * 64));
+  const budget = allAnalytical ? 262144 : 65536;
+  return Math.max(64, Math.min(DEXEL_DISPATCH_RAYS, Math.floor(budget / maxTileSweeps / 64) * 64));
 }
 
 export function dexelDispatchRanges(ranges: Uint32Array, entryOffset: number): [number, number][] {
@@ -390,15 +392,36 @@ fn gpuDexelAxisSample(p: vec3f, axis: u32, size: vec3f, dims: vec3f, capacity: u
   if (nearest.w > 1e19) { return nearest; }
   let entry = nearest[axis] < 0.0;
   let reference = p[axis] - nearest[axis] * nearest.w;
-  let limit = 4.0 * max(h[u], h[v]);
-  let a = gpuDexelMatchEndpoint(rays[0], reference, entry, limit, capacity, size, dims, cylinder);
-  let b = gpuDexelMatchEndpoint(rays[1], reference, entry, limit, capacity, size, dims, cylinder);
-  let c = gpuDexelMatchEndpoint(rays[2], reference, entry, limit, capacity, size, dims, cylinder);
-  let d = gpuDexelMatchEndpoint(rays[3], reference, entry, limit, capacity, size, dims, cylinder);
-  if (min(min(a.y, b.y), min(c.y, d.y)) < 0.0) { return nearest; }
-  let endpoint = mix(mix(a.x, b.x, weight[u]), mix(c.x, d.x, weight[u]), weight[v]);
-  let du = mix(b.x - a.x, d.x - c.x, weight[v]) / h[u];
-  let dv = mix(c.x - a.x, d.x - b.x, weight[u]) / h[v];
+  let maxStep = 1.65 * max(h[u], h[v]);
+  let a = gpuDexelMatchEndpoint(rays[0], reference, entry, maxStep, capacity, size, dims, cylinder);
+  let b = gpuDexelMatchEndpoint(rays[1], reference, entry, maxStep, capacity, size, dims, cylinder);
+  let c = gpuDexelMatchEndpoint(rays[2], reference, entry, maxStep, capacity, size, dims, cylinder);
+  let d = gpuDexelMatchEndpoint(rays[3], reference, entry, maxStep, capacity, size, dims, cylinder);
+  let abOk = a.y > 0.0 && b.y > 0.0 && abs(b.x - a.x) <= maxStep;
+  let cdOk = c.y > 0.0 && d.y > 0.0 && abs(d.x - c.x) <= maxStep;
+  let acOk = a.y > 0.0 && c.y > 0.0 && abs(c.x - a.x) <= maxStep;
+  let bdOk = b.y > 0.0 && d.y > 0.0 && abs(d.x - b.x) <= maxStep;
+  if (!abOk && !cdOk && !acOk && !bdOk) { return nearest; }
+  var du = 0.0;
+  if (abOk && cdOk) { du = mix(b.x - a.x, d.x - c.x, weight[v]) / h[u]; }
+  else if (abOk) { du = (b.x - a.x) / h[u]; }
+  else if (cdOk) { du = (d.x - c.x) / h[u]; }
+  var dv = 0.0;
+  if (acOk && bdOk) { dv = mix(c.x - a.x, d.x - b.x, weight[u]) / h[v]; }
+  else if (acOk) { dv = (c.x - a.x) / h[v]; }
+  else if (bdOk) { dv = (d.x - b.x) / h[v]; }
+  var endpoint = reference;
+  if (abOk && cdOk && acOk && bdOk) {
+    endpoint = mix(mix(a.x, b.x, weight[u]), mix(c.x, d.x, weight[u]), weight[v]);
+  } else if (abOk) {
+    endpoint = mix(a.x, b.x, weight[u]);
+  } else if (cdOk) {
+    endpoint = mix(c.x, d.x, weight[u]);
+  } else if (acOk) {
+    endpoint = mix(a.x, c.x, weight[v]);
+  } else if (bdOk) {
+    endpoint = mix(b.x, d.x, weight[v]);
+  }
   var result = vec4f(0.0, 0.0, 0.0, nearest[axis] * (p[axis] - endpoint));
   result[axis] = nearest[axis];
   result[u] = -nearest[axis] * du * select(0.0, 1.0, high[u] > low[u]);
@@ -495,28 +518,70 @@ fn gpuDexelNormal(p: vec3f, size: vec3f, dims: vec3f, capacity: u32, cylinder: u
   let r0 = gpuRayIndex(clamped, 0u, size, dims);
   let r1 = gpuRayIndex(clamped, 1u, size, dims);
   let r2 = gpuRayIndex(clamped, 2u, size, dims);
+  let h = size / dims;
+  let pitch = max(h.x, max(h.y, h.z));
   let unstored = dexelTileSweeps.value[r0 / 1024u] == 0xffffffffu &&
                  dexelTileSweeps.value[r1 / 1024u] == 0xffffffffu &&
                  dexelTileSweeps.value[r2 / 1024u] == 0xffffffffu;
-  let baseInfo = gpuBaseSurfaceNormal(p, size, dims, cylinder);
-  if (baseInfo.w < 1e19) {
-    let h = size / dims;
-    let pitch = max(h.x, max(h.y, h.z));
-    if (unstored || (baseInfo.w <= pitch * 1.25 && gpuIsOnIntactBase(p, r0, r1, r2, size, dims, capacity, cylinder))) {
-      return baseInfo.xyz;
+  let header = gpuRayCount(dims) / 1024u;
+  let slabs = dexelTileSweeps.value[header];
+  if (slabs > 0u || cylinder != 0u) {
+    let baseInfo = gpuBaseSurfaceNormal(p, size, dims, cylinder);
+    if (baseInfo.w < 1e19) {
+      if (unstored || (baseInfo.w <= pitch * 1.25 && gpuIsOnIntactBase(p, r0, r1, r2, size, dims, capacity, cylinder))) {
+        return baseInfo.xyz;
+      }
+    }
+  } else {
+    let boxDist = size * 0.5 - abs(p);
+    let minBox = min(boxDist.x, min(boxDist.y, boxDist.z));
+    if (unstored || (minBox <= pitch * 0.65 && gpuIsOnIntactBase(p, r0, r1, r2, size, dims, capacity, cylinder))) {
+      if (boxDist.x <= boxDist.y && boxDist.x <= boxDist.z) { return vec3f(select(-1.0, 1.0, p.x >= 0.0), 0.0, 0.0); }
+      if (boxDist.y <= boxDist.z) { return vec3f(0.0, select(-1.0, 1.0, p.y >= 0.0), 0.0); }
+      return vec3f(0.0, 0.0, select(-1.0, 1.0, p.z >= 0.0));
     }
   }
-  var surface = vec4f(0.0, 0.0, 0.0, -1e20);
+  var samples: array<vec4f, 3>;
+  var valid: array<bool, 3>;
+  var bestAbs = 1e20;
+  var bestAxis = 0u;
+  var bestSmoothAbs = 1e20;
+  var bestSmoothAxis = 3u;
   for (var axis = 0u; axis < 3u; axis++) {
     let sample = gpuDexelAxisSample(p, axis, size, dims, capacity, cylinder);
     let magnitude = length(sample.xyz);
     if (magnitude > 0.0 && sample.w < 1e19) {
       let normalized = sample / magnitude;
-      if (normalized.w > surface.w) { surface = normalized; }
+      let absDist = abs(normalized.w);
+      samples[axis] = vec4f(normalized.xyz, absDist);
+      valid[axis] = true;
+      if (absDist < bestAbs) {
+        bestAbs = absDist;
+        bestAxis = axis;
+      }
+      if (magnitude > 1.0001 && absDist < bestSmoothAbs) {
+        bestSmoothAbs = absDist;
+        bestSmoothAxis = axis;
+      }
+    } else {
+      samples[axis] = vec4f(0.0, 0.0, 0.0, 1e20);
+      valid[axis] = false;
     }
   }
-  if (dot(surface.xyz, surface.xyz) < 1e-15) { return vec3f(0.0, 0.0, 1.0); }
-  return normalize(surface.xyz);
+  let primaryAxis = select(bestAxis, bestSmoothAxis, bestSmoothAxis < 3u && bestSmoothAbs <= bestAbs + pitch * 0.25);
+  if (!valid[primaryAxis]) { return vec3f(0.0, 0.0, 1.0); }
+  let primary = samples[primaryAxis];
+  var blended = primary.xyz;
+  for (var axis = 0u; axis < 3u; axis++) {
+    if (axis == primaryAxis || !valid[axis]) { continue; }
+    let other = samples[axis];
+    if (other.w <= primary.w + pitch * 0.45 && dot(other.xyz, primary.xyz) > 0.85) {
+      let weight = clamp(1.0 - (other.w - primary.w) / (pitch * 0.45), 0.15, 1.0);
+      blended += other.xyz * weight;
+    }
+  }
+  if (dot(blended, blended) < 1e-15) { return vec3f(0.0, 0.0, 1.0); }
+  return normalize(blended);
 }
 fn gpuRefineDexelHit(origin: vec3f, direction: vec3f, hitT: f32, prevT: f32, endT: f32, size: vec3f, dims: vec3f, capacity: u32, cylinder: u32) -> vec4f {
   let h = size / dims;
@@ -531,10 +596,15 @@ fn gpuRefineDexelHit(origin: vec3f, direction: vec3f, hitT: f32, prevT: f32, end
       dexelTileSweeps.value[r2 / 1024u] == 0xffffffffu) {
     return vec4f(p, 1.0);
   }
-  let baseInfo = gpuBaseSurfaceNormal(p, size, dims, cylinder);
-  if (baseInfo.w <= pitch * 1.25 && gpuIsOnIntactBase(p, r0, r1, r2, size, dims, capacity, cylinder)) {
-    return vec4f(p, 1.0);
+  let header = gpuRayCount(dims) / 1024u;
+  let slabs = dexelTileSweeps.value[header];
+  if (slabs > 0u || cylinder != 0u) {
+    let baseInfo = gpuBaseSurfaceNormal(p, size, dims, cylinder);
+    if (baseInfo.w <= pitch * 1.25 && gpuIsOnIntactBase(p, r0, r1, r2, size, dims, capacity, cylinder)) {
+      return vec4f(p, 1.0);
+    }
   }
+  var bestAbs = 1e20;
   var bestSample = vec4f(0.0, 0.0, 0.0, -1e20);
   var smoothAxes = 0u;
   var maxSmoothField = -1e20;
@@ -543,7 +613,11 @@ fn gpuRefineDexelHit(origin: vec3f, direction: vec3f, hitT: f32, prevT: f32, end
     let mag = length(sample.xyz);
     if (mag > 0.0 && sample.w < 1e19) {
       let normalized = sample / mag;
-      if (normalized.w > bestSample.w) { bestSample = normalized; }
+      let absDist = abs(normalized.w);
+      if (absDist < bestAbs) {
+        bestAbs = absDist;
+        bestSample = normalized;
+      }
       if (mag > 1.0001) {
         smoothAxes++;
         maxSmoothField = max(maxSmoothField, normalized.w);
@@ -553,7 +627,7 @@ fn gpuRefineDexelHit(origin: vec3f, direction: vec3f, hitT: f32, prevT: f32, end
   if (smoothAxes > 0u && maxSmoothField > pitch * 0.35) {
     return vec4f(0.0);
   }
-  if (bestSample.w > -pitch && bestSample.w < pitch) {
+  if (bestAbs < pitch) {
     let denom = dot(bestSample.xyz, direction);
     if (denom < -0.05) {
       let dt = clamp(-bestSample.w / denom, -pitch, pitch);
@@ -662,24 +736,25 @@ fn gpuTraceDexels(origin: vec3f, surface: vec3f, size: vec3f, dims: vec3f, capac
         t += max(boreSkip, epsilon);
         continue;
       }
-      let clampedCheck = clamp(p, -size * 0.5, size * 0.5);
-      let c0 = gpuRayIndex(clampedCheck, 0u, size, dims);
-      let c1 = gpuRayIndex(clampedCheck, 1u, size, dims);
-      let c2 = gpuRayIndex(clampedCheck, 2u, size, dims);
-      if (dexelTileSweeps.value[c0 / 1024u] == 0xffffffffu &&
-          dexelTileSweeps.value[c1 / 1024u] == 0xffffffffu &&
-          dexelTileSweeps.value[c2 / 1024u] == 0xffffffffu &&
-          !inSlabBand) {
-        var stepSkip = min(slabSkip, min(h.x, h.y) * 0.5);
-        for (var a = 0u; a < 3u; a++) {
-          if (abs(direction[a]) < 1e-15) { continue; }
-          let cellCoord = floor((p[a] + size[a] * 0.5) / h[a]);
-          let grid = -size[a] * 0.5 + (cellCoord + select(0.0, 1.0, direction[a] > 0.0)) * h[a];
-          stepSkip = min(stepSkip, max(epsilon, (grid - p[a]) / direction[a] + epsilon));
+      if (!inSlabBand) {
+        let clampedCheck = clamp(p, -size * 0.5, size * 0.5);
+        let c0 = gpuRayIndex(clampedCheck, 0u, size, dims);
+        let c1 = gpuRayIndex(clampedCheck, 1u, size, dims);
+        let c2 = gpuRayIndex(clampedCheck, 2u, size, dims);
+        if (dexelTileSweeps.value[c0 / 1024u] == 0xffffffffu &&
+            dexelTileSweeps.value[c1 / 1024u] == 0xffffffffu &&
+            dexelTileSweeps.value[c2 / 1024u] == 0xffffffffu) {
+          var stepSkip = min(slabSkip, min(h.x, h.y) * 0.5);
+          for (var a = 0u; a < 3u; a++) {
+            if (abs(direction[a]) < 1e-15) { continue; }
+            let cellCoord = floor((p[a] + size[a] * 0.5) / h[a]);
+            let grid = -size[a] * 0.5 + (cellCoord + select(0.0, 1.0, direction[a] > 0.0)) * h[a];
+            stepSkip = min(stepSkip, max(epsilon, (grid - p[a]) / direction[a] + epsilon));
+          }
+          prevT = t;
+          t += max(stepSkip, epsilon);
+          continue;
         }
-        prevT = t;
-        t += max(stepSkip, epsilon);
-        continue;
       }
     } else if (cylinder != 0u) {
       let paddedR = size.x * 0.5 + max(h.x, h.y);
@@ -709,18 +784,19 @@ fn gpuTraceDexels(origin: vec3f, surface: vec3f, size: vec3f, dims: vec3f, capac
     let s0 = dexelTileSweeps.value[r0 / 1024u];
     let s1 = dexelTileSweeps.value[r1 / 1024u];
     let s2 = dexelTileSweeps.value[r2 / 1024u];
-    var occupied = true; var safeSkip = 0.0;
     if ((slabs == 0u && cylinder != 0u && dot(p.xy, p.xy) > (size.x * 0.5) * (size.x * 0.5)) ||
         (slabs > 0u && !inSlabBand)) {
-      occupied = false;
       var cellStep = end - t;
       for (var a = 0u; a < 3u; a++) {
         if (abs(direction[a]) < 1e-15) { continue; }
         let grid = -size[a] * 0.5 + (cell[a] + select(0.0, 1.0, direction[a] > 0.0)) * h[a];
         cellStep = min(cellStep, (grid - p[a]) / direction[a] + epsilon);
       }
-      safeSkip = max(safeSkip, cellStep);
+      prevT = t;
+      t += max(cellStep, epsilon);
+      continue;
     }
+    var occupied = true; var safeSkip = 0.0;
     if (s0 == 0xffffffffu && s1 == 0xffffffffu && s2 == 0xffffffffu) {
       for (var axis = 0u; axis < 3u; axis++) {
         let ray = select(select(r0, r1, axis == 1u), r2, axis == 2u);
@@ -925,10 +1001,6 @@ export class GpuDexelStock {
     )
       throw new SimulationCapabilityError('Invalid GPU history retention limit');
     this.recordHistory.value = historyEvents ? 1 : 0;
-    this.captureAttribute = new StorageBufferAttribute(
-      new Uint32Array(Math.max(1, historyEvents) * 4),
-      4,
-    );
     this.layout = createDexelLayout(
       size,
       pitchMm,
@@ -942,7 +1014,9 @@ export class GpuDexelStock {
         : undefined,
     );
     this.analyticalFlatSweeps = sweeps.filter(usesAnalyticalFlatRayCuts).length;
-    this.analyticalProfileSweeps = sweeps.filter(usesAnalyticalProfileRayCuts).length;
+    this.analyticalProfileSweeps = sweeps.filter(
+      (sweep) => usesAnalyticalProfileRayCuts(sweep) || usesAnalyticalBallSweepRayCuts(sweep),
+    ).length;
     const index = indexDexelTiles(this.layout, sweeps, memoryLimitBytes);
     this.tileRanges = index.ranges;
     this.tileSlots = new Uint32Array(this.layout.tiles).fill(0xffffffff);
@@ -1002,12 +1076,27 @@ export class GpuDexelStock {
       0,
     );
     // Ray count alone does not bound work: each ray evaluates its tile's cutter list.
-    this.dispatchRays = dexelDispatchRays(index.ranges);
+    const allAnalytical =
+      sweeps.length > 0 &&
+      this.analyticalFlatSweeps + this.analyticalProfileSweeps >= sweeps.length * 0.9;
+    this.dispatchRays = dexelDispatchRays(index.ranges, allAnalytical);
+    const passCapacity =
+      Math.max(1, Math.min(DEXEL_PASS_SWEEPS, this.maxTileSweeps)) *
+      Math.max(1, Math.min(this.dispatchRays, this.layout.storageRays)) *
+      4;
+    const captureEvents = historyEvents ? Math.min(historyEvents, passCapacity) : 1;
+    this.captureAttribute = new StorageBufferAttribute(new Uint32Array(captureEvents * 4), 4);
     const recordData = new Float32Array(Math.max(4, sweeps.length * GPU_SWEEP_STRIDE));
     const boundData = new Float32Array(Math.max(8, sweeps.length * 8));
     sweeps.forEach((sweep, i) => {
       recordData.set(sweep.data, i * GPU_SWEEP_STRIDE);
-      boundData.set([...sweep.bounds.min.toArray(), 0, ...sweep.bounds.max.toArray(), 0], i * 8);
+      const bOffset = i * 8;
+      boundData[bOffset] = sweep.bounds.min.x;
+      boundData[bOffset + 1] = sweep.bounds.min.y;
+      boundData[bOffset + 2] = sweep.bounds.min.z;
+      boundData[bOffset + 4] = sweep.bounds.max.x;
+      boundData[bOffset + 5] = sweep.bounds.max.y;
+      boundData[bOffset + 6] = sweep.bounds.max.z;
     });
     this.estimatedBytes =
       this.layout.estimatedBytes +
@@ -1315,7 +1404,11 @@ export class GpuDexelStock {
     return elapsedMs;
   }
 
-  async calculate(sweepCount: number, cancelled: () => boolean = () => false): Promise<number> {
+  async calculate(
+    sweepCount: number,
+    cancelled: () => boolean = () => false,
+    onProgress?: (completedEntries: number, totalEntries: number) => void,
+  ): Promise<number> {
     if (this.sealed) throw new SimulationCapabilityError('Published GPU stock is immutable');
     if (this.active) throw new SimulationCapabilityError('GPU stock is already in use');
     if (this.disposed) throw new DOMException('GPU stock disposed', 'AbortError');
@@ -1359,7 +1452,7 @@ export class GpuDexelStock {
     const captureCapacity = this.captureAttribute.array.length / 4;
     if (this.recordHistory.value && captureCapacity < 4)
       historyFailure('Removal history batch capacity exhausted: fewer than four event slots');
-    const submission = this.recordHistory.value
+    let submission = this.recordHistory.value
       ? dexelHistorySubmission(captureCapacity, this.maxTileSweeps, this.dispatchRays)
       : { sweeps: DEXEL_PASS_SWEEPS, rays: this.dispatchRays };
     this.passSweeps.value = submission.sweeps;
@@ -1384,18 +1477,45 @@ export class GpuDexelStock {
       const count = values[2];
       if (values[3] || count > captureCapacity) {
         historyFailure('Removal history batch capacity exhausted');
+        submission = { sweeps: DEXEL_PASS_SWEEPS, rays: this.dispatchRays };
+        this.passSweeps.value = submission.sweeps;
       } else if (retainedEvents + count > this.historyLimit) {
         historyFailure('Removal history retention budget exhausted');
+        submission = { sweeps: DEXEL_PASS_SWEEPS, rays: this.dispatchRays };
+        this.passSweeps.value = submission.sweeps;
       } else if (count) {
-        const captured = await Promise.race([
-          lost,
-          this.renderer.getArrayBufferAsync(this.captureAttribute),
-        ]);
+        let captured: ArrayBuffer | Error;
+        try {
+          captured = await Promise.race([
+            lost,
+            this.renderer.getArrayBufferAsync(this.captureAttribute),
+          ]);
+        } catch (error) {
+          if (error instanceof RangeError) {
+            historyFailure('Removal history readback allocation failed');
+            submission = { sweeps: DEXEL_PASS_SWEEPS, rays: this.dispatchRays };
+            this.passSweeps.value = submission.sweeps;
+            this.errorAttribute.array.fill(0);
+            this.errorAttribute.needsUpdate = true;
+            return;
+          }
+          throw error;
+        }
         if (captured instanceof Error) throw captured;
         if (this.disposed || cancelled())
           throw new DOMException('GPU history cancelled', 'AbortError');
-        historyChunks.push(new Uint32Array(captured, 0, count * 4).slice());
-        retainedEvents += count;
+        try {
+          const words = new Uint32Array(count * 4);
+          words.set(new Uint32Array(captured, 0, count * 4));
+          historyChunks.push(words);
+          retainedEvents += count;
+        } catch (error) {
+          if (error instanceof RangeError) {
+            historyFailure('Removal history retention allocation failed');
+            submission = { sweeps: DEXEL_PASS_SWEEPS, rays: this.dispatchRays };
+            this.passSweeps.value = submission.sweeps;
+          } else throw error;
+        }
       }
       this.errorAttribute.array.fill(0);
       this.errorAttribute.needsUpdate = true;
@@ -1404,11 +1524,9 @@ export class GpuDexelStock {
       this.device.pushErrorScope('validation');
       scoped = true;
       const entries = Math.min(sweepCount, this.maxTileSweeps);
-      for (
-        let entryOffset = 0;
-        entryOffset < Math.max(1, entries);
-        entryOffset += submission.sweeps
-      ) {
+      let entryOffset = 0;
+      while (entryOffset < Math.max(1, entries)) {
+        const passSweeps = submission.sweeps;
         this.entryOffset.value = entryOffset;
         const ranges: [number, number][] =
           entryOffset === 0 && this.resume.value === 0
@@ -1416,7 +1534,7 @@ export class GpuDexelStock {
             : dexelDispatchRanges(this.tileRanges, entryOffset);
         this.assertWritable(ranges);
         for (const [start, rays] of ranges) {
-          for (let offset = start; offset < start + rays; offset += submission.rays) {
+          for (let offset = start; offset < start + rays; ) {
             const count = Math.min(submission.rays, start + rays - offset);
             if (this.disposed || cancelled())
               throw new DOMException('GPU stock calculation cancelled', 'AbortError');
@@ -1476,11 +1594,14 @@ export class GpuDexelStock {
                 throw new DOMException('GPU history cancelled', 'AbortError');
               await drain();
             }
+            offset += count;
           }
         }
         if (this.disposed || cancelled())
           throw new DOMException('GPU stock calculation cancelled', 'AbortError');
         if (!this.recordHistory.value) await drain();
+        entryOffset += passSweeps;
+        if (entries > 0) onProgress?.(Math.min(entries, entryOffset), entries);
       }
     } catch (error) {
       recordGpuDiagnostic(this.device, 'compute-error', {
@@ -1521,20 +1642,27 @@ export class GpuDexelStock {
     if (this.disposed || cancelled())
       throw new DOMException('GPU stock disposed or cancelled', 'AbortError');
     if (this.recordHistory.value) {
-      const captured = new Uint32Array(retainedEvents * 4);
-      let offset = 0;
-      for (const chunk of historyChunks) {
-        captured.set(chunk, offset);
-        offset += chunk.length;
+      try {
+        const captured = new Uint32Array(retainedEvents * 4);
+        let offset = 0;
+        for (const chunk of historyChunks) {
+          captured.set(chunk, offset);
+          offset += chunk.length;
+        }
+        historyChunks.length = 0;
+        this.history = new GpuDexelHistory(
+          captured,
+          this.layout.rays,
+          this.sweeps,
+          this.historyKey,
+          this.memoryLimitBytes,
+        );
+        this.historyUnavailable = undefined;
+      } catch (error) {
+        if (error instanceof RangeError) {
+          historyFailure('Removal history consolidation allocation failed');
+        } else throw error;
       }
-      this.history = new GpuDexelHistory(
-        captured,
-        this.layout.rays,
-        this.sweeps,
-        this.historyKey,
-        this.memoryLimitBytes,
-      );
-      this.historyUnavailable = undefined;
     }
     this.calculated = true;
     const elapsedMs = performance.now() - started;
@@ -1743,9 +1871,16 @@ export class GpuDexelStock {
     this.computeNode.dispose();
     this.mesh.geometry.dispose();
     this.mesh.material.dispose();
-    for (const attribute of this.attributes)
-      if (attribute !== this.intervalAttribute && attribute !== this.countAttribute)
+    this.sweeps = [];
+    for (const attribute of this.attributes) {
+      if (attribute !== this.intervalAttribute && attribute !== this.countAttribute) {
         attribute.dispose();
+        attribute.array =
+          attribute.array instanceof Float32Array
+            ? new Float32Array(attribute.itemSize)
+            : new Uint32Array(attribute.itemSize);
+      }
+    }
     this.releaseSlots();
   }
 

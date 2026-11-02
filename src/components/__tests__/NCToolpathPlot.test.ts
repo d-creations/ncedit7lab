@@ -369,8 +369,9 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
     await vi.advanceTimersByTimeAsync(350);
     const status = plot.shadowRoot!.getElementById('replay-status')!;
     expect(status.hidden).toBe(false);
-    expect(status.textContent).toBe('\u26d4');
-    expect(status.getAttribute('aria-label')).toBe('Simulation error. See console log for details.');
+    expect(status.textContent).toContain('\u26d4');
+    expect(status.textContent).toContain('Fine stock test failure');
+    expect(status.getAttribute('aria-label')).toContain('Simulation error:');
     expect(log).toHaveBeenCalledWith(expect.stringContaining('Fine stock test failure'));
     expect(plot.shadowRoot!.getElementById('simulation-progress')!.hidden).toBe(true);
     expect(plot.scene!.children.some((child) => child.name === 'gpu-dexel-stock')).toBe(true);
@@ -418,7 +419,8 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
     plot.shadowRoot!.querySelector<HTMLButtonElement>('#replay-start')!.click();
     await vi.advanceTimersByTimeAsync(0);
     await vi.waitFor(() => expect(plot.shadowRoot!.getElementById('replay-status')!.dataset.severity).toBe('warning'));
-    expect(plot.shadowRoot!.getElementById('replay-status')!.textContent).toBe('\u26a0');
+    expect(plot.shadowRoot!.getElementById('replay-status')!.textContent).toContain('\u26a0');
+    expect(plot.shadowRoot!.getElementById('replay-status')!.textContent).toContain('GPU interval overflow');
     expect(warning).toHaveBeenCalledWith(expect.stringContaining('GPU interval overflow'));
     expect(warning).toHaveBeenCalledWith(expect.stringContaining('Using CPU simulation'));
     expect(worker.postMessage).toHaveBeenCalled();
@@ -630,11 +632,12 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
     plot.shadowRoot!.querySelector<HTMLButtonElement>('#replay-next')!.click();
     worker.onerror?.(new ErrorEvent('error', { message: 'Replay budget exceeded' }));
     await vi.waitFor(() => expect(plot.shadowRoot!.getElementById('replay-status')!.textContent)
-      .toBe('\u26d4'));
+      .toContain('\u26d4'));
+    expect(plot.shadowRoot!.getElementById('replay-status')!.textContent).toContain('Replay budget exceeded');
     expect(log).toHaveBeenCalledWith(expect.stringContaining('Replay budget exceeded'));
     expect(plot.shadowRoot!.getElementById('replay-status')!.hidden).toBe(false);
     expect(plot.shadowRoot!.getElementById('replay-status')!.getAttribute('aria-label'))
-      .toBe('Simulation error. See console log for details.');
+      .toContain('Simulation error:');
     expect(plot.shadowRoot!.getElementById('simulation-progress')!.hidden).toBe(true);
     expect(plot.scene!.children.find((child) => child.name === 'machined-stock')).toBe(stock);
     expect(worker.terminate).toHaveBeenCalledOnce();
@@ -704,7 +707,8 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
     const count = vi.mocked(renderer.render).mock.calls.length;
     plot.renderScene();
     expect(renderer.render).toHaveBeenCalledTimes(count);
-    expect(plot.shadowRoot?.querySelector('#replay-status')?.textContent).toBe('\u26d4');
+    expect(plot.shadowRoot?.querySelector('#replay-status')?.textContent).toContain('\u26d4');
+    expect(plot.shadowRoot?.querySelector('#replay-status')?.textContent).toContain('device removed');
     expect(log).toHaveBeenCalledWith(expect.stringContaining('device removed'));
     log.mockRestore();
   });
@@ -1045,15 +1049,20 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
     await plot.plotNCCode('1');
 
     const material = plot.scene.children.find((child) => child.userData.isMaterial)!;
+    const toolpath = plot.scene.children.find((child) => child.userData.isToolpath)!;
     const toggle = plot.shadowRoot!.querySelector<HTMLButtonElement>('#toggle-material')!;
+    const toggleToolpath = plot.shadowRoot!.querySelector<HTMLButtonElement>('#toggle-toolpath')!;
     expect(material.visible).toBe(true);
+    expect(toolpath.visible).toBe(true);
     expect(toggle.hidden).toBe(false);
     expect(toggle.textContent).toBe('Hide Material');
+    expect(toggleToolpath.hidden).toBe(false);
+    expect(toggleToolpath.textContent).toBe('Hide Toolpath');
     const diagnostics = plot.shadowRoot!.querySelector<HTMLElement>('#material-removal-status')!;
     expect(diagnostics.hidden).toBe(false);
-    expect(diagnostics.textContent).toBe('\u26d4');
+    expect(diagnostics.textContent).toContain('\u26d4');
+    expect(diagnostics.textContent).toContain('program-coordinate preview');
     expect(errors).toHaveBeenCalledWith(expect.stringContaining('program-coordinate preview'));
-    expect(errors).toHaveBeenCalledWith(expect.stringContaining('spindle operation is not verified'));
     plot.toggleAxes();
     expect(material.visible).toBe(true);
 
@@ -1064,8 +1073,18 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
     toggle.click();
     expect(material.visible).toBe(true);
     expect(toggle.textContent).toBe('Hide Material');
+
+    toggleToolpath.click();
+    expect(toolpath.visible).toBe(false);
+    expect(toggleToolpath.textContent).toBe('Show Toolpath');
+
+    toggleToolpath.click();
+    expect(toolpath.visible).toBe(true);
+    expect(toggleToolpath.textContent).toBe('Hide Toolpath');
+
     plot.clearPlot();
     expect(diagnostics.hidden).toBe(true);
+    expect(toggleToolpath.hidden).toBe(true);
   });
 
   it('shows a turning tool at a turning virtual-tip endpoint pose', async () => {
@@ -1200,7 +1219,8 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
     const create = vi.spyOn(replayStrategyFactory, 'createReplayStrategy');
     await plot.plotNCCode('1');
     await vi.waitFor(() => expect(errors).toHaveBeenCalledWith(expect.stringContaining('Configure stockBindings in the backend')));
-    expect(plot.shadowRoot!.getElementById('material-removal-status')!.textContent).toBe('\u26d4');
+    expect(plot.shadowRoot!.getElementById('material-removal-status')!.textContent).toContain('\u26d4');
+    expect(plot.shadowRoot!.getElementById('material-removal-status')!.textContent).toContain('Configure stockBindings in the backend');
     expect(plot.shadowRoot!.querySelector('#removal-setup')).toBeNull();
     expect(plot.shadowRoot!.querySelector<HTMLButtonElement>('#replay-start')!.disabled).toBe(true);
     expect(plot.shadowRoot!.querySelector<HTMLInputElement>('#removal-resolution')!.disabled).toBe(true);
@@ -1241,7 +1261,9 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
     resolution.dispatchEvent(new Event('change'));
     spy.mockRestore();
     expect(plot.shadowRoot!.getElementById('material-removal-status')!.textContent)
-      .toBe('\u26d4');
+      .toContain('\u26d4');
+    expect(plot.shadowRoot!.getElementById('material-removal-status')!.textContent)
+      .toContain('Material removal unavailable');
     expect(error).toHaveBeenCalledWith(expect.stringContaining('Material removal unavailable'));
     expect(plot.scene!.children.find((child) => child.name === 'machined-stock')).toBe(stock);
     expect(worker.postMessage).toHaveBeenCalledTimes(calls);
@@ -1273,7 +1295,9 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
     expect(materials).toHaveLength(equal ? 1 : 0);
     if (equal) expect(materials[0].children).toHaveLength(1);
     expect(plot.shadowRoot!.getElementById('material-removal-status')!.textContent)
-      .toBe('\u26d4');
+      .toContain('\u26d4');
+    expect(plot.shadowRoot!.getElementById('material-removal-status')!.textContent)
+      .toContain(equal ? 'shared cutting order' : 'definitions conflict');
     expect(diagnostic).toHaveBeenCalledWith(expect.stringContaining(equal ? 'shared cutting order' : 'definitions conflict'));
     expect(requestPlot).toHaveBeenCalledTimes(1);
   });

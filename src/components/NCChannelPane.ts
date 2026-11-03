@@ -11,7 +11,7 @@ import { EventBus, EVENT_NAMES, EventSubscription } from '@services/EventBus';
 import type { IConfigService } from '@services/config/IConfigService';
 import type { IHostBridgeService } from '@services/HostBridgeService';
 import type { IFileManagerService } from '@services/IFileManagerService';
-import type { MultichannelAlignmentService } from '@services/MultichannelAlignmentService';
+import { formatNcLineSpacing, type MultichannelAlignmentService } from '@services/MultichannelAlignmentService';
 
 export class NCChannelPane extends HTMLElement {
   private channelId: string = '';
@@ -200,6 +200,7 @@ export class NCChannelPane extends HTMLElement {
       this.eventBus.publish(EVENT_NAMES.ALIGNMENT_SCROLL_SYNC_CHANGED, {
         enabled: action === 'align',
         sourceChannelId: this.channelId,
+        programs: result.programs,
       });
     } catch (error) {
       console.error('Channel alignment failed:', error);
@@ -217,9 +218,10 @@ export class NCChannelPane extends HTMLElement {
     if (!activeProgram) return;
 
     const content = activeProgram.content.replace(/\r\n/g, '\n');
-    const updatedContent = action === 'add'
-      ? content.split('\n').map((line) => `  ${line}`).join('\n')
-      : content.split('\n').map((line) => line.startsWith('  ') ? line.slice(2) : line).join('\n');
+    const updatedContent = content
+      .split('\n')
+      .map((line) => formatNcLineSpacing(line, action))
+      .join('\n');
 
     this.fileManager.updateActiveProgramContent(this.channelId, updatedContent);
   }
@@ -366,8 +368,8 @@ export class NCChannelPane extends HTMLElement {
         <div class="channel-controls">
           <button class="channel-button alignment-button" id="align-channels" title="Align active channels and synchronize scrolling" aria-label="Align active channels">=</button>
           <button class="channel-button alignment-button" id="remove-alignment" title="Remove channel alignment and stop synchronized scrolling" aria-label="Remove channel alignment">/=</button>
-          <button class="channel-button alignment-button" id="add-spaces" title="Add two leading spaces to every line in this channel" aria-label="Add spaces to every line">||</button>
-          <button class="channel-button alignment-button" id="remove-spaces" title="Remove two leading spaces from every line in this channel" aria-label="Remove spaces from every line">| |</button>
+          <button class="channel-button alignment-button" id="add-spaces" title="Add spaces between NC words in this channel" aria-label="Add spaces between NC words">| |</button>
+          <button class="channel-button alignment-button" id="remove-spaces" title="Remove spaces between NC words in this channel" aria-label="Remove spaces between NC words">||</button>
           <button class="channel-button" id="programs-toggle">Programs</button>
           <button class="channel-button" id="plot-channel-btn">▶️ Plot</button>
           <button class="channel-button mobile-sidebar-toggle" id="sidebar-toggle">Tools & Keywords</button>

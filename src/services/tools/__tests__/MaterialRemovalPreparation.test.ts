@@ -216,9 +216,33 @@ describe('material removal prerequisites', () => {
     expect(result.simulation?.stop).toMatchObject({ executionStep: 7, lineNumber: 20 });
   });
 
-  it.each(['G76', 'G92', 'G36', 'G161'])('stops at unsupported special operation %s', (sourceCode) => {
+  it.each([
+    ['G161', 'feed'],
+    ['G162', 'arc'],
+    ['G163', 'arc'],
+  ] as const)('prepares %s using its canonical %s path', (sourceCode, type) => {
+    const result = prepareMaterialRemoval([input('1', stock)], metadata(
+      move({ sourceCode, type }),
+    ), setup);
+    expect(result.simulation?.motions).toHaveLength(1);
+    expect(result.simulation?.stop).toBeUndefined();
+  });
+
+  it.each(['G76', 'G92', 'G36'])('stops at unsupported special operation %s', (sourceCode) => {
     const result = prepareMaterialRemoval([input('1', stock)], metadata(move(), move({ sourceCode })), setup);
     expect(result.simulation?.motions).toHaveLength(1);
+    expect(result.simulation?.stop?.message).toContain(sourceCode);
+  });
+
+  it.each([
+    ['G161', 'arc'],
+    ['G162', 'feed'],
+    ['G163', 'feed'],
+  ] as const)('rejects %s when its geometry is not the supported %s path', (sourceCode, type) => {
+    const result = prepareMaterialRemoval([input('1', stock)], metadata(
+      move({ sourceCode, type }),
+    ), setup);
+    expect(result.simulation?.motions).toHaveLength(0);
     expect(result.simulation?.stop?.message).toContain(sourceCode);
   });
 

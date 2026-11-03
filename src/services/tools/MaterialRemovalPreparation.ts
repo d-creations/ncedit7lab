@@ -62,6 +62,13 @@ function validPose(pose: DeepReadonly<PoseSample> | undefined): pose is DeepRead
   );
 }
 
+function supportsRemovalSource(segment: DeepReadonly<PlotSegment>): boolean {
+  const sourceCode = segment.sourceCode?.toUpperCase();
+  if (!sourceCode || /^G0?[0123]$/.test(sourceCode)) return true;
+  if (sourceCode === 'G161') return segment.type === 'feed';
+  return (sourceCode === 'G162' || sourceCode === 'G163') && segment.type === 'arc';
+}
+
 export function resolveMachineStockBinding(
   input: DeepReadonly<PlotRunInput>,
   frames: ReadonlySet<string>,
@@ -237,10 +244,10 @@ export function prepareMaterialRemoval(
       stopAt('motion-mode-unavailable', 'Feed motion has no resolved machining mode', context);
       break;
     }
-    if (segment.sourceCode && !/^G0?[0123]$/i.test(segment.sourceCode)) {
+    if (!supportsRemovalSource(segment)) {
       stopAt(
         'unsupported-operation',
-        `Removal does not support ${segment.sourceCode} (threading/compound operations are excluded)`,
+        `Removal does not support ${segment.sourceCode} as ${segment.type} motion`,
         context,
       );
       break;

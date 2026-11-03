@@ -5,6 +5,7 @@ import { StateService } from '@services/StateService';
 import { IFileManagerService } from '@services/IFileManagerService';
 import { EventBus, EVENT_NAMES, EventSubscription } from '@services/EventBus';
 import type { ChannelId, ExecutedProgramResult, FaultDetail, NCProgram } from '@core/types';
+import type { AlignmentProgram, ChannelSyncMarker } from '@services/MultichannelAlignmentService';
 import type { TemplateInsertEventPayload } from '@services/templates/TemplateInsertionService';
 import type { ProgramSource } from '@services/tools/ProgramToolService';
 import type {
@@ -38,6 +39,8 @@ export class NCCodePane extends HTMLElement {
   private resizeObserver?: ResizeObserver;
   private executedLineMarkers: number[] = [];
   private errorMarkers: number[] = [];
+  private syncLineMarkers: number[] = [];
+  private syncGutterRows: number[] = [];
   private executionSubscription?: EventSubscription;
   private plotClearedSubscription?: EventSubscription;
   private machineChangedSubscription?: EventSubscription;
@@ -150,11 +153,22 @@ export class NCCodePane extends HTMLElement {
     this.scrollSyncSubscription = this.eventBus.subscribe(
       EVENT_NAMES.ALIGNMENT_SCROLL_SYNC_CHANGED,
       (data: unknown) => {
-        const { enabled, sourceChannelId } = data as {
+        const { enabled, sourceChannelId, programs } = data as {
           enabled: boolean;
           sourceChannelId?: string;
+          programs?: AlignmentProgram[];
         };
         this.scrollSyncEnabled = enabled;
+        if (enabled) {
+          const channelAlignment = programs?.find((item) => item.channelId === this.channelId);
+          this.applySyncMarkers(
+            channelAlignment?.syncMarkers ?? [],
+            channelAlignment?.paddedLines ?? [],
+          );
+        } else {
+          this.clearSyncMarkers();
+        }
+        this.updateSyncScrollMargin();
         if (enabled && sourceChannelId === this.channelId) {
           queueMicrotask(() => {
             this.eventBus.publish(EVENT_NAMES.EDITOR_SCROLL_CHANGED, {
@@ -172,8 +186,11 @@ export class NCCodePane extends HTMLElement {
         const { channelId, scrollTop } = data as { channelId: string; scrollTop: number };
         if (!this.scrollSyncEnabled || channelId === this.channelId || !this.editor) return;
 
+        const targetScrollTop = Math.max(0, scrollTop);
+        if (Math.abs(this.editor.session.getScrollTop() - targetScrollTop) < 0.5) return;
+
         this.isApplyingSyncedScroll = true;
-        this.editor.session.setScrollTop(scrollTop);
+        this.editor.session.setScrollTop(targetScrollTop);
         this.isApplyingSyncedScroll = false;
       },
     );
@@ -186,6 +203,9 @@ export class NCCodePane extends HTMLElement {
         } else {
           this.setValue('');
           this.stateService.updateChannel(this.channelId, { program: '' });
+        }
+        if (this.scrollSyncEnabled) {
+          this.updateSyncScrollMargin();
         }
       }
     });
@@ -200,6 +220,9 @@ export class NCCodePane extends HTMLElement {
         if (editorText !== incomingText) {
             this.setValue(incomingText);
             this.stateService.updateChannel(this.channelId, { program: incomingText });
+        }
+        if (this.scrollSyncEnabled) {
+          this.updateSyncScrollMargin();
         }
       }
     });
@@ -321,6 +344,41 @@ export class NCCodePane extends HTMLElement {
             position: absolute;
             background-color: rgba(255, 0, 0, 0.2) !important;
             border-bottom: 1px dotted #ff0000 !important;
+        }
+
+        .ace_sync-line {
+            position: absolute;
+            background-color: rgba(97, 175, 239, 0.14) !important;
+            border-top: 1px dashed rgba(97, 175, 239, 0.55) !important;
+            border-bottom: 1px solid rgba(97, 175, 239, 0.35) !important;
+            box-sizing: border-box;
+        }
+
+        .ace_sync-padding-line {
+            position: absolute;
+            background: repeating-linear-gradient(
+              -45deg,
+              rgba(127, 132, 142, 0.05),
+              rgba(127, 132, 142, 0.05) 4px,
+              transparent 4px,
+              transparent 8px
+            ) !important;
+            border-left: 2px dotted rgba(97, 175, 239, 0.35) !important;
+        }
+
+        .ace_gutter-cell.ace_sync-gutter-cell {
+            background-color: rgba(97, 175, 239, 0.18) !important;
+            color: var(--vscode-button-background, #61afef) !important;
+            font-weight: 700;
+        }
+
+        .ace_gutter-cell.ace_sync-gutter-cell::before {
+            content: '⇄';
+            position: absolute;
+            left: 3px;
+            font-size: 11px;
+            line-height: inherit;
+            color: var(--vscode-button-background, #61afef);
         }
         
         /* Improve active line visibility */
@@ -475,7 +533,11 @@ export class NCCodePane extends HTMLElement {
 
     // Use ResizeObserver to handle dynamic layout changes
     this.resizeObserver = new ResizeObserver(() => {
-      this.editor?.resize();
+      if (this.scrollSyncEnabled) {
+        this.updateSyncScrollMargin();
+      } else {
+        this.editor?.resize();
+      }
     });
     this.resizeObserver.observe(this);
 
@@ -489,6 +551,9 @@ export class NCCodePane extends HTMLElement {
       const value = this.editor?.getValue() || '';
       this.fileManager.updateActiveProgramContent(this.channelId, value);
       this.stateService.updateChannel(this.channelId, { program: value });
+      if (this.scrollSyncEnabled) {
+        this.updateSyncScrollMargin();
+      }
       this.dispatchEvent(
         new CustomEvent('code-change', {
           detail: { channelId: this.channelId, code: value },
@@ -967,6 +1032,76 @@ export class NCCodePane extends HTMLElement {
     });
     this.errorMarkers = [];
     this.editor.session.clearAnnotations();
+  }
+
+  applySyncMarkers(syncMarkers: ChannelSyncMarker[], paddedLines: number[] = []): void {
+    if (!this.editor) return;
+    this.clearSyncMarkers();
+
+    const Range = ace.require('ace/range').Range;
+    const totalLines = this.editor.session.getLength();
+
+    paddedLines.forEach((lineNumber) => {
+      const row = lineNumber - 1;
+      if (row >= 0 && row < totalLines) {
+        const markerId = this.editor!.session.addMarker(
+          new Range(row, 0, row, 1),
+          'ace_sync-padding-line',
+          'fullLine',
+          false,
+        );
+        this.syncLineMarkers.push(markerId);
+      }
+    });
+
+    syncMarkers.forEach(({ lineNumber }) => {
+      const row = lineNumber - 1;
+      if (row >= 0 && row < totalLines) {
+        const markerId = this.editor!.session.addMarker(
+          new Range(row, 0, row, 1),
+          'ace_sync-line',
+          'fullLine',
+          false,
+        );
+        this.syncLineMarkers.push(markerId);
+        this.editor!.session.addGutterDecoration(row, 'ace_sync-gutter-cell');
+        this.syncGutterRows.push(row);
+      }
+    });
+  }
+
+  clearSyncMarkers(): void {
+    if (!this.editor) return;
+    this.syncLineMarkers.forEach((markerId) => {
+      this.editor?.session.removeMarker(markerId);
+    });
+    this.syncLineMarkers = [];
+    this.syncGutterRows.forEach((row) => {
+      this.editor?.session.removeGutterDecoration(row, 'ace_sync-gutter-cell');
+    });
+    this.syncGutterRows = [];
+  }
+
+  updateSyncScrollMargin(): void {
+    if (!this.editor?.renderer) return;
+    if (!this.scrollSyncEnabled) {
+      this.editor.renderer.setScrollMargin(0, 0, 0, 0);
+      this.editor.resize(true);
+      return;
+    }
+
+    const activeChannels = this.stateService.getActiveChannels();
+    const maxLines = activeChannels.reduce((max, channel) => {
+      const content = this.fileManager.getActiveProgram(channel.id)?.content ?? channel.program ?? '';
+      const lineCount = content ? content.split(/\r?\n/).length : 0;
+      return Math.max(max, lineCount);
+    }, this.editor.session.getLength());
+
+    const ownLines = this.editor.session.getLength();
+    const extraLines = Math.max(0, maxLines - ownLines);
+    const lineHeight = this.editor.renderer.lineHeight || 18;
+    this.editor.renderer.setScrollMargin(0, extraLines * lineHeight, 0, 0);
+    this.editor.resize(true);
   }
 }
 

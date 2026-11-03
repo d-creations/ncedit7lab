@@ -5,14 +5,61 @@ import type {
 } from '@core/types';
 import { BackendGateway } from './BackendGateway';
 
+export interface ChannelSyncMarker {
+  lineNumber: number;
+  marker: string;
+  code: string;
+}
+
 export interface AlignmentProgram {
   channelId: ChannelId;
   program: string;
+  syncMarkers?: ChannelSyncMarker[];
+  paddedLines?: number[];
 }
 
 export interface AlignmentResult {
   programs: AlignmentProgram[];
   alignmentCount: number;
+}
+
+export function formatNcLineSpacing(line: string, action: 'add' | 'remove'): string {
+  if (line.trim() === '') return line;
+  const trimmedStart = line.trimStart();
+  if (/^[%&<;(]/.test(trimmedStart)) return line;
+
+  const match = /^(\s*)(.*?)(\s*)$/.exec(line);
+  if (!match) return line;
+  const [, leadingWs, body, trailingWs] = match;
+
+  const protectedSpans: string[] = [];
+  const masked = body.replace(/(\([^)]*\)|;.*$|\[[^\]]*\]|"[^"]*")/g, (span) => {
+    const index = protectedSpans.push(span) - 1;
+    return `\u0000${index}\u0000`;
+  });
+
+  let formatted: string;
+  if (action === 'add') {
+    formatted = masked
+      .replace(/[ \t]+/g, ' ')
+      .replace(/([\d.]|\u0000\d+\u0000)\s*(?=[A-Za-z])/g, (_, prev: string) => {
+        if (prev.startsWith('\u0000')) {
+          const spanIndex = Number(prev.slice(1, -1));
+          if (!protectedSpans[spanIndex]?.startsWith('[')) {
+            return prev;
+          }
+        }
+        return `${prev} `;
+      });
+  } else {
+    formatted = masked.replace(/[ \t]+/g, '');
+  }
+
+  const restored = formatted.replace(
+    /\u0000(\d+)\u0000/g,
+    (_, index) => protectedSpans[Number(index)],
+  );
+  return `${leadingWs}${restored}${trailingWs}`;
 }
 
 export class MultichannelAlignmentService {
@@ -44,24 +91,33 @@ export class MultichannelAlignmentService {
     }
 
     const insertedByChannel = linesByChannel.map(() => 0);
-    const firstAnchorIndexes = anchorsByChannel.map(
-      (anchors) => anchors.get(commonMarkers[0])!,
-    );
+    const paddedLinesByChannel = linesByChannel.map(() => [] as number[]);
+    const syncMarkersByChannel = linesByChannel.map(() => [] as ChannelSyncMarker[]);
+    const matcher = this.createSyncCodeMatcher(template.syntax, programs);
     let insertedLineCount = 0;
-    commonMarkers.slice(1).forEach((marker) => {
+
+    commonMarkers.forEach((marker) => {
       const currentIndexes = anchorsByChannel.map(
         (anchors, channelIndex) => anchors.get(marker)! + insertedByChannel[channelIndex],
       );
-      const relativeIndexes = currentIndexes.map(
-        (lineIndex, channelIndex) => lineIndex - firstAnchorIndexes[channelIndex],
-      );
-      const targetIndex = Math.max(...relativeIndexes);
+      const targetIndex = Math.max(...currentIndexes);
       currentIndexes.forEach((lineIndex, channelIndex) => {
-        const paddingCount = targetIndex - relativeIndexes[channelIndex];
-        if (paddingCount === 0) return;
-        linesByChannel[channelIndex].splice(lineIndex, 0, ...Array(paddingCount).fill('  '));
-        insertedByChannel[channelIndex] += paddingCount;
-        insertedLineCount += paddingCount;
+        const paddingCount = targetIndex - lineIndex;
+        if (paddingCount > 0) {
+          linesByChannel[channelIndex].splice(lineIndex, 0, ...Array(paddingCount).fill('  '));
+          for (let offset = 0; offset < paddingCount; offset += 1) {
+            paddedLinesByChannel[channelIndex].push(lineIndex + offset + 1);
+          }
+          insertedByChannel[channelIndex] += paddingCount;
+          insertedLineCount += paddingCount;
+        }
+        const alignedLineText = linesByChannel[channelIndex][targetIndex] ?? '';
+        const match = matcher.exec(this.stripComments(alignedLineText, definition.controlType));
+        syncMarkersByChannel[channelIndex].push({
+          lineNumber: targetIndex + 1,
+          marker,
+          code: match ? match[0].trim() : marker,
+        });
       });
     });
 
@@ -69,6 +125,8 @@ export class MultichannelAlignmentService {
       programs: cleanPrograms.map((item, channelIndex) => ({
         ...item,
         program: linesByChannel[channelIndex].join('\n'),
+        syncMarkers: syncMarkersByChannel[channelIndex],
+        paddedLines: paddedLinesByChannel[channelIndex],
       })),
       alignmentCount: insertedLineCount,
     };
@@ -141,7 +199,7 @@ export class MultichannelAlignmentService {
     const matcher = this.createSyncCodeMatcher(syntax, programs);
 
     lines.forEach((line, index) => {
-      const match = matcher.exec(line);
+      const match = matcher.exec(this.stripComments(line, definition.controlType));
       if (!match) return;
       const marker = match[1];
       const markerNumber = Number(marker);
@@ -175,7 +233,7 @@ export class MultichannelAlignmentService {
       const lines = item.program.split(/\r?\n/);
       const matcher = this.createSyncCodeMatcher(syntax, programs);
       for (let index = lines.length - 1; index >= 0; index -= 1) {
-        const syncMatch = matcher.exec(lines[index]);
+        const syncMatch = matcher.exec(this.stripComments(lines[index], definition.controlType));
         if (!syncMatch || !commonSyncMarkers.has(syncMatch[1])) continue;
         while (index > 0 && lines[index - 1] === '  ') {
           lines.splice(index - 1, 1);
@@ -184,6 +242,14 @@ export class MultichannelAlignmentService {
       }
       return { ...item, program: lines.join('\n') };
     });
+  }
+
+  private stripComments(line: string, controlType?: string): string {
+    if (controlType?.toUpperCase() === 'SIEMENS') {
+      const commentIndex = line.indexOf(';');
+      return commentIndex === -1 ? line : line.slice(0, commentIndex);
+    }
+    return line.replace(/\([^)]*\)/g, ' ');
   }
 
   private createSyncCodeMatcher(syntax: string, programs: AlignmentProgram[]): RegExp {

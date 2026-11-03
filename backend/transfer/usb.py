@@ -257,11 +257,61 @@ class UsbTransferClient(ProtocolClient):
     @staticmethod
     def _normalize_program_text(program_text: str) -> str:
         normalized = program_text.replace("\r\n", "\n").replace("\r", "\n").strip()
-        if not normalized.startswith("%"):
-            normalized = f"%\n{normalized}"
-        if not normalized.rstrip().endswith("%"):
-            normalized = f"{normalized.rstrip()}\n%"
+        if PA_SECTION_RE.search(normalized):
+            normalized = UsbTransferClient._normalize_pa_program_text(normalized)
+        else:
+            if not normalized.startswith("%"):
+                normalized = f"%\n{normalized}"
+            if not normalized.rstrip().endswith("%"):
+                normalized = f"{normalized.rstrip()}\n%"
         return normalized + ("\n" if not normalized.endswith("\n") else "")
+
+    @staticmethod
+    def _normalize_pa_program_text(program_text: str) -> str:
+        matches = list(PA_SECTION_RE.finditer(program_text))
+        if not matches:
+            return program_text
+
+        sections: List[Dict[str, Any]] = []
+        for idx, match in enumerate(matches):
+            end_idx = matches[idx + 1].start() if idx + 1 < len(matches) else len(program_text)
+            raw_tag = match.group(0)
+            path_num = int(match.group(1))
+            tag_prog_match = PA_MARKER_PROGRAM_RE.search(raw_tag)
+            prog_name = f"O{int(tag_prog_match.group(1)):04d}" if tag_prog_match else ""
+            body = program_text[match.end():end_idx]
+            if body.replace("%", "").strip():
+                sections.append({"path": path_num, "prog_name": prog_name, "body": body})
+
+        if not sections:
+            return program_text
+
+        prog_number = UsbTransferClient._extract_program_number(program_text)
+        formatted_prog = f"O{prog_number:04d}" if prog_number is not None else (sections[0]["prog_name"] or "O0001")
+
+        formatted_blocks: List[str] = []
+        for section in sections:
+            clean_body = section["body"].strip()
+            while clean_body.startswith("%"):
+                clean_body = clean_body[1:].lstrip()
+            while clean_body.endswith("%"):
+                clean_body = clean_body[:-1].rstrip()
+
+            lines = clean_body.split("\n")
+            if lines:
+                first_line = lines[0].strip()
+                header_match = re.match(r"^O\d+\s*(.*)$", first_line, re.IGNORECASE)
+                if header_match:
+                    remainder = header_match.group(1).strip()
+                    if remainder:
+                        lines[0] = remainder
+                    else:
+                        lines.pop(0)
+                    clean_body = "\n".join(lines).strip()
+
+            formatted_blocks.append(f"<{formatted_prog}.P{section['path']}>\n{clean_body}")
+
+        return f"%\n&F=/{formatted_prog}/\n" + "\n".join(formatted_blocks) + "\n%"
 
     @staticmethod
     def _extract_program_number(program_text: str) -> Optional[int]:

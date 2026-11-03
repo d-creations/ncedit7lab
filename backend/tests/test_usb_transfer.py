@@ -103,9 +103,63 @@ def test_usb_transfer_downloads_pa_container_as_single_file(tmp_path):
     stored = root / "O1000.PA"
     assert stored.exists()
     stored_content = stored.read_text(encoding="utf-8")
-    assert "<O1000.P1>" in stored_content
-    assert "<O1000.P2>" in stored_content
-    assert "<O1000.P3>" in stored_content
+    assert stored_content == (
+        "%\n"
+        "&F=/O1000/\n"
+        "<O1000.P1>\n"
+        "(WERKSTUCK)\n"
+        "M99\n"
+        "<O1000.P2>\n"
+        "G0G40G80\n"
+        "M99\n"
+        "<O1000.P3>\n"
+        "G28U0.\n"
+        "M99\n"
+        "%\n"
+    )
+
+
+def test_usb_transfer_formats_pa_container_whether_percent_or_header_present_or_not(tmp_path):
+    root = tmp_path / "usb"
+    root.mkdir()
+    # Missing %, missing &F=/O1612/, inner O1612 lines and % inside channels
+    raw_pa = (
+        "<O1612.P1>\n"
+        "%\n"
+        "O1612\n"
+        "(SCP TRAINING SUS304 D=20.0)\n"
+        "(PATH 1)\n"
+        "M99P99\n"
+        "%\n\n"
+        "<O1612.P2>\n"
+        "%\n"
+        "O1612\n"
+        "(SCP TRAINING SUS304 D=20.0)\n"
+        "G130\n"
+        "M99P99\n"
+        "%"
+    )
+
+    client = UsbTransferClient()
+    assert client.connect(str(root)) is True
+    client.download_program(raw_pa, 0, ".PA")
+
+    stored = root / "O1612.PA"
+    assert stored.exists()
+    stored_content = stored.read_text(encoding="utf-8")
+    assert stored_content == (
+        "%\n"
+        "&F=/O1612/\n"
+        "<O1612.P1>\n"
+        "(SCP TRAINING SUS304 D=20.0)\n"
+        "(PATH 1)\n"
+        "M99P99\n"
+        "<O1612.P2>\n"
+        "(SCP TRAINING SUS304 D=20.0)\n"
+        "G130\n"
+        "M99P99\n"
+        "%\n"
+    )
 
 
 def test_usb_transfer_rejects_missing_root(tmp_path):

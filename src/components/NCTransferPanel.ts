@@ -405,6 +405,97 @@ export class NCTransferPanel extends HTMLElement {
     return pathNo > 0 ? this.getChannelFileExtensions(pathNo) : undefined;
   }
 
+  private formatPAProgram(content: string): string {
+    const normalized = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    const tagRegex = /<\s*(?:(O[A-Za-z0-9_]+)\.)?P(\d+)\s*>/gi;
+    let match: RegExpExecArray | null;
+    let lastIndex = 0;
+    let lastPath = -1;
+    let lastProgramName = '';
+    const sections: Array<{ path: number; programName: string; body: string }> = [];
+
+    while ((match = tagRegex.exec(normalized)) !== null) {
+      if (lastPath !== -1) {
+        sections.push({
+          path: lastPath,
+          programName: lastProgramName,
+          body: normalized.substring(lastIndex, match.index),
+        });
+      }
+      lastProgramName = match[1] || '';
+      lastPath = parseInt(match[2], 10);
+      lastIndex = tagRegex.lastIndex;
+    }
+    if (lastPath !== -1) {
+      sections.push({
+        path: lastPath,
+        programName: lastProgramName,
+        body: normalized.substring(lastIndex),
+      });
+    }
+
+    const nonEmptySections = sections.filter(section => {
+      const stripped = section.body.replace(/%/g, '').trim();
+      return stripped.length > 0;
+    });
+
+    if (nonEmptySections.length === 0) {
+      let clean = normalized.trim();
+      if (clean.startsWith('%')) clean = clean.slice(1).trimStart();
+      if (clean.endsWith('%')) clean = clean.slice(0, -1).trimEnd();
+      return `%\n${clean}\n%`;
+    }
+
+    let rawProgramName = nonEmptySections.find(s => s.programName)?.programName || '';
+    if (!rawProgramName) {
+      const assignMatch = normalized.match(/&F=\/\s*(O[A-Za-z0-9_]+)/i);
+      if (assignMatch) {
+        rawProgramName = assignMatch[1];
+      }
+    }
+    if (!rawProgramName) {
+      for (const section of nonEmptySections) {
+        const bodyMatch = section.body.match(/(?:^|\n)\s*(O\d+)\b/i);
+        if (bodyMatch) {
+          rawProgramName = bodyMatch[1];
+          break;
+        }
+      }
+    }
+
+    const numMatch = rawProgramName.match(/^O(\d+)$/i);
+    const formattedProgName = numMatch
+      ? `O${parseInt(numMatch[1], 10).toString().padStart(4, '0')}`
+      : (rawProgramName ? rawProgramName.toUpperCase() : 'O0001');
+
+    const formattedBlocks: string[] = [];
+    for (const section of nonEmptySections) {
+      let cleanBody = section.body.trim();
+      while (cleanBody.startsWith('%')) {
+        cleanBody = cleanBody.slice(1).trimStart();
+      }
+      while (cleanBody.endsWith('%')) {
+        cleanBody = cleanBody.slice(0, -1).trimEnd();
+      }
+
+      const lines = cleanBody.split('\n');
+      const firstLine = lines[0]?.trim() || '';
+      if (/^O\d+\b/i.test(firstLine)) {
+        const remainder = firstLine.replace(/^O\d+\s*/i, '').trim();
+        if (remainder) {
+          lines[0] = remainder;
+        } else {
+          lines.shift();
+        }
+        cleanBody = lines.join('\n').trim();
+      }
+
+      formattedBlocks.push(`<${formattedProgName}.P${section.path}>\n${cleanBody}`);
+    }
+
+    return `%\n&F=/${formattedProgName}/\n${formattedBlocks.join('\n')}\n%`;
+  }
+
   private async handleUpload(progNum: number, pathNo: string) {
     try {
       const isUsb = String(this.transferProtocol).toLowerCase() === 'usb';
@@ -432,58 +523,39 @@ export class NCTransferPanel extends HTMLElement {
             this.fileManager.updateActiveProgramContent('1', resp);
           }
 
+          const formattedPA = `${this.formatPAProgram(resp)}\n`;
           const fileName = this.buildPAFileName(progNum, containerExt);
           if ((window as any).vscodeApi) {
             (window as any).vscodeApi.postMessage({
               type: 'SAVE_TRANSFER_FILE',
               fileName: fileName,
-              content: resp
+              content: formattedPA
             });
           }
           alert(`Program O${progNum} (PA) uploaded successfully to workspace!`);
           return;
         }
 
-        let combinedContent = "%\n";
-        
-        // Include header information (assuming prog.comment is available)
-        combinedContent += `&F=/O${progNum.toString().padStart(4, '0')}(${prog.comment || 'PA_PROG'})/\n`;
+        const progHeader = `O${progNum.toString().padStart(4, '0')}`;
+        let combinedContent = `%\n&F=/${progHeader}/\n`;
 
         const channelsToPull = isUsb ? this.getGroupChannels(prog) : this.getSupportedPaths();
         for (const p of channelsToPull) {
             if (prog.paths[p]) {
                 const resp = await this.transferClient.uploadProgram(this.ipAddress, p, progNum, undefined, this.getUploadExtensionsForProgram(progNum, p));
                 this.fileManager.updateActiveProgramContent(p.toString(), resp);
-                
-                // Format block with <> XML-like tags matching the specified standard
-                combinedContent += `<O${progNum.toString().padStart(4, '0')}.P${p}>\n`;
-                
-                // Remove trailing % or whitespace from individual blocks if present, to prevent mid-file terminations
-                let cleanText = resp.trim();
-                if (cleanText.endsWith('%')) {
-                   cleanText = cleanText.slice(0, -1).trimEnd();
-                }
-                if (cleanText.startsWith('%')) {
-                   cleanText = cleanText.slice(1).trimStart();
-                }
-                // Also strip the `OXXXX` header if it's there
-                const firstNewLine = cleanText.indexOf('\n');
-                if (cleanText.startsWith('O') && firstNewLine > -1 && firstNewLine < 15) {
-                    cleanText = cleanText.slice(firstNewLine + 1).trimStart();
-                }
-                
-                combinedContent += `${cleanText}\n \n`;
+                combinedContent += `<${progHeader}.P${p}>\n${resp}\n`;
             }
         }
         
-        combinedContent += "%\n";
+        const formattedPA = `${this.formatPAProgram(combinedContent)}\n`;
 
         const fileName = this.buildPAFileName(progNum);
         if ((window as any).vscodeApi) {
           (window as any).vscodeApi.postMessage({
                 type: 'SAVE_TRANSFER_FILE',
                 fileName: fileName,
-                content: combinedContent
+                content: formattedPA
             });
         }
         alert(`Program O${progNum} (PA) uploaded successfully to workspace!`);
@@ -539,55 +611,37 @@ export class NCTransferPanel extends HTMLElement {
             undefined,
             containerExt !== undefined ? [containerExt] : undefined
           );
+          const formattedPA = `${this.formatPAProgram(resp)}\n`;
           const fileName = this.buildPAFileName(progNum, containerExt);
           if ((window as any).vscodeApi) {
             (window as any).vscodeApi.postMessage({
               type: 'COMPARE_TRANSFER_FILE',
               fileName: fileName,
-              content: resp
+              content: formattedPA
             });
           }
           return;
         }
 
-        let combinedContent = "%\n";
-        
-        // Include header information
-        combinedContent += `&F=/O${progNum.toString().padStart(4, '0')}(${prog.comment || 'PA_PROG'})/\n`;
+        const progHeader = `O${progNum.toString().padStart(4, '0')}`;
+        let combinedContent = `%\n&F=/${progHeader}/\n`;
 
         const channelsToCompare = isUsb ? this.getGroupChannels(prog) : this.getSupportedPaths();
         for (const p of channelsToCompare) {
             if (prog.paths[p]) {
                 const resp = await this.transferClient.uploadProgram(this.ipAddress, p, progNum, undefined, this.getUploadExtensionsForProgram(progNum, p));
-                
-                // Format block with <> XML-like tags matching the specified standard
-                combinedContent += `<O${progNum.toString().padStart(4, '0')}.P${p}>\n`;
-                
-                let cleanText = resp.trim();
-                if (cleanText.endsWith('%')) {
-                   cleanText = cleanText.slice(0, -1).trimEnd();
-                }
-                if (cleanText.startsWith('%')) {
-                   cleanText = cleanText.slice(1).trimStart();
-                }
-                // Also strip the `OXXXX` header if it's there
-                const firstNewLine = cleanText.indexOf('\n');
-                if (cleanText.startsWith('O') && firstNewLine > -1 && firstNewLine < 15) {
-                    cleanText = cleanText.slice(firstNewLine + 1).trimStart();
-                }
-                
-                combinedContent += `${cleanText}\n \n`;
+                combinedContent += `<${progHeader}.P${p}>\n${resp}\n`;
             }
         }
         
-        combinedContent += "%\n";
+        const formattedPA = `${this.formatPAProgram(combinedContent)}\n`;
 
         const fileName = this.buildPAFileName(progNum);
         if ((window as any).vscodeApi) {
           (window as any).vscodeApi.postMessage({
                 type: 'COMPARE_TRANSFER_FILE',
                 fileName: fileName,
-                content: combinedContent
+                content: formattedPA
             });
         }
 
@@ -836,16 +890,60 @@ export class NCTransferPanel extends HTMLElement {
         btn.addEventListener('click', (e) => {
            const target = e.target as HTMLElement;
            const path = target.getAttribute('data-path');
-           if (path && (window as any).vscodeApi) {
+           if (!path) return;
+           if ((window as any).vscodeApi) {
                (window as any).vscodeApi.postMessage({
                    type: 'REQUEST_ACTIVE_PROGRAM_FOR_UPLOAD',
                    pathId: path
                });
+           } else {
+               const content = this.buildActiveProgramContentForPush(path);
+               if (content) {
+                   void this.uploadDroppedFile(content, path);
+               } else {
+                   alert('No active NC program content is available to push.');
+               }
            }
         });
       });
 
     }
+  }
+
+  private buildActiveProgramContentForPush(targetPath: string): string | null {
+    if (targetPath === 'PA') {
+      const channels = this.getSupportedChannels();
+      let progName = '';
+      const channelBlocks: Array<{ ch: number; content: string }> = [];
+
+      for (const ch of channels) {
+        const prog = this.fileManager.getActiveProgram(ch.toString());
+        const text = prog?.content?.trim();
+        if (text) {
+          channelBlocks.push({ ch, content: text });
+          if (!progName) {
+            const match = text.match(/(?:^|\n)\s*(O\d+)\b/i);
+            if (match) progName = match[1].toUpperCase();
+          }
+        }
+      }
+
+      if (channelBlocks.length === 0) return null;
+      const numMatch = progName.match(/^O(\d+)$/i);
+      const formattedName = numMatch
+        ? `O${parseInt(numMatch[1], 10).toString().padStart(4, '0')}`
+        : (progName || 'O0001');
+
+      const rawCombined = channelBlocks
+        .map(({ ch, content }) => `<${formattedName}.P${ch}>\n${content}`)
+        .join('\n');
+      return this.formatPAProgram(rawCombined);
+    }
+
+    const pathNo = parseInt(targetPath.replace('path', ''), 10);
+    if (isNaN(pathNo)) return null;
+    const prog = this.fileManager.getActiveProgram(pathNo.toString());
+    return prog?.content?.trim() ? prog.content : null;
   }
 
   private async uploadDroppedFile(content: string, targetPath: string | null) {
@@ -856,16 +954,13 @@ export class NCTransferPanel extends HTMLElement {
       this.render();
       if (targetPath === 'PA') {
         if (String(this.transferProtocol).toLowerCase() === 'usb') {
-          let cleanContent = content.trim();
-          if (cleanContent.startsWith('%')) cleanContent = cleanContent.slice(1).trimStart();
-          if (cleanContent.endsWith('%')) cleanContent = cleanContent.slice(0, -1).trimEnd();
-          const finalContent = `\n${cleanContent}\n%`;
+          const finalContent = this.formatPAProgram(content);
           await this.transferClient.downloadProgram(this.ipAddress, 0, finalContent, undefined, this.getPAFileExtension());
           alert('PA file pushed successfully as one .PA file.');
           return;
         }
 
-        const tagRegex = /<\s*(O[A-Za-z0-9_]+)\.P(\d+)\s*>/gi;
+        const tagRegex = /<\s*(?:(O[A-Za-z0-9_]+)\.)?P(\d+)\s*>/gi;
         let match;
         let lastIndex = 0;
         let lastPath = -1;

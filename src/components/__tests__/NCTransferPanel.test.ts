@@ -137,4 +137,123 @@ describe('NCTransferPanel USB import', () => {
 
     document.body.removeChild(panel);
   });
+
+  it('formats multi-channel PA exports with %, &F=/OXXXX/, and <OXXXX.Pn> whether % is present or not', async () => {
+    const panel = document.createElement('nc-transfer-panel') as NCTransferPanel;
+    document.body.appendChild(panel);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    await (panel as any).handleConnect('D:\\');
+
+    // Case 1: Input without outer % or &F= header, and with inner % and O1612 lines in channels
+    const unformattedPA = [
+      '<O1612.P1>',
+      '%',
+      'O1612',
+      '(SCP TRAINING SUS304 D=20.0)',
+      '(PATH 1)',
+      'M99P99',
+      '%',
+      '',
+      '<O1612.P2>',
+      'O1612',
+      '(SCP TRAINING SUS304 D=20.0)',
+      'G130',
+      'M99P99',
+    ].join('\n');
+
+    await (panel as any).uploadDroppedFile(unformattedPA, 'PA');
+
+    const expectedPA = [
+      '%',
+      '&F=/O1612/',
+      '<O1612.P1>',
+      '(SCP TRAINING SUS304 D=20.0)',
+      '(PATH 1)',
+      'M99P99',
+      '<O1612.P2>',
+      '(SCP TRAINING SUS304 D=20.0)',
+      'G130',
+      'M99P99',
+      '%',
+    ].join('\n');
+
+    expect(mockBackend.transferDownload).toHaveBeenCalledWith(
+      'D:\\',
+      0,
+      expectedPA,
+      0,
+      'usb',
+      undefined,
+      '.PA'
+    );
+
+    mockBackend.transferDownload.mockClear();
+
+    // Case 2: Input already containing % and &F=/O1612(COMMENT)/
+    const withPercentPA = `%\n&F=/O1612(SCP TRAINING)/\n<O1612.P1>\n(SCP TRAINING SUS304 D=20.0)\n(PATH 1)\nM99P99\n<O1612.P2>\n(SCP TRAINING SUS304 D=20.0)\nG130\nM99P99\n%`;
+    await (panel as any).uploadDroppedFile(withPercentPA, 'PA');
+
+    expect(mockBackend.transferDownload).toHaveBeenCalledWith(
+      'D:\\',
+      0,
+      expectedPA,
+      0,
+      'usb',
+      undefined,
+      '.PA'
+    );
+
+    document.body.removeChild(panel);
+  });
+
+  it('combines split USB P1/P2 files into standard PA format without comment in &F=/OXXXX/', async () => {
+    const postMessageSpy = vi.fn();
+    (window as any).vscodeApi = { postMessage: postMessageSpy };
+
+    mockBackend.transferListPrograms.mockResolvedValue({
+      status: 'success',
+      programs: [
+        { number: 1612, length: 50, comment: 'SCP TRAINING SUS304 D=20.0', file_extension: '.P1' },
+        { number: 1612, length: 50, comment: 'SCP TRAINING SUS304 D=20.0', file_extension: '.P2' },
+      ],
+    });
+    mockBackend.transferUpload
+      .mockResolvedValueOnce({
+        status: 'success',
+        program_text: '%\nO1612\n(SCP TRAINING SUS304 D=20.0)\n(PATH 1)\nM99P99\n%\n',
+      })
+      .mockResolvedValueOnce({
+        status: 'success',
+        program_text: 'O1612\n(SCP TRAINING SUS304 D=20.0)\nG130\nM99P99\n',
+      });
+
+    const panel = document.createElement('nc-transfer-panel') as NCTransferPanel;
+    document.body.appendChild(panel);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    await (panel as any).handleConnect('D:\\');
+
+    await (panel as any).handleUpload(1612, 'PA');
+
+    expect(postMessageSpy).toHaveBeenCalledWith({
+      type: 'SAVE_TRANSFER_FILE',
+      fileName: 'O1612.PA',
+      content: [
+        '%',
+        '&F=/O1612/',
+        '<O1612.P1>',
+        '(SCP TRAINING SUS304 D=20.0)',
+        '(PATH 1)',
+        'M99P99',
+        '<O1612.P2>',
+        '(SCP TRAINING SUS304 D=20.0)',
+        'G130',
+        'M99P99',
+        '%',
+        '',
+      ].join('\n'),
+    });
+
+    delete (window as any).vscodeApi;
+    document.body.removeChild(panel);
+  });
 });

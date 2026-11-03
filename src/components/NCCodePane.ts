@@ -723,7 +723,7 @@ export class NCCodePane extends HTMLElement {
       const isMatchingRevision = (source && source.identity.documentId === request.documentId &&
         source.identity.programId === request.programId &&
         source.revision === request.expectedRevision) || isExternal;
-      if (!source || !isMatchingRevision || source.text !== request.expectedText) {
+      if (!source || !isMatchingRevision || (!isExternal && source.text !== request.expectedText)) {
         throw new Error('Program changed; reload Program Tools before applying');
       }
       const edit = this.metadataEdits.planToolUpdate(source.text, request.tool, request.syntax);
@@ -731,7 +731,7 @@ export class NCCodePane extends HTMLElement {
       this.setValue(nextText);
       this.syncEditorValue(nextText);
       result = { requestId: request.requestId, channelId: this.channelId, success: true,
-        message: `Applied tool ${String(request.tool.toolNumber)} to the program` };
+        message: `Applied tool ${String(request.tool.toolNumber)} to the program`, updatedText: nextText };
     } catch (cause) {
       result = { requestId: request.requestId, channelId: this.channelId, success: false,
         message: cause instanceof Error ? cause.message : String(cause) };
@@ -748,7 +748,7 @@ export class NCCodePane extends HTMLElement {
       const isMatchingRevision = (source && source.identity.documentId === request.documentId &&
         source.identity.programId === request.programId &&
         source.revision === request.expectedRevision) || isExternal;
-      if (!source || !isMatchingRevision || source.text !== request.expectedText) {
+      if (!source || !isMatchingRevision || (!isExternal && source.text !== request.expectedText)) {
         throw new Error('Program changed; reload Offsets before applying');
       }
       const edit = this.metadataEdits.planOffsetsUpdate(source.text, request.offsets, request.syntax);
@@ -756,7 +756,7 @@ export class NCCodePane extends HTMLElement {
       this.setValue(nextText);
       this.syncEditorValue(nextText);
       result = { requestId: request.requestId, channelId: this.channelId, success: true,
-        message: `Applied ${request.offsets.offsets.length} offset record(s) to the program` };
+        message: `Applied ${request.offsets.offsets.length} offset record(s) to the program`, updatedText: nextText };
     } catch (cause) {
       result = { requestId: request.requestId, channelId: this.channelId, success: false,
         message: cause instanceof Error ? cause.message : String(cause) };
@@ -773,7 +773,7 @@ export class NCCodePane extends HTMLElement {
       const isMatchingRevision = (source && source.identity.documentId === request.documentId &&
         source.identity.programId === request.programId &&
         source.revision === request.expectedRevision) || isExternal;
-      if (!source || !isMatchingRevision || source.text !== request.expectedText) {
+      if (!source || !isMatchingRevision || (!isExternal && source.text !== request.expectedText)) {
         throw new Error('Program changed; reload Raw Material before applying');
       }
       const edit = this.metadataEdits.planSetupUpdate(source.text, request.setup, request.syntax);
@@ -781,7 +781,7 @@ export class NCCodePane extends HTMLElement {
       this.setValue(nextText);
       this.syncEditorValue(nextText);
       result = { requestId: request.requestId, channelId: this.channelId, success: true,
-        message: 'Applied machine and material setup to the program' };
+        message: 'Applied machine and material setup to the program', updatedText: nextText };
     } catch (cause) {
       result = { requestId: request.requestId, channelId: this.channelId, success: false,
         message: cause instanceof Error ? cause.message : String(cause) };
@@ -794,6 +794,15 @@ export class NCCodePane extends HTMLElement {
     const win = window as any;
     if (win.vscodeApi && typeof win.vscodeApi.postMessage === 'function') {
       win.vscodeApi.postMessage({ type: eventName, payload: result });
+      const hostTypeMap: Record<string, string> = {
+        [EVENT_NAMES.PROGRAM_TOOL_UPDATE_RESULT]: 'PROGRAM_TOOL_UPDATE_RESULT',
+        [EVENT_NAMES.PROGRAM_OFFSETS_UPDATE_RESULT]: 'PROGRAM_OFFSETS_UPDATE_RESULT',
+        [EVENT_NAMES.PROGRAM_SETUP_UPDATE_RESULT]: 'PROGRAM_SETUP_UPDATE_RESULT',
+      };
+      const hostType = hostTypeMap[eventName];
+      if (hostType) {
+        win.vscodeApi.postMessage({ type: hostType, payload: result });
+      }
     }
   }
 

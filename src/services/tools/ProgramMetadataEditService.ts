@@ -30,6 +30,7 @@ export interface ProgramToolUpdateResult {
   channelId: string;
   success: boolean;
   message: string;
+  updatedText?: string;
 }
 
 export interface ProgramOffsetsUpdateRequest {

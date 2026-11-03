@@ -123,4 +123,29 @@ describe('NCCodePane program tool updates', () => {
       requestId: 'offset-request', success: true,
     }));
   });
+
+  it('accepts external cross-webview requests even when expectedText lags behind editor text', () => {
+    const codec = new SimulationCommentCodec();
+    const edits = new ProgramMetadataEditService(codec);
+    const withToolEdit = edits.planToolUpdate('T1\nG1 X10', { toolNumber: 1, description: 'Drill', Q: 0 }, syntax);
+    const initialEditorText = 'T1\nG1 X10'.slice(0, withToolEdit.startOffset) + withToolEdit.text;
+    const { pane, eventBus, setValue, syncEditorValue } = harness(initialEditorText);
+    const result = vi.fn();
+    eventBus.subscribe(EVENT_NAMES.PROGRAM_SETUP_UPDATE_RESULT, result);
+    const setupRequest: ProgramSetupUpdateRequest = {
+      requestId: 'setup-ext', channelId: '1', documentId: 'external', programId: 'Channel 1',
+      expectedRevision: 'external', expectedText: 'T1\nG1 X10', syntax,
+      setup: { machineName: 'TEST', material: { type: 'cylinder', diameter: 25, length: 80, zeroVertex: 1 } },
+    };
+    (pane as unknown as { applyProgramSetupUpdate(value: ProgramSetupUpdateRequest): void })
+      .applyProgramSetupUpdate(setupRequest);
+    expect(setValue).toHaveBeenCalledTimes(1);
+    const nextText = setValue.mock.calls[0][0] as string;
+    expect(nextText).toContain('; @NCE-SIM:1 BEGIN TOOL');
+    expect(nextText).toContain('; @NCE-SIM:1 BEGIN SETUP');
+    expect(syncEditorValue).toHaveBeenCalledWith(nextText);
+    expect(result).toHaveBeenCalledWith(expect.objectContaining({
+      requestId: 'setup-ext', success: true, updatedText: nextText,
+    }));
+  });
 });

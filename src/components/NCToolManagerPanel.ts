@@ -126,10 +126,16 @@ export class NCToolManagerPanel extends HTMLElement {
         void this.handleUpdateResult(data as ProgramToolUpdateResult);
       }),
       this.eventBus.subscribe('program:active_changed', (data: { channelId: string }) => {
-        if (data.channelId === this.channelId) void this.loadProgram();
+        if (data.channelId === this.channelId) {
+          this.pendingRequestId = undefined;
+          void this.loadProgram();
+        }
       }),
       this.eventBus.subscribe('program:content_changed', (data: { channelId: string }) => {
-        if (data.channelId === this.channelId && !this.pendingRequestId) void this.loadProgram();
+        if (data.channelId === this.channelId) {
+          this.pendingRequestId = undefined;
+          void this.loadProgram();
+        }
       }),
       this.eventBus.subscribe(EVENT_NAMES.MACHINE_CHANGED, () => void this.loadProgram()),
       this.eventBus.subscribe(EVENT_NAMES.PARSE_COMPLETED, (data: { channelId: string; artifacts: ParseArtifacts }) => {
@@ -150,14 +156,22 @@ export class NCToolManagerPanel extends HTMLElement {
       if (detail?.activeChannel && ['1', '2', '3'].includes(detail.activeChannel)) {
         this.channelId = detail.activeChannel as ChannelId;
         this.selectedProgramKey = undefined;
-        void this.loadProgram();
       }
+      this.pendingRequestId = undefined;
+      void this.loadProgram();
     };
     window.addEventListener('vscode:files-opened', this.hostChannelListener);
 
     this.hostMessageListener = (event: MessageEvent) => {
       const data = event.data;
-      if (data?.type === 'PROGRAM_TOOL_UPDATE_RESULT') {
+      if (
+        data?.type === 'PROGRAM_TOOL_UPDATE_RESULT' ||
+        data?.type === 'PROGRAM_OFFSETS_UPDATE_RESULT' ||
+        data?.type === 'PROGRAM_SETUP_UPDATE_RESULT' ||
+        data?.type === EVENT_NAMES.PROGRAM_TOOL_UPDATE_RESULT ||
+        data?.type === EVENT_NAMES.PROGRAM_OFFSETS_UPDATE_RESULT ||
+        data?.type === EVENT_NAMES.PROGRAM_SETUP_UPDATE_RESULT
+      ) {
         void this.handleUpdateResult(data.payload as ProgramToolUpdateResult);
       }
     };
@@ -782,13 +796,14 @@ export class NCToolManagerPanel extends HTMLElement {
 
   private get canApplyProgram(): boolean {
     return !!this.programSource && !!this.getSimulationCommentSyntax() &&
-      this.programSnapshot?.valid !== false;
+      !this.pendingRequestId && this.programSnapshot?.valid !== false;
   }
 
   private attachListeners(): void {
     this.shadowRoot?.querySelectorAll<HTMLButtonElement>('[data-manager-tab]').forEach((button) => {
       button.addEventListener('click', () => {
         this.activeTab = button.dataset.managerTab as ManagerTab;
+        this.pendingRequestId = undefined;
         this.render();
         if (this.activeTab === 'library') {
           void this.loadLibrary(true);
@@ -801,6 +816,7 @@ export class NCToolManagerPanel extends HTMLElement {
       this.channelId = (event.currentTarget as HTMLSelectElement).value as ChannelId;
       this.stateService.setWorkbenchSelectedChannel(this.channelId);
       this.selectedProgramKey = undefined;
+      this.pendingRequestId = undefined;
       void this.loadProgram();
     });
     this.shadowRoot?.querySelector<HTMLInputElement>('#tool-search')?.addEventListener('input', (event) => {
@@ -1107,7 +1123,15 @@ export class NCToolManagerPanel extends HTMLElement {
     if (!this.pendingRequestId || result.requestId !== this.pendingRequestId) return;
     this.pendingRequestId = undefined;
     this.setStatus(result.message, result.success ? 'success' : 'error', false);
-    if (result.success) await this.loadProgram(false);
+    if (result.success) {
+      if (result.updatedText !== undefined && this.programSource?.identity.documentId === 'external') {
+        const activeProgram = this.fileManager?.getActiveProgram(this.channelId);
+        if (activeProgram) {
+          activeProgram.content = result.updatedText;
+        }
+      }
+      await this.loadProgram(false);
+    }
     this.render();
   }
 

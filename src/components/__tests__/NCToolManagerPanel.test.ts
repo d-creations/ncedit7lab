@@ -285,6 +285,87 @@ describe('NCToolManagerPanel', () => {
     expect((panel.shadowRoot?.querySelector('#tool-form button[type="submit"]') as HTMLButtonElement).disabled).toBe(true);
   });
 
+  it('keeps Raw Material selectable in VS Code cross-webview mode after changing tools', async () => {
+    document.querySelector('nc-channel-pane')?.remove();
+    let hostProgramContent = 'T1\nG1 X10';
+    const activeProgram = { id: 'ch1', name: 'Channel 1', content: hostProgramContent, channelId: '1', sourceFileId: 'vscode', lastModified: 1 };
+    const fileManager = {
+      getActiveProgram: (ch: string) => (ch === '1' ? activeProgram : null),
+    };
+    const { FILE_MANAGER_SERVICE_TOKEN } = await import('@core/ServiceTokens');
+    registry.register(FILE_MANAGER_SERVICE_TOKEN, () => fileManager as never);
+
+    panel.remove();
+    panel = document.createElement('nc-tool-manager-panel');
+    document.body.append(panel);
+    await vi.waitFor(() => expect(panel.shadowRoot?.textContent).toContain('T1'));
+
+    const postedMessages: Array<{ type: string; payload: unknown }> = [];
+    (window as unknown as { vscodeApi: { postMessage: (msg: { type: string; payload: unknown }) => void } }).vscodeApi = {
+      postMessage: (msg) => postedMessages.push(msg),
+    };
+
+    (panel.shadowRoot?.querySelector('#tool-description') as HTMLInputElement).value = 'Turning Tool';
+    (panel.shadowRoot?.querySelector('#tool-q') as HTMLInputElement).value = '2';
+    (panel.shadowRoot?.querySelector('#tool-form') as HTMLFormElement).requestSubmit();
+
+    expect(postedMessages).toHaveLength(1);
+    const toolReq = postedMessages[0].payload as ProgramToolUpdateRequest;
+    expect(toolReq.documentId).toBe('external');
+
+    const codec = new SimulationCommentCodec();
+    const edits = new ProgramMetadataEditService(codec);
+    const toolEdit = edits.planToolUpdate(hostProgramContent, toolReq.tool, toolReq.syntax);
+    hostProgramContent = hostProgramContent.slice(0, toolEdit.startOffset) + toolEdit.text + hostProgramContent.slice(toolEdit.endOffset);
+
+    // Simulate VS Code host delivering the result message back to the Tools webview
+    window.dispatchEvent(new MessageEvent('message', {
+      data: {
+        type: EVENT_NAMES.PROGRAM_TOOL_UPDATE_RESULT,
+        payload: {
+          requestId: toolReq.requestId,
+          channelId: '1',
+          success: true,
+          message: 'Applied tool 1 to the program',
+          updatedText: hostProgramContent,
+        },
+      },
+    }));
+
+    await vi.waitFor(() => expect(panel.shadowRoot?.textContent).toContain('Applied tool 1'));
+
+    // Switch to Raw Material tab and verify buttons are enabled and material can be applied
+    (panel.shadowRoot?.querySelector('[data-manager-tab="material"]') as HTMLButtonElement).click();
+    const submitBtn = panel.shadowRoot?.querySelector<HTMLButtonElement>('#material-form button[type="submit"]')!;
+    expect(submitBtn.disabled).toBe(false);
+
+    (panel.shadowRoot?.querySelector<HTMLFormElement>('#material-form'))!.requestSubmit();
+    expect(postedMessages).toHaveLength(2);
+    const setupReq = postedMessages[1].payload as ProgramSetupUpdateRequest;
+    expect(setupReq.expectedText).toBe(hostProgramContent);
+
+    const setupEdit = edits.planSetupUpdate(hostProgramContent, setupReq.setup, setupReq.syntax);
+    hostProgramContent = hostProgramContent.slice(0, setupEdit.startOffset) + setupEdit.text + hostProgramContent.slice(setupEdit.endOffset);
+
+    window.dispatchEvent(new MessageEvent('message', {
+      data: {
+        type: 'PROGRAM_SETUP_UPDATE_RESULT',
+        payload: {
+          requestId: setupReq.requestId,
+          channelId: '1',
+          success: true,
+          message: 'Applied machine and material setup to the program',
+          updatedText: hostProgramContent,
+        },
+      },
+    }));
+
+    await vi.waitFor(() => expect(panel.shadowRoot?.textContent).toContain('Applied machine and material setup'));
+    expect((panel.shadowRoot?.querySelector<HTMLButtonElement>('#material-form button[type="submit"]'))?.disabled).toBe(false);
+    expect((panel.shadowRoot?.querySelector<HTMLButtonElement>('#remove-material'))?.disabled).toBe(false);
+    delete (window as unknown as { vscodeApi?: unknown }).vscodeApi;
+  });
+
   it('shows stored-data failures instead of replacing corrupt local data', async () => {
     panel.remove();
     await registry.disposeAll();

@@ -9,14 +9,19 @@ PROGRAM_NUMBER_RE = re.compile(r"(?:^|\n)\s*O(\d+)\b", re.IGNORECASE)
 PA_MARKER_PROGRAM_RE = re.compile(r"<\s*O(\d+)\.P\d+\s*>", re.IGNORECASE)
 PA_SECTION_RE = re.compile(r"<\s*(?:O\d+\.)?P(\d+)\s*>", re.IGNORECASE)
 PA_FILE_ASSIGNMENT_RE = re.compile(r"&F=/O(\d+)/", re.IGNORECASE)
+PROJECT_NAME_RE = re.compile(r"<project_name>\s*O?(\d+)\s*</project_name>", re.IGNORECASE)
 COMMENT_RE = re.compile(r"\(([^)]*)\)")
 FILE_NUMBER_RE = re.compile(r"O(\d+)", re.IGNORECASE)
+FALLBACK_FILE_NUMBER_RE = re.compile(r"(\d+)")
 PATH_DIR_CANDIDATES = {
     1: ("PATH1", "P1", "CH1"),
     2: ("PATH2", "P2", "CH2"),
     3: ("PATH3", "P3", "CH3"),
 }
-ALLOWED_SUFFIXES = {"", ".mpf", ".spf", ".nc", ".txt", ".p1", ".p2", ".p3", ".pa", ".eia", ".min", ".m", ".s"}
+ALLOWED_SUFFIXES = {
+    "", ".mpf", ".spf", ".nc", ".cnc", ".n", ".txt",
+    ".p1", ".p2", ".p3", ".p4", ".pa", ".eia", ".min", ".m", ".s", ".prg",
+}
 EXCLUDED_SUFFIXES = {
     ".dll", ".exe", ".so", ".dylib", ".zip", ".tar", ".gz", ".7z", ".rar",
     ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".svg", ".webp",
@@ -208,7 +213,7 @@ class UsbTransferClient(ProtocolClient):
     def _normalize_extensions(file_extensions: Optional[List[str]]) -> Optional[set[str]]:
         if file_extensions is None:
             return None
-        return {f".{extension.lstrip('.').lower()}" if extension else "" for extension in file_extensions}
+        return {f".{extension.lstrip('.').lower()}" if extension.lstrip(".") else "" for extension in file_extensions}
 
     def _parse_program_file(self, file_path: Path) -> Optional[Dict[str, Any]]:
         try:
@@ -226,15 +231,17 @@ class UsbTransferClient(ProtocolClient):
             return None
 
         normalized = self._normalize_program_text(program_text)
-        number = self._extract_program_number(normalized)
+        number = self._extract_program_number(program_text)
         if number is None:
-            match = FILE_NUMBER_RE.search(file_path.stem)
+            match = FILE_NUMBER_RE.search(file_path.stem) or FALLBACK_FILE_NUMBER_RE.search(file_path.stem)
             if not match:
                 return None
             number = int(match.group(1))
+            if PA_SECTION_RE.search(program_text):
+                normalized = self._normalize_pa_program_text(program_text, fallback_prog_num=number)
 
         channels = self._extract_multipath_channels(normalized)
-        is_multipath = len(channels) > 1 or (len(channels) == 1 and file_path.suffix.lower() == ".pa")
+        is_multipath = len(channels) > 1 or (len(channels) == 1 and file_path.suffix.lower() == ".pa") or file_path.suffix.lower() == ".pa"
 
         return {
             "number": number,
@@ -267,7 +274,7 @@ class UsbTransferClient(ProtocolClient):
         return normalized + ("\n" if not normalized.endswith("\n") else "")
 
     @staticmethod
-    def _normalize_pa_program_text(program_text: str) -> str:
+    def _normalize_pa_program_text(program_text: str, fallback_prog_num: Optional[int] = None) -> str:
         matches = list(PA_SECTION_RE.finditer(program_text))
         if not matches:
             return program_text
@@ -287,6 +294,8 @@ class UsbTransferClient(ProtocolClient):
             return program_text
 
         prog_number = UsbTransferClient._extract_program_number(program_text)
+        if prog_number is None:
+            prog_number = fallback_prog_num
         formatted_prog = f"O{prog_number:04d}" if prog_number is not None else (sections[0]["prog_name"] or "O0001")
 
         formatted_blocks: List[str] = []
@@ -320,6 +329,8 @@ class UsbTransferClient(ProtocolClient):
             match = PA_MARKER_PROGRAM_RE.search(program_text)
         if not match:
             match = PA_FILE_ASSIGNMENT_RE.search(program_text)
+        if not match:
+            match = PROJECT_NAME_RE.search(program_text)
         if not match:
             return None
         return int(match.group(1))

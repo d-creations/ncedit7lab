@@ -70,6 +70,33 @@ export class NCErrorList extends HTMLElement {
       }
     });
 
+    this.eventBus.subscribe(EVENT_NAMES.ERROR_OCCURRED, (data: unknown) => {
+      const errorData = data as { channelId?: string; message?: string } | undefined;
+      const targetChannel = errorData?.channelId;
+      if (!targetChannel ? this.channelId === '1' : targetChannel === this.channelId) {
+        const message = errorData?.message || 'Unknown error occurred';
+        if (!this.errors.some((e) => e.lineNumber === 0 && e.message === message)) {
+          this.errors = [
+            ...this.errors,
+            {
+              lineNumber: 0,
+              message,
+              severity: 'error',
+            },
+          ];
+          this.render();
+
+          this.dispatchEvent(
+            new CustomEvent('errors-updated', {
+              detail: { count: this.errors.length },
+              bubbles: true,
+              composed: true,
+            }),
+          );
+        }
+      }
+    });
+
     this.eventBus.subscribe(EVENT_NAMES.PLOT_CLEARED, () => {
       this.errors = [];
       this.render();

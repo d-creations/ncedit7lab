@@ -252,5 +252,31 @@ def test_usb_transfer_lists_all_extensions_no_extension_and_multipath_containers
     # Verify upload by specific extension or container
     assert "<O1000.P4>" in client.upload_program(1000, 0, [".PA"])
     assert "(NO EXT)" in client.upload_program(4000, 1, [""])
+    assert "(NO EXT)" in client.upload_program(4000, 1, ["."])
     assert "(P4 PART)" in client.upload_program(2000, 4, [".P4"])
+
+
+def test_usb_transfer_detects_p_dash_2_nc_cnc_n_and_pa_without_o_prefix(tmp_path):
+    root = tmp_path / "usb"
+    root.mkdir()
+    (root / "O1234.p-2").write_text("O1234\n(P DASH 2)\nM30\n", encoding="utf-8")
+    (root / "O1234").write_text("O1234\n(BARE P1)\nM30\n", encoding="utf-8")
+    (root / "O1234.cnc").write_text("O1234\n(CNC EXT)\nM30\n", encoding="utf-8")
+    (root / "O1234.N").write_text("O1234\n(N EXT)\nM30\n", encoding="utf-8")
+    (root / "1500.PA").write_text("<P1>\n(PA WITHOUT O HEADER)\nM30\n<P2>\nM30\n", encoding="utf-8")
+
+    client = UsbTransferClient()
+    assert client.connect(str(root)) is True
+
+    all_programs = client.list_programs(0)
+    by_num_ext = {(p["number"], p["file_extension"]): p for p in all_programs}
+
+    assert (1234, ".p-2") in by_num_ext
+    assert (1234, "") in by_num_ext
+    assert (1234, ".cnc") in by_num_ext
+    assert (1234, ".N") in by_num_ext
+    assert (1500, ".PA") in by_num_ext
+    assert by_num_ext[(1500, ".PA")]["is_multipath"] is True
+    assert by_num_ext[(1500, ".PA")]["channels"] == [1, 2]
+
 

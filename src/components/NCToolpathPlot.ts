@@ -1580,7 +1580,12 @@ export class NCToolpathPlot extends HTMLElement {
           source.identity, source.revision, source.text, state.activeMachine?.simulationCommentSyntax,
         );
         if (!snapshot.valid) {
-          throw new Error(`Channel ${channel.id}: ${snapshot.diagnostics.map((diagnostic) => diagnostic.message).join('; ')}`);
+          const message = snapshot.diagnostics.map((diagnostic) => diagnostic.message).join('; ');
+          this.eventBus.publish(EVENT_NAMES.EXECUTION_ERROR, {
+            channelId: channel.id,
+            error: new Error(message),
+          });
+          throw new Error(`Channel ${channel.id}: ${message}`);
         }
         return { channel, source, snapshot };
       });

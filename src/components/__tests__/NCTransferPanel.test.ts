@@ -69,13 +69,14 @@ describe('NCTransferPanel USB import', () => {
     await registry.disposeAll();
   });
 
-  it('lists and groups PA containers, P1-P4 split files, .M/.S pairs, and extensionless files', async () => {
+  it('lists every USB file as its own separate item with its exact extension', async () => {
     mockBackend.transferListPrograms.mockResolvedValue({
       status: 'success',
       programs: [
         { number: 1000, length: 120, comment: 'CONTAINER PA', file_extension: '.PA', is_multipath: true, channels: [1, 2, 3, 4] },
+        { number: 1000, length: 50, comment: 'SAME NUM NC', file_extension: '.NC' },
         { number: 2000, length: 50, comment: 'SPLIT P1', file_extension: '.P1' },
-        { number: 2000, length: 50, comment: 'SPLIT P2', file_extension: '.P2' },
+        { number: 2000, length: 50, comment: 'SPLIT P2', file_extension: '.p-2' },
         { number: 2000, length: 50, comment: 'SPLIT P4', file_extension: '.P4' },
         { number: 3000, length: 40, comment: 'MAIN M', file_extension: '.M' },
         { number: 3000, length: 40, comment: 'SUB S', file_extension: '.S' },
@@ -93,20 +94,69 @@ describe('NCTransferPanel USB import', () => {
     expect(mockBackend.transferListPrograms).toHaveBeenCalledTimes(1);
     expect(mockBackend.transferListPrograms).toHaveBeenCalledWith('D:\\', 0, 0, 'usb', undefined, undefined);
 
-    const programsMap = (panel as any).cncPrograms as Map<number, any>;
-    expect(programsMap.get(1000)?.isPA).toBe(true);
-    expect(programsMap.get(2000)?.isPA).toBe(true);
-    expect(Object.keys(programsMap.get(2000)?.paths).map(Number)).toEqual([1, 2, 4]);
-    expect(programsMap.get(3000)?.isPA).toBe(true);
-    expect(programsMap.get(3000)?.paths[1]?.file_extension).toBe('.M');
-    expect(programsMap.get(3000)?.paths[2]?.file_extension).toBe('.S');
-    expect(programsMap.get(4000)?.isPA).toBe(false);
-    expect(programsMap.get(4000)?.paths[1]?.file_extension).toBe('');
+    const programsMap = (panel as any).cncPrograms as Map<number | string, any>;
+    expect(programsMap.get('1000:.pa')?.isPA).toBe(true);
+    expect(programsMap.get('1000:.nc')?.isPA).toBe(false);
+    expect(programsMap.get('2000:.p1')?.paths[1]?.file_extension).toBe('.P1');
+    expect(programsMap.get('2000:.p-2')?.paths[2]?.file_extension).toBe('.p-2');
+    expect(programsMap.get('2000:.p4')?.paths[4]?.file_extension).toBe('.P4');
+    expect(programsMap.get('3000:.m')?.paths[1]?.file_extension).toBe('.M');
+    expect(programsMap.get('3000:.s')?.paths[2]?.file_extension).toBe('.S');
+    expect(programsMap.get('4000:')?.paths[1]?.file_extension).toBe('');
 
     const html = panel.shadowRoot?.innerHTML || '';
-    expect(html).toContain('PA Program (P1, P2, P3, P4)');
-    expect(html).toContain('PA Program (P1, P2, P4)');
+    expect(html).toContain('O1000.PA');
+    expect(html).toContain('O1000.NC');
+    expect(html).toContain('PA Program (P1, P2, P3, P4) [.PA]');
+    expect(html).toContain('P2 (.p-2)');
     expect(html).toContain('P1 (no ext)');
+
+    document.body.removeChild(panel);
+  });
+
+  it('allows selecting export extensions (.M, .N, .NC, .cnc, .PA, no ext) when pushing files', async () => {
+    mockMachineService.getMachine.mockReturnValue({
+      fileExtensions: {
+        multifile: true,
+        main: ['.M'],
+        subprogram: [],
+        channels: {
+          '1': ['.', ''],
+          '2': ['.p-2', '.P-2'],
+        },
+      },
+    });
+    mockStateService.getState.mockReturnValue({ globalMachine: 'SR-20RIV-TYPE-A' });
+
+    const panel = document.createElement('nc-transfer-panel') as NCTransferPanel;
+    document.body.appendChild(panel);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    await (panel as any).handleConnect('D:\\');
+
+    // Default PA extension should always be .PA (even if main has .M), and '.' in channels['1'] normalizes to ''
+    expect((panel as any).getPAFileExtension()).toBe('.PA');
+    expect((panel as any).getChannelFileExtension(1)).toBe('');
+    expect((panel as any).getChannelFileExtension(2)).toBe('.p-2');
+
+    const paOptions = (panel as any).getExportExtensionOptions('PA');
+    expect(paOptions).toEqual(expect.arrayContaining(['.PA', '.M', '.NC', '.cnc', '.N', '']));
+
+    // Select .cnc for Channel 1 and push
+    const p1Select = panel.shadowRoot?.querySelector('select[data-ext-target="1"]') as HTMLSelectElement;
+    expect(p1Select).toBeTruthy();
+    p1Select.value = '.cnc';
+    p1Select.dispatchEvent(new Event('change'));
+
+    await (panel as any).uploadDroppedFile('O1234\nG0 X10\nM30', '1');
+    expect(mockBackend.transferDownload).toHaveBeenCalledWith(
+      'D:\\',
+      1,
+      '\nO1234\nG0 X10\nM30\n%',
+      0,
+      'usb',
+      undefined,
+      '.cnc'
+    );
 
     document.body.removeChild(panel);
   });

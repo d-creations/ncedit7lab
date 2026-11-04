@@ -12,12 +12,22 @@ import { EventBus, EVENT_NAMES } from '@services/EventBus';
 import type { TransferProgram, FileExtensionConfig } from '@core/types';
 
 interface GroupedProgram {
+  id: string;
   number: number;
   comment: string;
+  fileExtension?: string;
   paths: Record<number, TransferProgram>;
   containerProgram?: TransferProgram;
   isPA: boolean; // Indicates if it exists on multiple paths or is a multipath container
 }
+
+const EXPORT_EXTENSION_PRESETS: Record<string, string[]> = {
+  PA: ['.PA', '.NC', '.cnc', '.M', '.N', '.txt', ''],
+  '1': ['.P1', '.M', '.NC', '.cnc', '.N', '.MPF', '.txt', ''],
+  '2': ['.P2', '.p-2', '.P-2', '.S', '.NC', '.cnc', '.N', '.SPF', ''],
+  '3': ['.P3', '.p-3', '.P-3', '.NC', '.cnc', '.N', ''],
+  '4': ['.P4', '.p-4', '.P-4', '.NC', '.cnc', '.N', ''],
+};
 
 export class NCTransferPanel extends HTMLElement {
   private backend: BackendGateway;
@@ -30,7 +40,8 @@ export class NCTransferPanel extends HTMLElement {
   private transferProtocol = 'none';
 
   
-  private cncPrograms: Map<number, GroupedProgram> = new Map();
+  private cncPrograms: Map<number | string, GroupedProgram> = new Map();
+  private selectedExportExtensions: Record<string, string> = {};
   private ipAddress: string = '192.168.1.1';
   private isConnectedToCnc: boolean = false;
   loading: boolean = false;
@@ -66,6 +77,7 @@ export class NCTransferPanel extends HTMLElement {
 
     // Re-render when machine selection changes (channels / extensions may change)
     this.eventBus.subscribe(EVENT_NAMES.MACHINE_CHANGED, () => {
+      this.selectedExportExtensions = {};
       this.render();
       this.attachEventListeners();
     });
@@ -198,6 +210,10 @@ export class NCTransferPanel extends HTMLElement {
     return ext.multifile;
   }
 
+  private normalizeConfigExtension(ext: string): string {
+    return ext === '.' ? '' : ext;
+  }
+
   /**
    * Returns the preferred file extension for a given channel number.
    * Uses the first non-empty extension from machine config, falling back to `.P{n}`.
@@ -205,20 +221,73 @@ export class NCTransferPanel extends HTMLElement {
   private getChannelFileExtension(channelNo: number): string {
     const ext = this.getCurrentMachineFileExtensions();
     if (!ext) return `.P${channelNo}`;
-    const channelExts = ext.channels?.[channelNo.toString()];
-    if (!channelExts || channelExts.length === 0) return ext.main?.[0] ?? '';
+    const channelExts = ext.channels?.[channelNo.toString()]?.map(e => this.normalizeConfigExtension(e));
+    if (!channelExts || channelExts.length === 0) {
+      const mainFirst = ext.main?.[0];
+      return mainFirst !== undefined ? this.normalizeConfigExtension(mainFirst) : '';
+    }
     // Prefer non-empty extension; "" means no extension (bare filename)
     return channelExts.find(e => e !== '') ?? channelExts[0] ?? '';
   }
 
   private getChannelFileExtensions(channelNo: number): string[] | undefined {
-    return this.getCurrentMachineFileExtensions()?.channels?.[channelNo.toString()];
+    const channelExts = this.getCurrentMachineFileExtensions()?.channels?.[channelNo.toString()];
+    return channelExts?.map(e => this.normalizeConfigExtension(e));
   }
 
   /** Returns the file extension used for PA (multi-channel assembly) programs. */
   private getPAFileExtension(): string {
     const ext = this.getCurrentMachineFileExtensions();
-    return ext?.main?.[0] ?? '.PA';
+    const paCandidate = ext?.main?.map(e => this.normalizeConfigExtension(e)).find(e => e.toLowerCase() === '.pa');
+    return paCandidate ?? '.PA';
+  }
+
+  /** Returns selectable export extensions for a target ('PA' or channel number string). */
+  private getExportExtensionOptions(target: string): string[] {
+    const options: string[] = [];
+    const addOption = (rawExt: string) => {
+      const normalized = this.normalizeConfigExtension(rawExt);
+      if (!options.includes(normalized)) {
+        options.push(normalized);
+      }
+    };
+
+    const machineExts = this.getCurrentMachineFileExtensions();
+    if (target === 'PA') {
+      addOption(this.getPAFileExtension());
+      for (const m of machineExts?.main ?? []) addOption(m);
+    } else {
+      const chNum = parseInt(target, 10);
+      if (!isNaN(chNum)) {
+        addOption(this.getChannelFileExtension(chNum));
+        for (const c of machineExts?.channels?.[target] ?? []) addOption(c);
+      }
+      for (const m of machineExts?.main ?? []) addOption(m);
+      for (const s of machineExts?.subprogram ?? []) addOption(s);
+    }
+
+    const presets = EXPORT_EXTENSION_PRESETS[target] ?? ['.NC', '.cnc', '.M', '.S', '.N', ''];
+    for (const preset of presets) {
+      addOption(preset);
+    }
+
+    return options;
+  }
+
+  /** Returns the currently selected export extension for a target ('PA' or channel number string). */
+  private getSelectedExportExtension(target: string): string {
+    if (target in this.selectedExportExtensions) {
+      return this.selectedExportExtensions[target];
+    }
+    if (target === 'PA') {
+      return this.getPAFileExtension();
+    }
+    const chNum = parseInt(target, 10);
+    return !isNaN(chNum) ? this.getChannelFileExtension(chNum) : '.NC';
+  }
+
+  private formatExtensionOptionLabel(ext: string): string {
+    return ext === '' ? '(no ext)' : ext;
   }
 
   /**
@@ -329,35 +398,42 @@ export class NCTransferPanel extends HTMLElement {
     if (isUsb) {
       try {
         const response = await this.transferClient.listPrograms(this.ipAddress, 0);
-        for (const prog of response) {
-          if (!this.cncPrograms.has(prog.number)) {
-            this.cncPrograms.set(prog.number, {
-              number: prog.number,
-              comment: prog.comment,
-              paths: {},
-              isPA: false
-            });
-          }
+        const byNumCounts = new Map<number, number>();
+        for (const p of response) {
+          byNumCounts.set(p.number, (byNumCounts.get(p.number) ?? 0) + 1);
+        }
 
-          const group = this.cncPrograms.get(prog.number)!;
-          const channelNo = this.resolveUsbProgramChannel(prog, group.paths);
+        for (const prog of response) {
+          const rawExt = prog.file_extension ?? '';
+          const extLower = rawExt.toLowerCase();
+          const groupId = `${prog.number}:${extLower}`;
+          const channelNo = this.resolveUsbProgramChannel(prog, {});
+          const pathsMap: Record<number, TransferProgram> = {};
+
           if (channelNo === 0) {
-            group.containerProgram = prog;
-            group.isPA = true;
-            for (const ch of prog.channels ?? []) {
-              if (!group.paths[ch]) {
-                group.paths[ch] = prog;
-              }
+            const channels = prog.channels && prog.channels.length > 0 ? prog.channels : [1];
+            for (const ch of channels) {
+              pathsMap[ch] = prog;
             }
           } else {
-            group.paths[channelNo] = prog;
-            if (Object.keys(group.paths).length > 1) {
-              group.isPA = true;
-            }
+            pathsMap[channelNo] = prog;
           }
 
-          if (!group.comment && prog.comment) {
-            group.comment = prog.comment;
+          const entry: GroupedProgram = {
+            id: groupId,
+            number: prog.number,
+            comment: prog.comment,
+            fileExtension: rawExt,
+            paths: pathsMap,
+            containerProgram: channelNo === 0 ? prog : undefined,
+            isPA: channelNo === 0,
+          };
+
+          this.cncPrograms.set(groupId, entry);
+          // Also index by numeric O-number when unambiguous (or prefer multipath container)
+          const existingNumeric = this.cncPrograms.get(prog.number);
+          if (!existingNumeric || (entry.isPA && !existingNumeric.isPA) || (byNumCounts.get(prog.number) ?? 0) === 1) {
+            this.cncPrograms.set(prog.number, entry);
           }
         }
       } catch (e) {
@@ -372,6 +448,7 @@ export class NCTransferPanel extends HTMLElement {
         for (const prog of response) {
           if (!this.cncPrograms.has(prog.number)) {
             this.cncPrograms.set(prog.number, {
+              id: String(prog.number),
               number: prog.number,
               comment: prog.comment,
               paths: {},
@@ -394,12 +471,45 @@ export class NCTransferPanel extends HTMLElement {
     }
   }
 
-  private getUploadExtensionsForProgram(progNum: number, pathNo: number): string[] | undefined {
+  private getDistinctListedPrograms(): GroupedProgram[] {
+    const seen = new Set<GroupedProgram>();
+    const list: GroupedProgram[] = [];
+    for (const prog of this.cncPrograms.values()) {
+      if (!seen.has(prog)) {
+        seen.add(prog);
+        list.push(prog);
+      }
+    }
+    return list.sort((a, b) => {
+      if (a.number !== b.number) return a.number - b.number;
+      return (a.fileExtension ?? '').localeCompare(b.fileExtension ?? '');
+    });
+  }
+
+  private resolveProgramGroup(progKey: number | string, pathNo?: number): GroupedProgram | undefined {
+    const direct = this.cncPrograms.get(progKey);
+    if (direct) return direct;
+    const num = typeof progKey === 'number' ? progKey : parseInt(String(progKey), 10);
+    if (isNaN(num)) return undefined;
+    for (const group of this.getDistinctListedPrograms()) {
+      if (group.number === num) {
+        if (pathNo === undefined || pathNo === 0 || group.paths[pathNo]) {
+          return group;
+        }
+      }
+    }
+    return undefined;
+  }
+
+  private getUploadExtensionsForProgram(progKey: number | string, pathNo: number): string[] | undefined {
     if (String(this.transferProtocol).toLowerCase() === 'usb') {
-      const group = this.cncPrograms.get(progNum);
+      const group = this.resolveProgramGroup(progKey, pathNo);
       const entry = pathNo === 0 ? group?.containerProgram : group?.paths[pathNo];
       if (entry && entry.file_extension !== undefined) {
         return [entry.file_extension];
+      }
+      if (group?.fileExtension !== undefined) {
+        return [group.fileExtension];
       }
     }
     return pathNo > 0 ? this.getChannelFileExtensions(pathNo) : undefined;
@@ -496,11 +606,29 @@ export class NCTransferPanel extends HTMLElement {
     return `%\n&F=/${formattedProgName}/\n${formattedBlocks.join('\n')}\n%`;
   }
 
-  private async handleUpload(progNum: number, pathNo: string) {
+  private resolveAllPathsForNumber(progNum: number): Record<number, TransferProgram> {
+    const combined: Record<number, TransferProgram> = {};
+    for (const item of this.getDistinctListedPrograms()) {
+      if (item.number === progNum && !item.containerProgram) {
+        for (const [ch, entry] of Object.entries(item.paths)) {
+          const chNum = Number(ch);
+          if (!combined[chNum]) {
+            combined[chNum] = entry;
+          }
+        }
+      }
+    }
+    return combined;
+  }
+
+  private async handleUpload(progKey: number | string, pathNo: string) {
     try {
       const isUsb = String(this.transferProtocol).toLowerCase() === 'usb';
+      const prog = this.resolveProgramGroup(progKey, pathNo === 'PA' ? 0 : parseInt(pathNo, 10));
+      const progNum = prog?.number ?? (typeof progKey === 'number' ? progKey : parseInt(String(progKey), 10));
+      if (!progNum || isNaN(progNum)) return;
+
       if (pathNo === 'PA') {
-        const prog = this.cncPrograms.get(progNum);
         if (!prog) return;
 
         // If this is a single multipath container file on USB (e.g. .PA or extensionless with <O1234.P1> tags)
@@ -539,10 +667,19 @@ export class NCTransferPanel extends HTMLElement {
         const progHeader = `O${progNum.toString().padStart(4, '0')}`;
         let combinedContent = `%\n&F=/${progHeader}/\n`;
 
-        const channelsToPull = isUsb ? this.getGroupChannels(prog) : this.getSupportedPaths();
+        const effectivePaths = isUsb && Object.keys(prog.paths).length <= 1
+          ? { ...this.resolveAllPathsForNumber(progNum), ...prog.paths }
+          : prog.paths;
+        const channelsToPull = isUsb
+          ? Object.keys(effectivePaths).map(Number).filter(n => !isNaN(n) && n > 0).sort((a, b) => a - b)
+          : this.getSupportedPaths();
         for (const p of channelsToPull) {
-            if (prog.paths[p]) {
-                const resp = await this.transferClient.uploadProgram(this.ipAddress, p, progNum, undefined, this.getUploadExtensionsForProgram(progNum, p));
+            const pathEntry = effectivePaths[p];
+            if (pathEntry) {
+                const exts = isUsb && pathEntry.file_extension !== undefined
+                  ? [pathEntry.file_extension]
+                  : this.getUploadExtensionsForProgram(progKey, p);
+                const resp = await this.transferClient.uploadProgram(this.ipAddress, p, progNum, undefined, exts);
                 this.fileManager.updateActiveProgramContent(p.toString(), resp);
                 combinedContent += `<${progHeader}.P${p}>\n${resp}\n`;
             }
@@ -562,7 +699,7 @@ export class NCTransferPanel extends HTMLElement {
 
       } else {
         const pNum = parseInt(pathNo, 10);
-        const resp = await this.transferClient.uploadProgram(this.ipAddress, pNum, progNum, undefined, this.getUploadExtensionsForProgram(progNum, pNum));
+        const resp = await this.transferClient.uploadProgram(this.ipAddress, pNum, progNum, undefined, this.getUploadExtensionsForProgram(progKey, pNum));
         
         // If the single file pulled from USB actually contains multipath <...P1>/<...P2> blocks, populate each channel
         const splitBlocks = isUsb ? this.splitMultipathChannels(resp) : {};
@@ -577,7 +714,7 @@ export class NCTransferPanel extends HTMLElement {
         }
         
         const sourceExtension = isUsb
-          ? this.cncPrograms.get(progNum)?.paths[pNum]?.file_extension
+          ? (prog?.paths[pNum]?.file_extension ?? prog?.fileExtension)
           : undefined;
         const fileName = this.buildChannelFileName(progNum, pNum, sourceExtension);
         if ((window as any).vscodeApi) {
@@ -595,11 +732,14 @@ export class NCTransferPanel extends HTMLElement {
     }
   }
 
-  private async handleCompare(progNum: number, pathNo: string) {
+  private async handleCompare(progKey: number | string, pathNo: string) {
     try {
       const isUsb = String(this.transferProtocol).toLowerCase() === 'usb';
+      const prog = this.resolveProgramGroup(progKey, pathNo === 'PA' ? 0 : parseInt(pathNo, 10));
+      const progNum = prog?.number ?? (typeof progKey === 'number' ? progKey : parseInt(String(progKey), 10));
+      if (!progNum || isNaN(progNum)) return;
+
       if (pathNo === 'PA') {
-        const prog = this.cncPrograms.get(progNum);
         if (!prog) return;
 
         if (isUsb && prog.containerProgram && Object.keys(prog.paths).every(ch => prog.paths[Number(ch)] === prog.containerProgram)) {
@@ -626,10 +766,19 @@ export class NCTransferPanel extends HTMLElement {
         const progHeader = `O${progNum.toString().padStart(4, '0')}`;
         let combinedContent = `%\n&F=/${progHeader}/\n`;
 
-        const channelsToCompare = isUsb ? this.getGroupChannels(prog) : this.getSupportedPaths();
+        const effectivePaths = isUsb && Object.keys(prog.paths).length <= 1
+          ? { ...this.resolveAllPathsForNumber(progNum), ...prog.paths }
+          : prog.paths;
+        const channelsToCompare = isUsb
+          ? Object.keys(effectivePaths).map(Number).filter(n => !isNaN(n) && n > 0).sort((a, b) => a - b)
+          : this.getSupportedPaths();
         for (const p of channelsToCompare) {
-            if (prog.paths[p]) {
-                const resp = await this.transferClient.uploadProgram(this.ipAddress, p, progNum, undefined, this.getUploadExtensionsForProgram(progNum, p));
+            const pathEntry = effectivePaths[p];
+            if (pathEntry) {
+                const exts = isUsb && pathEntry.file_extension !== undefined
+                  ? [pathEntry.file_extension]
+                  : this.getUploadExtensionsForProgram(progKey, p);
+                const resp = await this.transferClient.uploadProgram(this.ipAddress, p, progNum, undefined, exts);
                 combinedContent += `<${progHeader}.P${p}>\n${resp}\n`;
             }
         }
@@ -647,7 +796,6 @@ export class NCTransferPanel extends HTMLElement {
 
       } else {
         const pNum = parseInt(pathNo, 10);
-        const prog = this.cncPrograms.get(progNum);
         if (isUsb && prog?.containerProgram && prog.paths[pNum] === prog.containerProgram) {
           const containerExt = prog.containerProgram.file_extension;
           const resp = await this.transferClient.uploadProgram(
@@ -670,8 +818,8 @@ export class NCTransferPanel extends HTMLElement {
           return;
         }
 
-        const resp = await this.transferClient.uploadProgram(this.ipAddress, pNum, progNum, undefined, this.getUploadExtensionsForProgram(progNum, pNum));
-        const sourceExtension = isUsb ? prog?.paths[pNum]?.file_extension : undefined;
+        const resp = await this.transferClient.uploadProgram(this.ipAddress, pNum, progNum, undefined, this.getUploadExtensionsForProgram(progKey, pNum));
+        const sourceExtension = isUsb ? (prog?.paths[pNum]?.file_extension ?? prog?.fileExtension) : undefined;
         const fileName = this.buildChannelFileName(progNum, pNum, sourceExtension);
         if ((window as any).vscodeApi) {
           (window as any).vscodeApi.postMessage({
@@ -686,6 +834,17 @@ export class NCTransferPanel extends HTMLElement {
     }
   }
 
+  private renderExportExtensionSelect(target: string): string {
+    if (String(this.transferProtocol).toLowerCase() !== 'usb') {
+      return '';
+    }
+    const options = this.getExportExtensionOptions(target);
+    const selected = this.getSelectedExportExtension(target);
+    return `<select class="ext-select" data-ext-target="${target}" title="Export file extension for ${target === 'PA' ? 'PA' : `P${target}`}">
+      ${options.map(opt => `<option value="${opt}" ${opt === selected ? 'selected' : ''}>${this.formatExtensionOptionLabel(opt)}</option>`).join('')}
+    </select>`;
+  }
+
   private render() {
     if (!this.shadowRoot) return;
 
@@ -698,6 +857,7 @@ export class NCTransferPanel extends HTMLElement {
     const emptyStateText = isUsbTransfer
       ? 'Enter a local folder path (like a USB drive) and click Open.'
       : 'Please connect to a machine to browse and transfer programs.';
+    const listedPrograms = this.getDistinctListedPrograms();
     this.shadowRoot.innerHTML = `
       <style>
         :host {
@@ -721,7 +881,7 @@ export class NCTransferPanel extends HTMLElement {
           align-items: center;
           flex-shrink: 0;
         }
-        input {
+        input, select {
           background: var(--vscode-input-background, #3c3c3c);
           color: var(--vscode-input-foreground, #cccccc);
           border: 1px solid var(--vscode-input-border, #3c3c3c);
@@ -772,9 +932,20 @@ export class NCTransferPanel extends HTMLElement {
         }
         .push-active-bar {
           display: flex;
+          flex-wrap: wrap;
           gap: 10px;
           margin-top: 10px;
           margin-bottom: 5px;
+          align-items: center;
+        }
+        .push-target-group {
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
+        }
+        .ext-select {
+          padding: 3px 4px;
+          font-size: 0.85em;
         }
       </style>
       
@@ -789,41 +960,43 @@ export class NCTransferPanel extends HTMLElement {
       ${this.isConnectedToCnc ? `
         <div class="list">
           <h3>${locationLabel}</h3>
-          ${Array.from(this.cncPrograms.values()).sort((a,b)=>a.number-b.number).map(prog => {
+          ${listedPrograms.map(prog => {
             const progChannels = isUsbTransfer
               ? this.getGroupChannels(prog)
               : supportedPaths.filter(p => prog.paths[p]);
             const showAsPA = isUsbTransfer ? prog.isPA : (prog.isPA && multifileSupported);
+            const rawExt = prog.fileExtension;
+            const extDisplay = isUsbTransfer && rawExt !== undefined ? rawExt : '';
             const badgeHtml = showAsPA
-              ? `<span class="pa-badge">PA Program${progChannels.length > 0 ? ` (${progChannels.map(p => `P${p}`).join(', ')})` : ''}</span>`
-              : `<span class="single-badge">${progChannels.map(p => this.getChannelLabel(p, isUsbTransfer ? prog.paths[p]?.file_extension : undefined)).join(', ')}</span>`;
+              ? `<span class="pa-badge">PA Program${progChannels.length > 0 ? ` (${progChannels.map(p => `P${p}`).join(', ')})` : ''}${isUsbTransfer && rawExt !== undefined ? ` [${rawExt || 'no ext'}]` : ''}</span>`
+              : `<span class="single-badge">${progChannels.map(p => this.getChannelLabel(p, isUsbTransfer ? (prog.paths[p]?.file_extension ?? rawExt) : undefined)).join(', ')}</span>`;
             const pullPath = showAsPA ? 'PA' : (progChannels[0] ?? 1);
             return `
             <div class="prog-item" draggable="true" data-drag-prog="${prog.number}" data-drag-pa="${showAsPA ? 'true' : 'false'}">
               <div class="prog-info">
                 <div>
-                  <span class="prog-num">O${prog.number.toString().padStart(4, '0')}</span>
+                  <span class="prog-num">O${prog.number.toString().padStart(4, '0')}${extDisplay}</span>
                   ${badgeHtml}
                 </div>
                 <small>${prog.comment}</small>
               </div>
               <div class="actions">
-                <button class="btn-upl" data-path="${pullPath}" data-prog="${prog.number}">Pull</button>
+                <button class="btn-upl" data-path="${pullPath}" data-prog="${prog.number}" data-prog-id="${prog.id}">Pull</button>
                 ${progChannels.map(path =>
-                  `${(window as any).vscodeApi ? `<button class="btn-cmp" data-path="${path}" data-prog="${prog.number}">Compare ${this.getChannelLabel(path, isUsbTransfer && prog.paths[path] !== prog.containerProgram ? prog.paths[path]?.file_extension : undefined)}</button>` : ''}`
+                  `${(window as any).vscodeApi ? `<button class="btn-cmp" data-path="${path}" data-prog="${prog.number}" data-prog-id="${prog.id}">Compare ${this.getChannelLabel(path, isUsbTransfer && prog.paths[path] !== prog.containerProgram ? (prog.paths[path]?.file_extension ?? rawExt) : undefined)}</button>` : ''}`
                 ).join('')}
               </div>
             </div>
           `;
           }).join('')}
-          ${this.cncPrograms.size === 0 ? '<p>No programs found on machine.</p>' : ''}
+          ${listedPrograms.length === 0 ? '<p>No programs found on machine.</p>' : ''}
         </div>
 
         <div class="download-panel">
           <div class="push-active-bar">
              <span style="align-self: center; font-size: 0.9em; flex: 1;"><strong>Push Open File:</strong></span>
-             ${multifileSupported ? `<button class="btn-push-active" data-path="PA">PA</button>` : ''}
-             ${supportedPaths.map(path => `<button class="btn-push-active" data-path="${path}">${this.getChannelLabel(path)}</button>`).join('')}
+             ${multifileSupported ? `<span class="push-target-group"><button class="btn-push-active" data-path="PA">PA</button>${this.renderExportExtensionSelect('PA')}</span>` : ''}
+             ${supportedPaths.map(path => `<span class="push-target-group"><button class="btn-push-active" data-path="${path}">${this.getChannelLabel(path, isUsbTransfer ? this.getSelectedExportExtension(String(path)) : undefined)}</button>${this.renderExportExtensionSelect(String(path))}</span>`).join('')}
           </div>
         </div>
       ` : `
@@ -854,9 +1027,14 @@ export class NCTransferPanel extends HTMLElement {
       uplButtons?.forEach(btn => {
         btn.addEventListener('click', (e) => {
           const target = e.target as HTMLElement;
+          const progId = target.getAttribute('data-prog-id');
           const prog = parseInt(target.getAttribute('data-prog') || '0', 10);
           const path = target.getAttribute('data-path') || '1';
-          if(prog) this.handleUpload(prog, path);
+          if (progId) {
+            this.handleUpload(progId, path);
+          } else if (prog) {
+            this.handleUpload(prog, path);
+          }
         });
       });
 
@@ -864,9 +1042,27 @@ export class NCTransferPanel extends HTMLElement {
       cmpButtons?.forEach(btn => {
         btn.addEventListener('click', (e) => {
           const target = e.target as HTMLElement;
+          const progId = target.getAttribute('data-prog-id');
           const prog = parseInt(target.getAttribute('data-prog') || '0', 10);
           const path = target.getAttribute('data-path') || '1';
-          if(prog) this.handleCompare(prog, path);
+          if (progId) {
+            this.handleCompare(progId, path);
+          } else if (prog) {
+            this.handleCompare(prog, path);
+          }
+        });
+      });
+
+      const extSelects = this.shadowRoot?.querySelectorAll('.ext-select');
+      extSelects?.forEach(sel => {
+        sel.addEventListener('change', (e) => {
+          const target = e.target as HTMLSelectElement;
+          const extTarget = target.getAttribute('data-ext-target');
+          if (extTarget) {
+            this.selectedExportExtensions[extTarget] = target.value;
+            this.render();
+            this.attachEventListeners();
+          }
         });
       });
 
@@ -955,8 +1151,9 @@ export class NCTransferPanel extends HTMLElement {
       if (targetPath === 'PA') {
         if (String(this.transferProtocol).toLowerCase() === 'usb') {
           const finalContent = this.formatPAProgram(content);
-          await this.transferClient.downloadProgram(this.ipAddress, 0, finalContent, undefined, this.getPAFileExtension());
-          alert('PA file pushed successfully as one .PA file.');
+          const exportExt = this.getSelectedExportExtension('PA');
+          await this.transferClient.downloadProgram(this.ipAddress, 0, finalContent, undefined, exportExt);
+          alert(`PA file pushed successfully as one ${exportExt || '(no ext)'} file.`);
           return;
         }
 
@@ -1023,7 +1220,10 @@ export class NCTransferPanel extends HTMLElement {
         if (cleanContent.endsWith('%')) cleanContent = cleanContent.slice(0, -1).trimEnd();
         const finalContent = `\n${cleanContent}\n%`;
         
-        await this.transferClient.downloadProgram(this.ipAddress, pathNo, finalContent, undefined, this.getChannelFileExtension(pathNo));
+        const exportExt = String(this.transferProtocol).toLowerCase() === 'usb'
+          ? this.getSelectedExportExtension(String(pathNo))
+          : this.getChannelFileExtension(pathNo);
+        await this.transferClient.downloadProgram(this.ipAddress, pathNo, finalContent, undefined, exportExt);
         alert(`File pushed to Path ${pathNo} successfully!`);
       }
     } catch(e) {

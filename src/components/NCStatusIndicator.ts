@@ -1,11 +1,14 @@
 import { ServiceRegistry } from '@core/ServiceRegistry';
-import { DIAGNOSTICS_SERVICE_TOKEN, EVENT_BUS_TOKEN } from '@core/ServiceTokens';
+import { DIAGNOSTICS_SERVICE_TOKEN, EVENT_BUS_TOKEN, HOST_BRIDGE_SERVICE_TOKEN } from '@core/ServiceTokens';
 import { DiagnosticsService } from '@services/DiagnosticsService';
-import { EventBus, EVENT_NAMES } from '@services/EventBus';
+import { EventBus, EVENT_NAMES, type EventSubscription } from '@services/EventBus';
+import type { IHostBridgeService } from '@services/HostBridgeService';
 
 export class NCStatusIndicator extends HTMLElement {
   private diagnosticsService: DiagnosticsService;
   private eventBus: EventBus;
+  private hostBridge?: IHostBridgeService;
+  private subscriptions: EventSubscription[] = [];
 
   constructor() {
     super();
@@ -14,6 +17,9 @@ export class NCStatusIndicator extends HTMLElement {
     const registry = ServiceRegistry.getInstance();
     this.diagnosticsService = registry.get(DIAGNOSTICS_SERVICE_TOKEN);
     this.eventBus = registry.get(EVENT_BUS_TOKEN);
+    if (registry.has(HOST_BRIDGE_SERVICE_TOKEN)) {
+      this.hostBridge = registry.get(HOST_BRIDGE_SERVICE_TOKEN);
+    }
   }
 
   connectedCallback() {
@@ -21,34 +27,82 @@ export class NCStatusIndicator extends HTMLElement {
     this.setupEventListeners();
   }
 
-  private setupEventListeners() {
-    // Update on state changes
-    this.eventBus.subscribe(EVENT_NAMES.STATE_CHANGED, () => {
-      this.updateStatus();
-    });
+  disconnectedCallback() {
+    this.subscriptions.forEach((sub) => sub.unsubscribe());
+    this.subscriptions = [];
+  }
 
-    // Update on errors
-    this.eventBus.subscribe(EVENT_NAMES.ERROR_OCCURRED, () => {
-      this.updateStatus();
-    });
+  private setupEventListeners() {
+    this.subscriptions.push(
+      this.eventBus.subscribe(EVENT_NAMES.STATE_CHANGED, () => {
+        this.updateStatus();
+      }),
+    );
+
+    this.subscriptions.push(
+      this.eventBus.subscribe(EVENT_NAMES.ERROR_OCCURRED, () => {
+        this.updateStatus();
+      }),
+    );
+  }
+
+  private openErrorsView() {
+    const diagnostics = this.diagnosticsService.getDiagnostics();
+    const targetChannelId = diagnostics.find((d) => d.channelId)?.channelId;
+
+    this.hostBridge?.openWorkbenchPanel('errors');
+
+    const selector = targetChannelId
+      ? `nc-channel-pane[data-channel="${targetChannelId}"] #bottom-panel`
+      : 'nc-channel-pane #bottom-panel';
+    const bottomPanel = document.querySelector(selector) as
+      | (HTMLElement & { open?: (tabName?: 'variables' | 'errors') => void })
+      | null;
+    bottomPanel?.open?.('errors');
   }
 
   private updateStatus() {
     const errorCount = this.diagnosticsService.getErrorCount();
     const warningCount = this.diagnosticsService.getWarningCount();
+    const diagnostics = this.diagnosticsService.getDiagnostics();
 
-    const statusSpan = this.shadowRoot?.querySelector('.status');
+    const statusSpan = this.shadowRoot?.querySelector<HTMLElement>('.status');
+    const messageSpan = this.shadowRoot?.querySelector<HTMLElement>('.status-message');
     if (!statusSpan) return;
+
+    const latestIssue =
+      diagnostics.find((d) => d.severity === 'error') ??
+      diagnostics.find((d) => d.severity === 'warning');
+    const tooltip = diagnostics
+      .slice(0, 5)
+      .map((d) => (d.channelId ? `[Ch ${d.channelId}] ${d.message}` : d.message))
+      .join('\n');
 
     if (errorCount > 0) {
       statusSpan.textContent = `${errorCount} Error${errorCount !== 1 ? 's' : ''}`;
-      statusSpan.className = 'status error';
+      statusSpan.className = 'status error clickable';
+      statusSpan.title = tooltip;
     } else if (warningCount > 0) {
       statusSpan.textContent = `${warningCount} Warning${warningCount !== 1 ? 's' : ''}`;
-      statusSpan.className = 'status warning';
+      statusSpan.className = 'status warning clickable';
+      statusSpan.title = tooltip;
     } else {
       statusSpan.textContent = 'Ready';
       statusSpan.className = 'status ready';
+      statusSpan.title = 'Ready';
+    }
+
+    if (messageSpan) {
+      if (latestIssue) {
+        const prefix = latestIssue.channelId ? `Ch ${latestIssue.channelId}: ` : '';
+        messageSpan.textContent = `${prefix}${latestIssue.message}`;
+        messageSpan.title = tooltip;
+        messageSpan.hidden = false;
+      } else {
+        messageSpan.textContent = '';
+        messageSpan.title = '';
+        messageSpan.hidden = true;
+      }
     }
   }
 
@@ -57,13 +111,21 @@ export class NCStatusIndicator extends HTMLElement {
     this.shadowRoot.innerHTML = `
       <style>
         :host {
-          display: inline-block;
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          max-width: 100%;
+          overflow: hidden;
         }
         .status {
           padding: 2px 8px;
           border-radius: 4px;
           font-size: 12px;
           font-weight: 500;
+          flex-shrink: 0;
+        }
+        .status.clickable {
+          cursor: pointer;
         }
         .status.ready {
           background: #007acc;
@@ -77,9 +139,26 @@ export class NCStatusIndicator extends HTMLElement {
           background: #f48771;
           color: white;
         }
+        .status-message {
+          font-size: 12px;
+          color: var(--vscode-statusBar-foreground, #abb2bf);
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          cursor: pointer;
+        }
       </style>
       <span class="status ready">Ready</span>
+      <span class="status-message" hidden></span>
     `;
+    this.shadowRoot.querySelector('.status')?.addEventListener('click', () => {
+      if (this.diagnosticsService.getErrorCount() > 0 || this.diagnosticsService.getWarningCount() > 0) {
+        this.openErrorsView();
+      }
+    });
+    this.shadowRoot.querySelector('.status-message')?.addEventListener('click', () => {
+      this.openErrorsView();
+    });
     this.updateStatus();
   }
 }

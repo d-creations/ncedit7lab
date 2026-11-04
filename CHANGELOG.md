@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.3.1] - 2026-11-04
+
+### Fixed
+- **Status Bar Indicator & Diagnostics Synchronization (`DiagnosticsService.ts`, `NCStatusIndicator.ts`, `NCErrorList.ts`, `NCToolpathPlot.ts`)**:
+  - Synchronized `DiagnosticsService` with `EXECUTION_COMPLETED`, `PARSE_COMPLETED`, `PLOT_CLEARED`, and `CHANNEL_DEACTIVATED` so per-channel execution/parse errors update and clear automatically when resolved or when the plot is cleared.
+  - Extracted actual error messages on `EXECUTION_ERROR` and `PARSE_ERROR`, surfaced `ERROR_OCCURRED` messages in `<nc-error-list>`, and published `EXECUTION_ERROR` when pre-plot metadata validation fails.
+  - Updated `<nc-status-indicator>` to display the latest error/warning summary inline beside the status badge, show recent diagnostics in the tooltip, and open the **Errors** tab when clicked.
+- **USB & Multi-Path `.PA` Transfer Handling (`NCTransferPanel.ts`, `backend/transfer/usb.py`)**:
+  - Normalized `.PA` multi-path container headers (`%`, `&F=/OXXXX/`, `<OXXXX.P1>`, etc.) when uploading/combining split channel files and expanded USB program discovery for extensionless and multi-path container files.
+
 ## [1.3.0] - 2026-11-02
 
 ### Added

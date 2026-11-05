@@ -384,4 +384,69 @@ describe('material removal prerequisites', () => {
     expect(result.simulation?.motions).toHaveLength(1);
     expect(result.simulation?.motions[0].executionStep).toBe(2);
   });
+
+  it('skips feed motions for an explicitly defined empty tool (e.g. T2000/T2900) without stopping material removal', () => {
+    const original = input('1', stock);
+    const emptyTool: ProgramToolDefinition = {
+      toolNumber: 2900,
+      description: 'Empty Tool (No Cutter)',
+    };
+    original.snapshot = tools.captureProgramSnapshot(
+      original.snapshot.identity,
+      1,
+      [
+        codec.encodeSetup({ machineName: 'test', material: stock }, syntax),
+        codec.encodeTool(
+          {
+            toolNumber: '1',
+            description: 'mill',
+            cutting: [{ type: 'endMill', diameter: 2, length: 10 }],
+          },
+          syntax,
+        ),
+        codec.encodeTool(emptyTool, syntax),
+      ].join('\n'),
+      syntax,
+    );
+    const emptyFeed = move({
+      type: 'feed',
+      toolNumber: 2900,
+      machiningMode: 'turning',
+      sourceCode: 'G01',
+      executionStep: 1,
+      sourceSegmentIndex: 1,
+      poses: undefined,
+    });
+    const result = prepareMaterialRemoval(
+      [original],
+      metadata(move({ executionStep: 0, sourceSegmentIndex: 0 }), emptyFeed),
+      setup,
+    );
+    expect(result.status).toBe('ready');
+    expect(result.simulation?.stop).toBeUndefined();
+    expect(result.simulation?.motions).toHaveLength(1);
+    expect(result.simulation?.motions[0].executionStep).toBe(0);
+  });
+
+  it('prepares sequential multi-channel removal (CH 1 -> CH 2) when shared stock references are configured', () => {
+    const sharedStock: ProgramMaterialDefinition = {
+      ...stock,
+      channelReferences: {
+        '2': { zeroVertex: 0, rotation: [180, 0, 0] },
+      },
+    };
+    const ch1 = input('1', sharedStock);
+    const ch2 = input('2', sharedStock);
+    const result = prepareMaterialRemoval(
+      [ch1, ch2],
+      metadata(
+        move({ channelId: '1', executionStep: 0, sourceSegmentIndex: 0 }),
+        move({ channelId: '2', executionStep: 1, sourceSegmentIndex: 0 }),
+      ),
+      setup,
+    );
+    expect(result.status).toBe('ready');
+    expect(result.simulation?.motions).toHaveLength(2);
+    expect(result.simulation?.motions.map((m) => m.executionStep)).toEqual([0, 1]);
+  });
 });

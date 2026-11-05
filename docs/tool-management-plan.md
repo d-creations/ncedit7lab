@@ -317,13 +317,19 @@ This bar is centred on X=Y=0 and extends from Z=-100 to Z=0: useful when the tur
 
 For future simulation, resolve the initial work-coordinate system to a fixed simulation/world transform at setup time. Subsequent G54/G55, G92 or other coordinate changes affect the toolpath interpretation, not the physical material position. Do not treat program coordinates as machine coordinates implicitly. If work-offset/kinematic transforms are unavailable, label the material preview as program-coordinate-only rather than claiming machine-space collision accuracy. All dimensions/positions remain mm, including lathe X placement: diameter-programming conventions must not double the physical material size or position.
 
-The Tool Manager **Raw Material** tab provides Round stock / Plate, dimensions,
-XYZ reference position, rotation, a live preview showing the origin/axes, and
-Apply / Remove Program Material actions. Draft defaults are not persisted until
-Apply is pressed. Positive finite dimensions, finite transforms, bounds and
-shape-specific zero indices are validated. Missing material means no material
-setup, not an automatically guessed workpiece. Material name/alloy and physical
-machining properties are deferred.
+The Tool Manager **Raw Material** tab provides one shared workpiece definition
+(Round stock / Plate and dimensions), per-channel coordinate reference and
+direction settings (`CH 1`, `CH 2`, `CH 3`: `zeroVertex`, `position`, `rotation`
+stored in `material.channelReferences`), one-click sub-spindle pick-up presets
+(placing the zero on the opposite side of the raw material and rotating 180° so
+`+Z` looks in the opposite direction), a live preview showing all configured
+channel origins/axes, and Apply / Remove Program Material actions. During Plot
+execution, Channel 2 and Channel 3 toolpaths, points and tool poses are rigidly
+transformed by $M_1 \cdot M_c^{-1}$ into the shared raw-material frame. Draft
+defaults are not persisted until Apply is pressed. Positive finite dimensions,
+finite transforms, bounds and shape-specific zero indices are validated. Missing
+material means no material setup, not an automatically guessed workpiece.
+Material name/alloy and physical machining properties are deferred.
 
 Applying emits `PROGRAM_SETUP_UPDATE_REQUEST`, following the same revision-checked
 EventBus → metadata edit → editor synchronization flow as tools and offsets.

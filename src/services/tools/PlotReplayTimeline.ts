@@ -11,12 +11,15 @@ export interface PlotReplayTimeline {
 }
 
 export function createPlotReplayTimeline(run: PlotRunSnapshot): PlotReplayTimeline {
-  if (run.inputs.length !== 1) throw new Error('Stock replay requires one executed channel');
-  const channelId = run.inputs[0].snapshot.identity.channelId;
+  const channelIds = run.inputs.map((input) => input.snapshot.identity.channelId);
+  const channelSet = new Set(channelIds);
+  if (!channelIds.length || channelSet.size !== channelIds.length) {
+    throw new Error('Stock replay requires one executed channel');
+  }
   const segments = new Map<number, DeepReadonly<PlotSegment>>();
   let previous = -1;
   for (const segment of run.plotMetadata.segments) {
-    if (segment.channelId !== channelId) continue;
+    if (!segment.channelId || !channelSet.has(segment.channelId)) continue;
     const step = segment.executionStep;
     if (
       !Number.isSafeInteger(step) ||
@@ -29,17 +32,45 @@ export function createPlotReplayTimeline(run: PlotRunSnapshot): PlotReplayTimeli
     previous = step;
     segments.set(step, segment);
   }
-  const captured = run.plotMetadata.executionOccurrences?.filter(
-    (occurrence) => occurrence.channelId === channelId,
-  );
-  const complete = captured !== undefined;
-  const occurrences: DeepReadonly<ExecutionOccurrence>[] = complete
-    ? [...captured!]
-    : [...segments].map(([executionStep, segment]) => ({
-        channelId,
-        executionStep,
-        lineNumber: segment.endPoint.lineNumber,
-      }));
+  const hasCaptured = run.plotMetadata.executionOccurrences !== undefined;
+  let complete = hasCaptured;
+  const occurrences: DeepReadonly<ExecutionOccurrence>[] = [];
+  if (channelIds.length === 1) {
+    const channelId = channelIds[0];
+    const captured = run.plotMetadata.executionOccurrences?.filter(
+      (occurrence) => occurrence.channelId === channelId,
+    );
+    complete = captured !== undefined;
+    occurrences.push(
+      ...(complete
+        ? [...captured!]
+        : [...segments].map(([executionStep, segment]) => ({
+            channelId,
+            executionStep,
+            lineNumber: segment.endPoint.lineNumber,
+          }))),
+    );
+  } else {
+    for (const channelId of channelIds) {
+      const captured = run.plotMetadata.executionOccurrences?.filter(
+        (occurrence) => occurrence.channelId === channelId,
+      );
+      if (captured && captured.length > 0) {
+        occurrences.push(...captured);
+      } else {
+        complete = false;
+        for (const [executionStep, segment] of segments) {
+          if (segment.channelId === channelId) {
+            occurrences.push({
+              channelId,
+              executionStep,
+              lineNumber: segment.endPoint.lineNumber,
+            });
+          }
+        }
+      }
+    }
+  }
   previous = -1;
   const steps = new Map<number, DeepReadonly<ExecutionOccurrence>>();
   for (const occurrence of occurrences) {
@@ -62,7 +93,12 @@ export function createPlotReplayTimeline(run: PlotRunSnapshot): PlotReplayTimeli
       throw new Error('Executed-command history does not match the plotted motion');
   }
   let display: DeepReadonly<PlotSegment> | undefined;
+  let lastChannelId: string | undefined;
   const toolDisplays = occurrences.map((occurrence) => {
+    if (lastChannelId !== undefined && occurrence.channelId !== lastChannelId) {
+      display = undefined;
+    }
+    lastChannelId = occurrence.channelId;
     const motion = segments.get(occurrence.executionStep);
     const state = occurrence.toolState;
     if (occurrence.toolSelection &&
@@ -75,7 +111,7 @@ export function createPlotReplayTimeline(run: PlotRunSnapshot): PlotReplayTimeli
         const point = { x: position[0], y: position[1], z: position[2] };
         display = {
           ...state, type: 'rapid', startPoint: point, endPoint: point,
-          channelId, executionStep: occurrence.executionStep,
+          channelId: occurrence.channelId, executionStep: occurrence.executionStep,
           subsegmentIndex: Math.max(0, state.poses.length - 2),
         };
       } else if (display && display.toolNumber === state.toolNumber) {

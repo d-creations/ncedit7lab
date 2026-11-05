@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.0] - 2026-11-05
+
+### Added
+- **Shared Raw Material with Per-Channel Coordinate References & Sub-Spindle Pick-Up Presets (`SimulationMetadata.ts`, `SimulationTransforms.ts`, `NCToolManagerPanel.ts`, `NCToolPreview.ts`)**:
+  - Unified raw material setup into a single shared physical stock (`cylinder` or `box` dimensions) with optional per-channel `channelReferences` (`'1'`, `'2'`, `'3'` `zeroVertex`, `position`, and `rotation`).
+  - Added interactive channel reference cards (`CH 1 (Main)`, `CH 2 (Sub / Pick-up)`, `CH 3`) and one-click presets (**Set CH 2 Pick-up (Opposite Side & Flip Z)**, **Opposite Side & Flip Z (Pick-up)**, **Flip Z Direction (180°)**, **Same as CH 1**) in the Tool Manager **Raw Material** tab.
+  - Enhanced `<nc-tool-preview>` to render secondary coordinate triads (`C1`, `C2`, `C3`) on the stock and synchronized shared material updates across active channels.
+- **Multi-Channel `▶️ Plot All`, Mirrored Channel Plot Transforms & Automatic Pre-Simulation (`NCEditorApp.ts`, `NCToolpathPlot.ts`, `ExecutedProgramService.ts`, `MaterialRemovalPreparation.ts`, `PlotReplayTimeline.ts`)**:
+  - Added `▶️ Plot All` buttons in the top application header (`#plot-request`) and 3D Plot toolbar (`#plot-all`) to plot and simulate all active channels (`CH 1 → CH 2 → CH 3`) together on the shared raw material.
+  - Transformed Channel 2 and Channel 3 toolpath points, segments, and tool poses by $T_{c \to 1} = M_1 \cdot M_c^{-1}$ into the shared stock coordinate frame so backworking operations appear on the opposite end of the stock with mirrored/reversed Z direction.
+  - Added automatic pre-simulation when plotting Channel 2 or Channel 3 in `simulation` mode so preceding channels (`CH 1` before `CH 2`; `CH 1, CH 2` before `CH 3`) pre-machine the shared stock first, with **Replay** starting at the completed pre-simulation stock state.
+- **Cut-Off / Cut-In Grooving Presets & Empty Pick-Up Tool in Default Library (`DefaultToolLibrary.ts`)**:
+  - Added `Cut-Off Tool L 3 mm` (`zeroVertex: 0`), `Cut-In / Grooving Tool L 3 mm` (`zeroVertex: 3`), and `Empty Tool (No Cutter)` (`default-empty-tool`, auto-recommended for `T100–T199` and `T2000–T2999`).
+
+### Fixed
+- **Pre-Tool Header Motions, Empty Tool Calls & Radial Facing Ring Artifacts (`MaterialRemovalPreparation.ts`, `RotationalProfile.ts`)**:
+  - Skipped header `G0`/`G1` moves before the first tool selection and feed moves using explicitly defined cutter-free tools (`T2000–T2999`) during material removal without stopping simulation.
+  - Snapped near-coincident axial polygon levels within machine epsilon in `RotationalProfile.subtractPolygon` to prevent microscopic unremoved rings during radial facing and part-off cuts.
+
 ## [1.3.1] - 2026-11-04
 
 ### Fixed

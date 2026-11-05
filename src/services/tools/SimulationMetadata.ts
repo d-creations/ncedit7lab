@@ -64,9 +64,20 @@ export interface ProgramOffsetsDefinition {
   offsetScope: 'global' | 'tool';
   offsets: ProgramToolOffsetDefinition[];
 }
+export type MaterialChannelId = '1' | '2' | '3';
+export interface ProgramMaterialChannelReference {
+  zeroVertex?: number;
+  position?: Vector3;
+  rotation?: Vector3;
+}
+export type ProgramMaterialChannelReferences = Partial<
+  Record<MaterialChannelId, ProgramMaterialChannelReference>
+>;
 /** Position locates the selected zero point, or the centre for legacy definitions without zeroVertex. */
-export type ProgramMaterialDefinition = PartTransform & { zeroVertex?: number } &
-  (
+export type ProgramMaterialDefinition = PartTransform & {
+  zeroVertex?: number;
+  channelReferences?: ProgramMaterialChannelReferences;
+} & (
     | { type: 'box'; width: number; depth: number; height: number }
     | { type: 'cylinder'; diameter: number; length: number }
   );
@@ -372,21 +383,38 @@ export function validateProgramSetup(value: unknown): ProgramSetupDefinition {
   return setup as unknown as ProgramSetupDefinition;
 }
 
+function validateMaterialZeroVertex(zeroVertex: unknown, type: 'box' | 'cylinder'): void {
+  if (
+    zeroVertex !== undefined &&
+    (!Number.isInteger(zeroVertex) ||
+      (zeroVertex as number) < 0 ||
+      (zeroVertex as number) >= (type === 'box' ? 8 : 2))
+  ) {
+    fail('Invalid material zero vertex');
+  }
+}
+
 export function validateProgramMaterial(value: unknown): ProgramMaterialDefinition {
   const material = record(value);
   transform(material);
+  if (material.type !== 'box' && material.type !== 'cylinder') {
+    fail('Unsupported material type');
+  }
   const dimensions =
-    material.type === 'box'
-      ? ['width', 'depth', 'height']
-      : material.type === 'cylinder'
-        ? ['diameter', 'length']
-        : fail('Unsupported material type');
-  keys(material, ['type', 'position', 'rotation', 'zeroVertex', ...dimensions]);
+    material.type === 'box' ? ['width', 'depth', 'height'] : ['diameter', 'length'];
+  keys(material, ['type', 'position', 'rotation', 'zeroVertex', 'channelReferences', ...dimensions]);
   dimensions.forEach((key) => size(material[key], key));
-  if (material.zeroVertex !== undefined &&
-    (!Number.isInteger(material.zeroVertex) || (material.zeroVertex as number) < 0 ||
-      (material.zeroVertex as number) >= (material.type === 'box' ? 8 : 2))) {
-    fail('Invalid material zero vertex');
+  validateMaterialZeroVertex(material.zeroVertex, material.type);
+  if (material.channelReferences !== undefined) {
+    const refs = record(material.channelReferences);
+    keys(refs, ['1', '2', '3']);
+    for (const channelId of ['1', '2', '3'] as const) {
+      if (refs[channelId] === undefined) continue;
+      const ref = record(refs[channelId]);
+      keys(ref, ['position', 'rotation', 'zeroVertex']);
+      transform(ref);
+      validateMaterialZeroVertex(ref.zeroVertex, material.type);
+    }
   }
   return material as unknown as ProgramMaterialDefinition;
 }

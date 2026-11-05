@@ -24,7 +24,8 @@ import { freezeMetadata } from './tools/SimulationMetadata';
 import type { PlotRunInput, PlotRunSnapshot } from './tools/PlotRunSnapshot';
 import { executionProgram } from './tools/PlotRunSnapshot';
 import type { ProgramToolDefinition } from './tools/SimulationMetadata';
-import { prepareMaterialRemoval } from './tools/MaterialRemovalPreparation';
+import { prepareMaterialRemoval, stockKey } from './tools/MaterialRemovalPreparation';
+import { transformPlotMetadataForChannel } from './simulation/shared/SimulationTransforms';
 
 function parseMachiningMode(value: unknown): MachiningMode {
   if (value === undefined || value === null) return 'unknown';
@@ -77,11 +78,14 @@ export class ExecutedProgramService {
 
   /** Detach all inputs before the first await; publish only the latest fully assembled run. */
   async executePlotRun(
-    inputs: PlotRunInput[], singleChannel = false, toolPathMode: ToolPathMode = 'effective',
+    inputs: PlotRunInput[],
+    singleChannel = false,
+    toolPathMode: ToolPathMode = 'effective',
+    focusChannelId?: ChannelId,
   ): Promise<PlotRunSnapshot> {
     const generation = ++this.plotGeneration;
     const runId = `plot-${generation}`;
-    if (!inputs.length || (singleChannel && inputs.length !== 1)) {
+    if (!inputs.length || (singleChannel && !focusChannelId && inputs.length !== 1)) {
       throw new Error('Plot requires the selected source programs');
     }
     const channels = new Set<string>();
@@ -121,6 +125,94 @@ export class ExecutedProgramService {
       }
       throw error;
     }
+    if (results.length > 1) {
+      let stepOffset = 0;
+      results = results.map((result, index) => {
+        const meta = result.plotMetadata;
+        if (!meta) return result;
+        let maxStep = -1;
+        for (const seg of meta.segments) {
+          if (typeof seg.executionStep === 'number' && Number.isSafeInteger(seg.executionStep) && seg.executionStep > maxStep) {
+            maxStep = seg.executionStep;
+          }
+        }
+        for (const occ of meta.executionOccurrences ?? []) {
+          if (typeof occ.executionStep === 'number' && Number.isSafeInteger(occ.executionStep) && occ.executionStep > maxStep) {
+            maxStep = occ.executionStep;
+          }
+        }
+        for (const stop of meta.removalStops ?? []) {
+          if (typeof stop.executionStep === 'number' && Number.isSafeInteger(stop.executionStep) && stop.executionStep > maxStep) {
+            maxStep = stop.executionStep;
+          }
+        }
+        const currentOffset = index === 0 ? 0 : stepOffset;
+        if (maxStep >= 0) {
+          stepOffset = currentOffset + maxStep + 1;
+        }
+        if (currentOffset === 0) return result;
+        return {
+          ...result,
+          plotMetadata: {
+            ...meta,
+            segments: meta.segments.map((seg) => ({
+              ...seg,
+              ...(typeof seg.executionStep === 'number' && Number.isSafeInteger(seg.executionStep) && seg.executionStep >= 0
+                ? { executionStep: seg.executionStep + currentOffset }
+                : {}),
+            })),
+            ...(meta.executionOccurrences
+              ? {
+                  executionOccurrences: meta.executionOccurrences.map((occ) => ({
+                    ...occ,
+                    ...(typeof occ.executionStep === 'number' && Number.isSafeInteger(occ.executionStep) && occ.executionStep >= 0
+                      ? { executionStep: occ.executionStep + currentOffset }
+                      : {}),
+                  })),
+                }
+              : {}),
+            ...(meta.removalStops
+              ? {
+                  removalStops: meta.removalStops.map((stop) => ({
+                    ...stop,
+                    ...(typeof stop.executionStep === 'number' && Number.isSafeInteger(stop.executionStep) && stop.executionStep >= 0
+                      ? { executionStep: stop.executionStep + currentOffset }
+                      : {}),
+                  })),
+                }
+              : {}),
+          },
+        };
+      });
+    }
+    const materials = captured.flatMap((input) =>
+      input.snapshot.setup?.material ? [input.snapshot.setup.material] : [],
+    );
+    const sharedMaterial =
+      materials.length > 0 &&
+      materials.every((material) => stockKey(material) === stockKey(materials[0]))
+        ? materials[0]
+        : undefined;
+    if (sharedMaterial) {
+      const primaryFrameId =
+        results[0]?.plotMetadata?.segments
+          .flatMap((seg) => seg.poses ?? [])
+          .find((pose) => typeof pose.frameId === 'string' && pose.frameId.length > 0)?.frameId ??
+        captured[0]?.machineProfile?.simulation?.stockBindings?.[0]?.frameId;
+      results = results.map((result, index) =>
+        result.plotMetadata
+          ? {
+              ...result,
+              plotMetadata: transformPlotMetadataForChannel(
+                result.plotMetadata,
+                sharedMaterial,
+                requests[index].channelId,
+                primaryFrameId,
+              ),
+            }
+          : result,
+      );
+    }
     const plotMetadata = structuredClone({
       points: results.flatMap((result) => result.plotMetadata?.points ?? []),
       segments: results.flatMap((result) => result.plotMetadata?.segments ?? []),
@@ -134,6 +226,7 @@ export class ExecutedProgramService {
       toolPathMode,
       inputs: captured,
       plotMetadata,
+      ...(focusChannelId ? { focusChannelId } : {}),
       materialRemoval: toolPathMode === 'simulation'
         ? prepareMaterialRemoval(captured, plotMetadata)
         : undefined,

@@ -145,6 +145,70 @@ describe('NCToolManagerPanel', () => {
     expect(codec.parse(source.text, syntax).setup).toEqual({ machineName: 'FANUC_TEST' });
   });
 
+  it('configures shared raw material with channel 2 pick-up (opposite side & flipped Z) and channel 3 zero reference', async () => {
+    const codec = new SimulationCommentCodec();
+    const edits = new ProgramMetadataEditService(codec);
+    const requests: ProgramSetupUpdateRequest[] = [];
+    eventBus.subscribe(EVENT_NAMES.PROGRAM_SETUP_UPDATE_REQUEST, (request: ProgramSetupUpdateRequest) => {
+      requests.push(request);
+      const edit = edits.planSetupUpdate(source.text, request.setup, request.syntax);
+      source = {
+        ...source,
+        revision: `editor:${requests.length}`,
+        text: source.text.slice(0, edit.startOffset) + edit.text + source.text.slice(edit.endOffset),
+      };
+      eventBus.publish(EVENT_NAMES.PROGRAM_SETUP_UPDATE_RESULT, {
+        requestId: request.requestId, channelId: request.channelId, success: true, message: 'Material applied',
+      });
+    });
+    const field = <T extends HTMLElement>(selector: string) => panel.shadowRoot!.querySelector<T>(selector)!;
+    const set = (selector: string, value: string) => {
+      field<HTMLInputElement | HTMLSelectElement>(selector).value = value;
+      field(selector).dispatchEvent(new Event('change', { bubbles: true }));
+    };
+
+    field<HTMLButtonElement>('[data-manager-tab="material"]').click();
+    set('#material-diameter', '20');
+    set('#material-length', '80');
+    field<NCToolPreview>('nc-tool-preview').pickVertex(0);
+    expect(field<HTMLSelectElement>('#material-zero').value).toBe('0');
+
+    // One-click CH 2 pick-up preset switches to CH 2, selects opposite end (1) and rotates 180° around X
+    field<HTMLButtonElement>('#material-preset-pickup-ch2').click();
+    expect(field<HTMLButtonElement>('[data-material-channel="2"]').classList.contains('active')).toBe(true);
+    expect(field<HTMLSelectElement>('#material-zero').value).toBe('1');
+    expect(field<HTMLInputElement>('#material-rx').value).toBe('180');
+    expect(field<NCToolPreview>('nc-tool-preview').getMaterial()).toMatchObject({
+      type: 'cylinder',
+      diameter: 20,
+      length: 80,
+      zeroVertex: 1,
+      rotation: [180, 0, 0],
+    });
+
+    // Configure CH 3 zero & offset on the same shared raw material
+    field<HTMLButtonElement>('[data-material-channel="3"]').click();
+    expect(field<HTMLButtonElement>('[data-material-channel="3"]').classList.contains('active')).toBe(true);
+    field<HTMLButtonElement>('#material-preset-pickup').click();
+    set('#material-pz', '-5');
+
+    field<HTMLFormElement>('#material-form').requestSubmit();
+    await vi.waitFor(() => expect(requests).toHaveLength(1));
+    expect(codec.parse(source.text, syntax).setup).toEqual({
+      machineName: 'FANUC_TEST',
+      material: {
+        type: 'cylinder',
+        diameter: 20,
+        length: 80,
+        zeroVertex: 0,
+        channelReferences: {
+          '2': { zeroVertex: 1, rotation: [180, 0, 0] },
+          '3': { zeroVertex: 1, position: [0, 0, -5], rotation: [180, 0, 0] },
+        },
+      },
+    });
+  });
+
   it('does not publish material requests with invalid dimensions', () => {
     (panel.shadowRoot!.querySelector('[data-manager-tab="material"]') as HTMLButtonElement).click();
     const request = vi.fn();

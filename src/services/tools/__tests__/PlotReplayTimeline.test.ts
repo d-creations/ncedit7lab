@@ -129,4 +129,41 @@ describe('executed replay timeline', () => {
       createPlotReplayTimeline({ ...single, inputs: [...single.inputs, ...single.inputs] }),
     ).toThrow('one executed channel');
   });
+
+  it('builds a sequential multi-channel replay timeline across distinct channels', () => {
+    const service = new ProgramToolService(new SimulationCommentCodec());
+    const snap1 = service.captureProgramSnapshot(
+      { documentId: 'doc', programId: 'one', channelId: '1' },
+      0,
+      'T1\nG1X1',
+    );
+    const snap2 = service.captureProgramSnapshot(
+      { documentId: 'doc', programId: 'two', channelId: '2' },
+      0,
+      'T2\nG1X1',
+    );
+    const seg1 = { ...segment(0), channelId: '1' as const };
+    const seg2 = { ...segment(1), channelId: '2' as const };
+    const timeline = createPlotReplayTimeline({
+      runId: 'multi',
+      toolPathMode: 'simulation',
+      inputs: [
+        { snapshot: snap1, machineName: 'test', toolValues: [], customVariables: [] },
+        { snapshot: snap2, machineName: 'test', toolValues: [], customVariables: [] },
+      ],
+      plotMetadata: {
+        points: [],
+        segments: [seg1, seg2],
+        executionOccurrences: [
+          { channelId: '1', executionStep: 0, lineNumber: 2 },
+          { channelId: '2', executionStep: 1, lineNumber: 2 },
+        ],
+      },
+    });
+    expect(timeline.complete).toBe(true);
+    expect(timeline.occurrences.map((o) => [o.channelId, o.executionStep])).toEqual([
+      ['1', 0],
+      ['2', 1],
+    ]);
+  });
 });

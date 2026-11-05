@@ -163,6 +163,91 @@ describe('hybrid rotational base and local 3D removal', () => {
         );
       }
   });
+  it('does not create phantom radial discs when plunging an L-shape grooving insert into pre-turned stock', () => {
+    const profile = new RotationalProfile(10, 24);
+    const vInsert = new CuttingToolModel({
+      toolNumber: 200,
+      description: 'Turning Insert V 4.8 mm',
+      Q: 3,
+      R: 0.2,
+      orientation: [0, 90, 0],
+      cutting: [
+        {
+          type: 'insert',
+          shape: 'V',
+          ic: 4.7625,
+          thickness: 1.59,
+          noseRadius: 0.2,
+          clearanceAngle: 7,
+          zeroVertex: 0,
+          position: [-8, 0, 0],
+          rotation: [0, 19, 0],
+        },
+      ],
+      turning: {
+        hand: 'right',
+        mount: 'front',
+        approachAngle: 93,
+        activeCorner: 'front-right',
+        reference: 'virtualTip',
+      },
+    });
+    const lInsert = new CuttingToolModel({
+      toolNumber: 400,
+      description: 'Turning Insert L 4.8 mm',
+      Q: 3,
+      R: 0.2,
+      orientation: [0, 90, 0],
+      cutting: [
+        {
+          type: 'insert',
+          shape: 'L',
+          ic: 4.7625,
+          thickness: 1.59,
+          noseRadius: 0.2,
+          clearanceAngle: 7,
+          width: 3,
+          length: 6.25,
+          zeroVertex: 3,
+          rotation: [0, -45, 0],
+        },
+      ],
+      turning: {
+        hand: 'right',
+        mount: 'front',
+        approachAngle: 93,
+        activeCorner: 'front-right',
+        reference: 'virtualTip',
+      },
+    });
+    const mounting = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, Math.PI / 2, 0, 'XYZ'));
+    const pose = (x: number, z: number): THREE.Matrix4 =>
+      new THREE.Matrix4().compose(
+        new THREE.Vector3(x, 0, z),
+        mounting,
+        new THREE.Vector3(1, 1, 1),
+      );
+    const origin = new THREE.Vector3(0, 0, 0);
+    const axis = new THREE.Vector3(0, 0, 1);
+    profile.apply(
+      buildTurningSweep(vInsert, pose(3.5, -19.8), pose(3.5, -5.0), origin, axis),
+      () => {},
+    );
+    profile.apply(
+      buildTurningSweep(lInsert, pose(4.0, -8.9), pose(1.68, -8.9), origin, axis),
+      () => {},
+    );
+    for (const slab of profile.meridianSlabs) {
+      if (slab.upper <= -6) {
+        for (const interval of slab.intervals) {
+          for (const z of [slab.lower, slab.upper]) {
+            const upperRadius = interval.upper.slope * z + interval.upper.offset;
+            expect(upperRadius).toBeLessThanOrEqual(3.5 + 1e-3);
+          }
+        }
+      }
+    }
+  });
   it.each([
     [0, 1],
     [1.17, 1],

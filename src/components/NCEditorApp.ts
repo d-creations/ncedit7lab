@@ -520,6 +520,7 @@ export class NCEditorApp extends HTMLElement {
           <button class="app-channel-toggle" data-channel="1">Channel 1</button>
           <button class="app-channel-toggle" data-channel="2">Channel 2</button>
           <button class="app-channel-toggle" data-channel="3">Channel 3</button>
+          <button class="app-transfer-toggle" id="plot-request" title="Plot all active channels together">▶️ Plot All</button>
           ${showTransferPanel ? '<button class="app-transfer-toggle" id="transfer-toggle" title="CNC  Transfer">Transfer</button>' : ''}
           <!-- plot toggle removed from header — small open bar sits beside the plot container when hidden -->
         </div>

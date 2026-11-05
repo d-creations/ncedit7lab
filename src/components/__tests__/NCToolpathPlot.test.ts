@@ -1388,4 +1388,125 @@ describe('editor Plot actions', { timeout: 60000 }, () => {
     bus.publish(EVENT_NAMES.PLOT_REQUEST, { channelId: '1' });
     expect(requestPlot).toHaveBeenCalledTimes(1);
   });
+
+  it('transforms channel 2 plot and cursor highlight using shared raw material reference from channel 1', async () => {
+    const codec = new SimulationCommentCodec();
+    source.text = codec.encodeSetup({
+      machineName: 'test',
+      material: {
+        type: 'cylinder',
+        diameter: 20,
+        length: 100,
+        zeroVertex: 0,
+        channelReferences: {
+          '2': { zeroVertex: 1, rotation: [180, 0, 0] },
+        },
+      },
+    }, syntax) + '\nG1 X5 Z10';
+    otherSource.text = 'G1 X5 Z15';
+    requestPlot.mockResolvedValue({
+      canal: {
+        '1': {
+          segments: [{
+            traversal: 'FEED', geometry: 'LINEAR', lineNumber: 1, executionStep: 0, toolNumber: 1,
+            points: [{ x: 5, y: 0, z: 0 }, { x: 5, y: 0, z: 10 }],
+          }],
+        },
+        '2': {
+          segments: [{
+            traversal: 'FEED', geometry: 'LINEAR', lineNumber: 1, executionStep: 0, toolNumber: 2,
+            points: [{ x: 5, y: 0, z: 0 }, { x: 5, y: 0, z: 15 }],
+          }],
+        },
+      },
+    });
+    plot.scene = new THREE.Scene();
+    await plot.plotNCCode();
+    bus.publish(EVENT_NAMES.EDITOR_CURSOR_MOVED, { channelId: '2', lineNumber: 1, source: otherSource });
+    expect(Array.from(plot.highlightObject!.geometry.getAttribute('position').array)).toEqual([
+      5, 0, 100, 5, 0, 85,
+    ]);
+  });
+
+  it('pre-simulates channel 1 before channel 2 when plotting channel 2 in simulation mode and supports Plot All', async () => {
+    configureStock('workpiece:mainSpindle');
+    const codec = new SimulationCommentCodec();
+    source.text = [
+      codec.encodeSetup({
+        machineName: 'test',
+        material: {
+          type: 'cylinder',
+          diameter: 20,
+          length: 100,
+          zeroVertex: 0,
+          channelReferences: {
+            '2': { zeroVertex: 1, rotation: [180, 0, 0] },
+          },
+        },
+      }, syntax),
+      codec.encodeTool({
+        toolNumber: 1,
+        description: 'CH1 Mill',
+        cutting: [{ type: 'endMill', diameter: 4, length: 10 }],
+      }, syntax),
+      'G1 X5 Z10',
+    ].join('\n');
+    otherSource.text = [
+      codec.encodeTool({
+        toolNumber: 2,
+        description: 'CH2 Mill',
+        cutting: [{ type: 'endMill', diameter: 4, length: 10 }],
+      }, syntax),
+      'G1 X5 Z15',
+    ].join('\n');
+
+    requestPlot.mockResolvedValue({
+      canal: {
+        '1': {
+          executionOccurrences: [{ executionStep: 0, lineNumber: 3 }],
+          segments: [{
+            traversal: 'FEED', geometry: 'LINEAR', sourceCode: 'G1', machiningMode: 'milling',
+            lineNumber: 3, executionStep: 0, toolNumber: 1,
+            points: [{ x: 5, y: 0, z: 0 }, { x: 5, y: 0, z: 10 }],
+            poses: [
+              { position: [5, 0, 0], orientation: [0, 0, 0, 1], reference: 'millingTip', frameId: 'workpiece:mainSpindle' },
+              { position: [5, 0, 10], orientation: [0, 0, 0, 1], reference: 'millingTip', frameId: 'workpiece:mainSpindle' },
+            ],
+          }],
+        },
+        '2': {
+          executionOccurrences: [{ executionStep: 0, lineNumber: 2 }],
+          segments: [{
+            traversal: 'FEED', geometry: 'LINEAR', sourceCode: 'G1', machiningMode: 'milling',
+            lineNumber: 2, executionStep: 0, toolNumber: 2,
+            points: [{ x: 5, y: 0, z: 0 }, { x: 5, y: 0, z: 15 }],
+            poses: [
+              { position: [5, 0, 0], orientation: [0, 0, 0, 1], reference: 'millingTip', frameId: 'workpiece:subSpindle' },
+              { position: [5, 0, 15], orientation: [0, 0, 0, 1], reference: 'millingTip', frameId: 'workpiece:subSpindle' },
+            ],
+          }],
+        },
+      },
+    });
+    selectedMode = 'simulation';
+    plot.scene = new THREE.Scene();
+
+    // Plotting Channel 2 alone automatically includes Channel 1 as pre-simulation
+    await plot.plotNCCode('2');
+    const ch2Run = service.getPlotRun('plot-1')!;
+    expect(ch2Run.focusChannelId).toBe('2');
+    expect(ch2Run.materialRemoval?.status).toBe('ready');
+    expect(ch2Run.materialRemoval?.simulation?.motions).toHaveLength(2);
+    expect(ch2Run.materialRemoval?.simulation?.motions[0].start.position).toEqual([5, 0, 0]);
+    expect(ch2Run.materialRemoval?.simulation?.motions[1].start.position).toEqual([5, 0, 100]);
+    expect(ch2Run.materialRemoval?.simulation?.motions[1].end.position).toEqual([5, 0, 85]);
+
+    // Clicking the Plot All button plots all active channels together
+    plot.shadowRoot!.querySelector<HTMLButtonElement>('#plot-all')!.click();
+    await vi.waitFor(() => expect(service.getPlotRun('plot-2')).toBeDefined());
+    const allRun = service.getPlotRun('plot-2')!;
+    expect(allRun.focusChannelId).toBeUndefined();
+    expect(allRun.materialRemoval?.status).toBe('ready');
+    expect(allRun.materialRemoval?.simulation?.motions).toHaveLength(2);
+  });
 });

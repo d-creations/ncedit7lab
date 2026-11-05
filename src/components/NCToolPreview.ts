@@ -1,6 +1,11 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import type { ProgramMaterialDefinition, ProgramToolDefinition } from '@services/tools/SimulationMetadata';
+import type {
+  MaterialChannelId,
+  ProgramMaterialDefinition,
+  ProgramToolDefinition,
+} from '@services/tools/SimulationMetadata';
+import { channelMaterial, materialPlacement } from '@services/simulation/shared/SimulationTransforms';
 import { getInsertPickPoints, ToolGeometryFactory } from './ToolGeometryFactory';
 import { getMaterialPickPoints, MaterialGeometryFactory, type MaterialPickPoint } from './MaterialGeometryFactory';
 
@@ -45,6 +50,8 @@ function disposeObject(root: THREE.Object3D, ownMaterials: boolean): void {
 export class NCToolPreview extends HTMLElement {
   private tool?: ProgramToolDefinition;
   private material?: ProgramMaterialDefinition;
+  private sharedMaterial?: ProgramMaterialDefinition;
+  private activeChannelId: MaterialChannelId = '1';
   private view: PreviewView = 'xz';
   private message = '';
   private messageIsError = false;
@@ -88,6 +95,7 @@ export class NCToolPreview extends HTMLElement {
   setTool(tool: ProgramToolDefinition | undefined): void {
     this.tool = tool;
     this.material = undefined;
+    this.sharedMaterial = undefined;
     this.message = '';
     if (this.initialized) this.rebuild(false);
   }
@@ -96,8 +104,14 @@ export class NCToolPreview extends HTMLElement {
     return this.material;
   }
 
-  setMaterial(material: ProgramMaterialDefinition): void {
+  setMaterial(
+    material: ProgramMaterialDefinition,
+    sharedMaterial?: ProgramMaterialDefinition,
+    activeChannelId: MaterialChannelId = '1',
+  ): void {
     this.material = material;
+    this.sharedMaterial = sharedMaterial ?? material;
+    this.activeChannelId = activeChannelId;
     this.tool = undefined;
     this.message = '';
     if (this.initialized) this.rebuild(false);
@@ -256,6 +270,27 @@ export class NCToolPreview extends HTMLElement {
         decor.add(sprite);
       }
     });
+    if (this.sharedMaterial) {
+      const activePlacement = materialPlacement(
+        channelMaterial(this.sharedMaterial, this.activeChannelId),
+      );
+      for (const ch of ['1', '2', '3'] as const) {
+        if (ch === this.activeChannelId) continue;
+        if (ch !== '1' && !this.sharedMaterial.channelReferences?.[ch]) continue;
+        const chPlacement = materialPlacement(channelMaterial(this.sharedMaterial, ch));
+        const chToActive = activePlacement.clone().multiply(chPlacement.invert());
+        const chGroup = new THREE.Group();
+        chGroup.matrixAutoUpdate = false;
+        chGroup.matrix.copy(chToActive);
+        chGroup.add(new THREE.AxesHelper(size * 0.45));
+        const badge = this.label(`C${ch}`, 0xf4c542, size * 0.16);
+        if (badge) {
+          badge.position.set(0, 0, size * 0.52);
+          chGroup.add(badge);
+        }
+        decor.add(chGroup);
+      }
+    }
     this.decor = decor;
     this.scene.add(decor);
   }

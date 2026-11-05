@@ -49,7 +49,7 @@ import type { SimulationCommentSyntax } from '@services/tools/SimulationCommentC
 import type { PlotSegment } from '@core/types';
 import type { NCBottomPanel } from './NCBottomPanel';
 import { ToolGeometryFactory } from './ToolGeometryFactory';
-import { prepareMaterialRemoval, type MaterialRemovalPreparation } from '@services/tools/MaterialRemovalPreparation';
+import { prepareMaterialRemoval, stockKey, type MaterialRemovalPreparation } from '@services/tools/MaterialRemovalPreparation';
 import { createPlotReplayTimeline, type PlotReplayTimeline } from '@services/tools/PlotReplayTimeline';
 import type { StockBinding, SimulationInput, SimulationResult } from '@services/simulation/shared/SimulationTypes';
 import { rotationQuaternion } from '@services/simulation/shared/SimulationTransforms';
@@ -208,7 +208,17 @@ export class NCToolpathPlot extends HTMLElement {
       this.resolveSelection = createPlotSelectionResolver(run);
       this.stale = false;
       const materials = run.materialRemoval?.stock ? [run.materialRemoval.stock] : [];
-      this.updatePlot(structuredClone(run.plotMetadata) as PlotMetadata, materials);
+      const displayMetadata = run.focusChannelId
+        ? ({
+            ...structuredClone(run.plotMetadata),
+            segments: structuredClone(
+              run.plotMetadata.segments.filter(
+                (segment) => segment.channelId === run.focusChannelId,
+              ),
+            ),
+          } as PlotMetadata)
+        : (structuredClone(run.plotMetadata) as PlotMetadata);
+      this.updatePlot(displayMetadata, materials);
       this.updateMaterialRemovalStatus();
       this.updateRemovalResolution();
       this.updateReplayControls();
@@ -901,6 +911,21 @@ export class NCToolpathPlot extends HTMLElement {
     if (label) label.hidden = !control || control.hidden;
   }
 
+  private getInitialReplayPosition(): number {
+    const run = this.displayedRunId
+      ? this.executedProgramService.getPlotRun(this.displayedRunId)
+      : undefined;
+    if (run?.focusChannelId && this.replayTimeline) {
+      const focusStart = this.replayTimeline.occurrences.findIndex(
+        (occurrence) => occurrence.channelId === run.focusChannelId,
+      );
+      if (focusStart > 0 && this.replayPosition !== focusStart) {
+        return focusStart;
+      }
+    }
+    return 0;
+  }
+
   private async startReplay(): Promise<void> {
     this.refreshStaleness();
     const run = this.displayedRunId ? this.executedProgramService.getPlotRun(this.displayedRunId) : undefined;
@@ -910,7 +935,7 @@ export class NCToolpathPlot extends HTMLElement {
       return;
     }
     if (this.materialReplay && this.replayPrepared) {
-      await this.seekReplay(0);
+      await this.seekReplay(this.getInitialReplayPosition());
       return;
     }
     let generation = this.replayGeneration;
@@ -1108,7 +1133,9 @@ export class NCToolpathPlot extends HTMLElement {
     }
     const segment = this.replayTimeline?.segments.get(occurrence.executionStep);
     const run = this.displayedRunId ? this.executedProgramService.getPlotRun(this.displayedRunId) : undefined;
-    const source = run?.inputs[0]?.snapshot;
+    const source =
+      run?.inputs.find((input) => input.snapshot.identity.channelId === occurrence.channelId)?.snapshot ??
+      run?.inputs[0]?.snapshot;
     const display = this.replayTimeline?.toolDisplays[frame.position - 1];
     const tool = source && display && this.executedProgramService.getRunTool(
       run!.runId, source.identity.programId, occurrence.channelId, display.toolNumber);
@@ -1372,6 +1399,7 @@ export class NCToolpathPlot extends HTMLElement {
         <div id="plot-menu-content">
           <div class="plot-controls">
             <div class="plot-controls-row">
+              <button class="plot-button primary" id="plot-all" title="Plot all active channels together">▶️ Plot All</button>
               <button class="plot-button" id="clear-plot">🗑️ Clear Plot</button>
               <button class="plot-button" id="reset-camera">Reset View</button>
               <button class="plot-button" id="toggle-axes">Axes</button>
@@ -1451,6 +1479,9 @@ export class NCToolpathPlot extends HTMLElement {
     });
     const clearButton = this.shadowRoot?.getElementById('clear-plot');
     clearButton?.addEventListener('click', () => this.clearPlot());
+
+    const plotAllButton = this.shadowRoot?.getElementById('plot-all');
+    plotAllButton?.addEventListener('click', () => void this.plotNCCode());
 
     const resetButton = this.shadowRoot?.getElementById('reset-camera');
     resetButton?.addEventListener('click', () => this.zoomToFit());
@@ -1600,17 +1631,78 @@ export class NCToolpathPlot extends HTMLElement {
           snapshot: this.programTools.captureProgramSnapshot(source.identity, source.revision, source.text, syntax),
         };
       });
-      const inputs: PlotRunInput[] = persistedChecks.map(({ channel, snapshot }) => ({
-        snapshot: this.withDefaultTools(channel.id, snapshot),
-        machineName,
-        machineProfile: state.activeMachine,
-        toolValues: this.programTools.getExecutionToolValues(snapshot),
-        toolOffsets: this.programTools.getExecutionToolOffsets(
-          snapshot,
-          state.activeMachine?.toolSelection,
-        ),
-        customVariables: this.readCustomVariables(channel.id),
-      }));
+      const fallbackMaterial = persistedChecks.some(({ snapshot }) => snapshot.setup?.material)
+        ? undefined
+        : this.resolveSharedMaterialFallback(
+            syntax,
+            new Set(persistedChecks.map(({ channel }) => channel.id)),
+          );
+      const inputs: PlotRunInput[] = persistedChecks.map(({ channel, snapshot }) => {
+        const effectiveSnapshot = this.withSharedMaterial(
+          this.withDefaultTools(channel.id, snapshot),
+          fallbackMaterial,
+          machineName,
+        );
+        return {
+          snapshot: effectiveSnapshot,
+          machineName,
+          machineProfile: state.activeMachine,
+          toolValues: this.programTools.getExecutionToolValues(snapshot),
+          toolOffsets: this.programTools.getExecutionToolOffsets(
+            snapshot,
+            state.activeMachine?.toolSelection,
+          ),
+          customVariables: this.readCustomVariables(channel.id),
+        };
+      });
+      let focusChannelId: ChannelId | undefined;
+      const sharedMaterial = inputs[0]?.snapshot.setup?.material;
+      if (
+        state.toolPathMode === 'simulation' &&
+        (targetChannelId === '2' || targetChannelId === '3') &&
+        sharedMaterial
+      ) {
+        const preChannelIds: ChannelId[] = targetChannelId === '2' ? ['1'] : ['1', '2'];
+        const preInputs: PlotRunInput[] = [];
+        for (const preCh of preChannelIds) {
+          const preSource = this.readProgramSource(preCh);
+          if (!preSource?.text.trim()) continue;
+          try {
+            let preSnapshot = this.programTools.captureProgramSnapshot(
+              preSource.identity,
+              preSource.revision,
+              preSource.text,
+              syntax,
+            );
+            if (!preSnapshot.valid) continue;
+            if (preSnapshot.setup?.machineName && preSnapshot.setup.machineName !== machineName) {
+              continue;
+            }
+            preSnapshot = this.withSharedMaterial(
+              this.withDefaultTools(preCh, preSnapshot),
+              sharedMaterial,
+              machineName,
+            );
+            preInputs.push({
+              snapshot: preSnapshot,
+              machineName,
+              machineProfile: state.activeMachine,
+              toolValues: this.programTools.getExecutionToolValues(preSnapshot),
+              toolOffsets: this.programTools.getExecutionToolOffsets(
+                preSnapshot,
+                state.activeMachine?.toolSelection,
+              ),
+              customVariables: this.readCustomVariables(preCh),
+            });
+          } catch {
+            // Skip unavailable pre-simulation channels
+          }
+        }
+        if (preInputs.length > 0) {
+          inputs.unshift(...preInputs);
+          focusChannelId = targetChannelId;
+        }
+      }
       if (state.toolPathMode === 'simulation' && inputs.length === 1 &&
         this.stockBindingScope(inputs[0]) === this.removalSetupScope) {
         inputs[0].materialSimulation = this.removalSetup;
@@ -1618,7 +1710,10 @@ export class NCToolpathPlot extends HTMLElement {
       // Optional holder/cutting lengths and edge geometry are captured here, never fetched per cursor move.
       // The run event owns rendering; the promise handles busy/failure state only.
       await this.executedProgramService.executePlotRun(
-        inputs, targetChannelId !== undefined, state.toolPathMode,
+        inputs,
+        targetChannelId !== undefined,
+        state.toolPathMode,
+        focusChannelId,
       );
     } catch (error) {
       console.error('Failed to plot NC code:', error);
@@ -1674,6 +1769,51 @@ export class NCToolpathPlot extends HTMLElement {
       throw new Error(`Channel ${channelId}: program changed while storing the machine`);
     }
     return source;
+  }
+
+  private resolveSharedMaterialFallback(
+    syntax: SimulationCommentSyntax | undefined,
+    excludeChannels: ReadonlySet<ChannelId>,
+  ): DeepReadonly<ProgramMaterialDefinition> | undefined {
+    if (!syntax) return undefined;
+    const materials: DeepReadonly<ProgramMaterialDefinition>[] = [];
+    for (const channelId of ['1', '2', '3'] as const) {
+      if (excludeChannels.has(channelId)) continue;
+      const source = this.readProgramSource(channelId);
+      if (!source?.text.includes('material=')) continue;
+      try {
+        const snapshot = this.programTools.captureProgramSnapshot(
+          source.identity,
+          source.revision,
+          source.text,
+          syntax,
+        );
+        if (snapshot.valid && snapshot.setup?.material) {
+          materials.push(snapshot.setup.material);
+        }
+      } catch {
+        // Ignore unparseable non-plotted channel snapshots
+      }
+    }
+    if (!materials.length) return undefined;
+    return materials.every((material) => stockKey(material) === stockKey(materials[0]))
+      ? materials[0]
+      : undefined;
+  }
+
+  private withSharedMaterial(
+    snapshot: ProgramToolSnapshot,
+    fallbackMaterial: DeepReadonly<ProgramMaterialDefinition> | undefined,
+    machineName: string,
+  ): ProgramToolSnapshot {
+    if (snapshot.setup?.material || !fallbackMaterial) return snapshot;
+    return {
+      ...snapshot,
+      setup: {
+        machineName: snapshot.setup?.machineName ?? machineName,
+        material: structuredClone(fallbackMaterial) as ProgramMaterialDefinition,
+      },
+    } as ProgramToolSnapshot;
   }
 
   private withDefaultTools(channelId: ChannelId, snapshot: ProgramToolSnapshot): ProgramToolSnapshot {

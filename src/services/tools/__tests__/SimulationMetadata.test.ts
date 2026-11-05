@@ -72,7 +72,25 @@ describe('simulation schema validation', () => {
     { type: 'cylinder', diameter: 10, radius: 5, length: 10 },
     { type: 'cylinder', diameter: 10, length: 10, position: [0, 0] },
     { type: 'box', width: 10, depth: 10, height: 10, units: 'inch' },
+    { type: 'cylinder', diameter: 10, length: 10, channelReferences: { '4': { zeroVertex: 0 } } },
+    { type: 'cylinder', diameter: 10, length: 10, channelReferences: { '2': { zeroVertex: 2 } } },
+    { type: 'cylinder', diameter: 10, length: 10, channelReferences: { '2': { rotation: [180, 0] } } },
+    { type: 'cylinder', diameter: 10, length: 10, channelReferences: { '2': { extra: 1 } } },
   ])('rejects material outside the fixed-mm centred schema: %j', (material) => {
     expect(() => validateProgramSetup({ machineName: 'MILL', material })).toThrow();
+  });
+
+  it('validates per-channel coordinate references on shared raw material', () => {
+    const material = {
+      type: 'cylinder' as const,
+      diameter: 20,
+      length: 100,
+      zeroVertex: 0,
+      channelReferences: {
+        '2': { zeroVertex: 1, rotation: [180, 0, 0] as [number, number, number] },
+        '3': { zeroVertex: 1, position: [0, 0, -5] as [number, number, number], rotation: [180, 0, 0] as [number, number, number] },
+      },
+    };
+    expect(validateProgramSetup({ machineName: 'STAR', material }).material).toEqual(material);
   });
 });

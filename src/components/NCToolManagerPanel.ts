@@ -22,12 +22,20 @@ import type {
   HolderPart,
   InsertShape,
   ProgramToolDefinition,
+  ProgramMaterialChannelReference,
+  ProgramMaterialChannelReferences,
   ProgramMaterialDefinition,
   ProgramSetupDefinition,
   ToolIdentifier,
   Vector3,
 } from '@services/tools/SimulationMetadata';
 import { validateProgramMaterial, validateProgramTool } from '@services/tools/SimulationMetadata';
+import {
+  channelMaterial,
+  getChannelMaterialReference,
+  hasDistinctChannelReference,
+  pickupChannelMaterialReference,
+} from '@services/simulation/shared/SimulationTransforms';
 import type { LibraryToolDefinition } from '@services/tools/ToolLibraryTypes';
 import { toProgramToolDefinition } from '@services/tools/ToolLibraryTypes';
 import { recommendLibraryToolId } from '@services/tools/DefaultToolLibrary';
@@ -82,6 +90,7 @@ export class NCToolManagerPanel extends HTMLElement {
   private bridgeListener?: (event: Event) => void;
   private activeTab: ManagerTab = 'program';
   private channelId: ChannelId = '1';
+  private materialReferenceChannel: ChannelId = '1';
   private libraryTools: LibraryToolDefinition[] = [];
   private selectedLibraryId?: string;
   private libraryDraft?: LibraryToolDefinition;
@@ -114,6 +123,7 @@ export class NCToolManagerPanel extends HTMLElement {
 
   async connectedCallback(): Promise<void> {
     this.channelId = this.stateService.getWorkbenchSelectedChannel() ?? '1';
+    this.materialReferenceChannel = this.channelId;
     this.subscriptions.push(
       this.eventBus.subscribe(EVENT_NAMES.TOOL_LIBRARY_CHANGED, () => void this.loadLibrary()),
       this.eventBus.subscribe(EVENT_NAMES.PROGRAM_TOOL_UPDATE_RESULT, (data: unknown) => {
@@ -155,6 +165,7 @@ export class NCToolManagerPanel extends HTMLElement {
       const detail = (event as CustomEvent).detail;
       if (detail?.activeChannel && ['1', '2', '3'].includes(detail.activeChannel)) {
         this.channelId = detail.activeChannel as ChannelId;
+        this.materialReferenceChannel = this.channelId;
         this.selectedProgramKey = undefined;
       }
       this.pendingRequestId = undefined;
@@ -263,9 +274,7 @@ export class NCToolManagerPanel extends HTMLElement {
       machine?.simulationCommentSyntax,
     );
     this.programDefinitions = structuredClone(this.programSnapshot.tools) as ProgramToolDefinition[];
-    this.materialDraft = this.programSnapshot.setup?.material
-      ? structuredClone(this.programSnapshot.setup.material) as ProgramMaterialDefinition
-      : { type: 'cylinder', diameter: 20, length: 100, zeroVertex: 1 };
+    this.materialDraft = this.resolveSharedMaterialDraft(machine?.simulationCommentSyntax);
     this.offsetDrafts = this.programTools.getTemporaryToolOffsets(this.programSource.identity);
     const persistedOffsets = this.programSnapshot.offsets;
     const policy = machine?.toolSelection;
@@ -338,26 +347,110 @@ export class NCToolManagerPanel extends HTMLElement {
     });
   }
 
-  private readProgramSource(): ProgramSource | undefined {
+  private readProgramSource(channelId: ChannelId = this.channelId): ProgramSource | undefined {
     const pane = document.querySelector(
-      `nc-channel-pane[data-channel="${this.channelId}"] nc-code-pane`,
+      `nc-channel-pane[data-channel="${channelId}"] nc-code-pane`,
     ) as (HTMLElement & { getProgramSource(): ProgramSource | undefined }) | null;
     if (pane) {
       return pane.getProgramSource();
     }
-    const program = this.fileManager?.getActiveProgram(this.channelId);
+    const program = this.fileManager?.getActiveProgram(channelId);
     if (program) {
       return {
         identity: {
-          channelId: this.channelId,
+          channelId,
           documentId: 'external',
-          programId: program.id || program.name || `Channel ${this.channelId}`,
+          programId: program.id || program.name || `Channel ${channelId}`,
         },
         revision: 'external',
         text: program.content,
       };
     }
     return undefined;
+  }
+
+  private resolveSharedMaterialDraft(
+    syntax = this.getSimulationCommentSyntax(),
+  ): ProgramMaterialDefinition {
+    const byChannel = new Map<ChannelId, ProgramMaterialDefinition>();
+    if (this.programSnapshot?.setup?.material) {
+      byChannel.set(
+        this.channelId,
+        structuredClone(this.programSnapshot.setup.material) as ProgramMaterialDefinition,
+      );
+    }
+    if (syntax) {
+      for (const ch of CHANNELS) {
+        if (byChannel.has(ch)) continue;
+        const source = this.readProgramSource(ch);
+        if (!source?.text.trim()) continue;
+        try {
+          const snap = this.programTools.captureProgramSnapshot(
+            source.identity,
+            source.revision,
+            source.text,
+            syntax,
+          );
+          if (snap.valid && snap.setup?.material) {
+            byChannel.set(ch, structuredClone(snap.setup.material) as ProgramMaterialDefinition);
+          }
+        } catch {
+          // Ignore invalid snapshots on other channels while resolving draft
+        }
+      }
+    }
+    const base =
+      byChannel.get(this.channelId) ??
+      byChannel.get('1') ??
+      byChannel.get('2') ??
+      byChannel.get('3');
+    if (!base) {
+      return { type: 'cylinder', diameter: 20, length: 100, zeroVertex: 1 };
+    }
+    const primary = byChannel.get('1') ?? base;
+    const channelReferences: ProgramMaterialChannelReferences = {
+      ...(base.channelReferences ? structuredClone(base.channelReferences) : {}),
+    };
+    for (const ch of ['2', '3'] as const) {
+      if (channelReferences[ch]) continue;
+      const candidate = byChannel.get(ch);
+      if (!candidate || candidate.type !== primary.type) continue;
+      const refCandidate = getChannelMaterialReference(candidate, ch);
+      const merged: ProgramMaterialDefinition = {
+        ...primary,
+        channelReferences: { ...channelReferences, [ch]: refCandidate },
+      };
+      if (hasDistinctChannelReference(merged, ch)) {
+        channelReferences[ch] = refCandidate;
+      }
+    }
+    return {
+      ...primary,
+      ...(Object.keys(channelReferences).length ? { channelReferences } : {}),
+    };
+  }
+
+  private hasPersistedMaterial(): boolean {
+    if (this.programSnapshot?.setup?.material) return true;
+    const syntax = this.getSimulationCommentSyntax();
+    if (!syntax) return false;
+    for (const ch of CHANNELS) {
+      if (ch === this.channelId) continue;
+      const source = this.readProgramSource(ch);
+      if (!source?.text.trim()) continue;
+      try {
+        const snap = this.programTools.captureProgramSnapshot(
+          source.identity,
+          source.revision,
+          source.text,
+          syntax,
+        );
+        if (snap.valid && snap.setup?.material) return true;
+      } catch {
+        // Ignore
+      }
+    }
+    return false;
   }
 
   private getSimulationCommentSyntax(): SimulationCommentSyntax | undefined {
@@ -578,6 +671,48 @@ export class NCToolManagerPanel extends HTMLElement {
     </main>`;
   }
 
+  private formatChannelMaterialSummary(
+    material: ProgramMaterialDefinition,
+    channelId: ChannelId,
+  ): string {
+    if (channelId !== '1' && !hasDistinctChannelReference(material, channelId)) {
+      return 'Same reference as CH 1';
+    }
+    const ref = getChannelMaterialReference(material, channelId);
+    const zeroLabel =
+      ref.zeroVertex === undefined
+        ? 'Centre'
+        : material.type === 'cylinder'
+          ? `End ${ref.zeroVertex} (${ref.zeroVertex ? '+Z' : '-Z'} face)`
+          : `Corner ${ref.zeroVertex} (${ref.zeroVertex & 1 ? '+X' : '-X'}, ${ref.zeroVertex & 2 ? '+Y' : '-Y'}, ${ref.zeroVertex & 4 ? '+Z' : '-Z'})`;
+    const parts = [zeroLabel];
+    const pos = ref.position ?? [0, 0, 0];
+    if (pos.some((v) => v !== 0)) {
+      parts.push(`Pos [${pos.join(', ')}]`);
+    }
+    const rot = ref.rotation ?? [0, 0, 0];
+    if (rot.some((v) => v !== 0)) {
+      const rxNorm = ((rot[0] % 360) + 360) % 360;
+      const ryNorm = ((rot[1] % 360) + 360) % 360;
+      const oppositeZ =
+        (Math.abs(rxNorm - 180) < 1e-6 && Math.abs(ryNorm) < 1e-6) ||
+        (Math.abs(ryNorm - 180) < 1e-6 && Math.abs(rxNorm) < 1e-6);
+      parts.push(`Rot [${rot.join('°, ')}°]${oppositeZ ? ' (Opposite Z)' : ''}`);
+    }
+    return parts.join(' · ');
+  }
+
+  private updateMaterialChannelCards(): void {
+    const material = this.materialDraft;
+    if (!material || !this.shadowRoot) return;
+    for (const ch of CHANNELS) {
+      const summary = this.shadowRoot.querySelector<HTMLElement>(`[data-material-summary="${ch}"]`);
+      if (summary) {
+        summary.textContent = this.formatChannelMaterialSummary(material, ch);
+      }
+    }
+  }
+
   private renderMaterial(): string {
     const material = this.materialDraft;
     if (!material) return '<main class="tool-editor-pane material-editor-pane"><div class="empty">Select an active program to define raw material.</div></main>';
@@ -589,32 +724,53 @@ export class NCToolManagerPanel extends HTMLElement {
     const values: Record<string, number> = material.type === 'cylinder'
       ? { diameter: material.diameter, length: material.length }
       : { width: material.width, height: material.height, depth: material.depth };
+    const activeCh = this.materialReferenceChannel;
+    const activeRef = getChannelMaterialReference(material, activeCh);
+    const hasPersisted = this.hasPersistedMaterial();
     return `<main class="tool-editor-pane material-editor-pane">
       ${!syntax ? '<div class="notice warning">The selected machine does not advertise a safe simulation-comment syntax. Apply to Program is disabled.</div>' : ''}
       ${diagnostic ? `<div class="notice error">${this.escape(diagnostic)}</div>` : ''}
       <form id="material-form" class="tool-form">
-        <section><div class="section-heading"><h3>Raw Material</h3><span>Distances in mm</span></div>
+        <section><div class="section-heading"><h3>Raw Material</h3><span>One shared workpiece across all channels (mm)</span></div>
           <label>Shape<select id="material-type">${this.option('cylinder', 'Round stock', material.type)}${this.option('box', 'Plate / rectangular stock', material.type)}</select></label>
           <div class="field-grid compact">${dimensions.map(([key, label]) => `<label>${label}<input id="material-${key}" type="number" min="0" step="any" value="${values[key]}"></label>`).join('')}</div>
-          <label>Zero point<select id="material-zero">
-            ${this.option('', 'Centre (legacy placement)', material.zeroVertex === undefined ? '' : String(material.zeroVertex))}
+          <div id="material-preview-slot"></div>
+        </section>
+        <section><div class="section-heading"><h3>Channel Coordinate Reference &amp; Direction</h3><span>Zero point and Z orientation per channel</span></div>
+          <div class="material-channel-grid" role="tablist" aria-label="Channel coordinate references">
+            ${CHANNELS.map((ch) => `
+              <button type="button" class="material-channel-card ${ch === activeCh ? 'active' : ''}" data-material-channel="${ch}" role="tab" aria-selected="${ch === activeCh}">
+                <span class="material-channel-title">CH ${ch}${ch === '1' ? ' (Main)' : ch === '2' ? ' (Sub / Pick-up)' : ''}</span>
+                <span class="material-channel-meta" data-material-summary="${ch}">${this.escape(this.formatChannelMaterialSummary(material, ch))}</span>
+              </button>
+            `).join('')}
+          </div>
+          <div class="material-preset-bar">
+            ${activeCh === '1' ? `
+              <button class="button" type="button" id="material-preset-pickup-ch2" title="Set Channel 2 zero to the opposite side of the raw material and rotate 180° so Z looks in the other direction">Set CH 2 Pick-up (Opposite Side &amp; Flip Z)</button>
+              <button class="button" type="button" id="material-preset-flip-z" title="Rotate CH 1 coordinate system by 180° around X so Z points in the opposite direction">Flip CH 1 Z (180°)</button>
+            ` : `
+              <button class="button" type="button" id="material-preset-pickup" title="Set CH ${activeCh} zero to the opposite side of the raw material and rotate 180° so Z looks in the other direction">Opposite Side &amp; Flip Z (Pick-up)</button>
+              <button class="button" type="button" id="material-preset-flip-z" title="Rotate CH ${activeCh} coordinate system by 180° around X so Z points in the opposite direction">Flip Z Direction (180°)</button>
+              <button class="button" type="button" id="material-preset-same-ch1" title="Use the same zero point and orientation as Channel 1">Same as CH 1</button>
+            `}
+          </div>
+          <label>Zero point (CH ${activeCh})<select id="material-zero">
+            ${this.option('', 'Centre (legacy placement)', activeRef.zeroVertex === undefined ? '' : String(activeRef.zeroVertex))}
             ${Array.from({ length: material.type === 'cylinder' ? 2 : 8 }, (_, index) => this.option(
               String(index), material.type === 'cylinder' ? `End ${index}: ${index ? '+Z' : '-Z'} face centre` :
                 `Corner ${index}: ${index & 1 ? '+X' : '-X'}, ${index & 2 ? '+Y' : '-Y'}, ${index & 4 ? '+Z' : '-Z'}`,
-              String(material.zeroVertex),
+              activeRef.zeroVertex === undefined ? '' : String(activeRef.zeroVertex),
             )).join('')}
           </select></label>
-          <div class="notice">Click an end-face centre or one of the eight corners in the preview to select the material zero.</div>
-          <div id="material-preview-slot"></div>
-        </section>
-        <section><div class="section-heading"><h3>Placement</h3><span>Initial program work coordinates</span></div>
-          <p>Position locates the selected zero point. Rotation is about that point.</p>
-          <div class="field-grid transform-grid">${['x', 'y', 'z'].map((axis, index) => `<label>Position ${axis.toUpperCase()}<input id="material-p${axis}" type="number" step="any" value="${material.position?.[index] ?? 0}"></label>`).join('')}</div>
-          <div class="field-grid transform-grid">${['x', 'y', 'z'].map((axis, index) => `<label>Rotation ${axis.toUpperCase()}<input id="material-r${axis}" type="number" step="any" value="${material.rotation?.[index] ?? 0}"></label>`).join('')}</div>
+          <div class="notice">Click an end-face centre or one of the eight corners in the preview to select the CH ${activeCh} material zero.</div>
+          <p>Position locates the selected CH ${activeCh} zero point. Rotation is about that point (e.g. 180° flips Z direction for sub-spindle pick-up).</p>
+          <div class="field-grid transform-grid">${['x', 'y', 'z'].map((axis, index) => `<label>Position ${axis.toUpperCase()}<input id="material-p${axis}" type="number" step="any" value="${activeRef.position?.[index] ?? 0}"></label>`).join('')}</div>
+          <div class="field-grid transform-grid">${['x', 'y', 'z'].map((axis, index) => `<label>Rotation ${axis.toUpperCase()}<input id="material-r${axis}" type="number" step="any" value="${activeRef.rotation?.[index] ?? 0}"></label>`).join('')}</div>
         </section>
         <div class="form-actions">
           <button class="button primary" type="submit" ${!syntax || this.pendingRequestId || diagnostic ? 'disabled' : ''}>Apply Raw Material to Program</button>
-          <button class="button" id="remove-material" type="button" ${!syntax || this.pendingRequestId || diagnostic || !this.programSnapshot?.setup?.material ? 'disabled' : ''}>Remove Program Material</button>
+          <button class="button" id="remove-material" type="button" ${!syntax || this.pendingRequestId || diagnostic || !hasPersisted ? 'disabled' : ''}>Remove Program Material</button>
         </div>
         <div class="notice">Stored in the program's managed SETUP comments; executable NC commands are unchanged.</div>
       </form>
@@ -623,15 +779,67 @@ export class NCToolManagerPanel extends HTMLElement {
 
   private buildMaterialFromForm(): ProgramMaterialDefinition {
     const input = (key: string) => this.shadowRoot?.querySelector<HTMLInputElement>(`#material-${key}`) ?? null;
+    const type = this.shadowRoot?.querySelector<HTMLSelectElement>('#material-type')?.value === 'box'
+      ? 'box'
+      : 'cylinder';
+    const maxZero = type === 'box' ? 7 : 1;
+    const normalizeRef = (ref: ProgramMaterialChannelReference | undefined): ProgramMaterialChannelReference => {
+      if (!ref) return {};
+      const zeroVertex =
+        ref.zeroVertex === undefined
+          ? undefined
+          : Math.min(maxZero, Math.max(0, ref.zeroVertex));
+      const pos = ref.position?.some((v) => v !== 0) ? ([...ref.position] as Vector3) : undefined;
+      const rot = ref.rotation?.some((v) => v !== 0) ? ([...ref.rotation] as Vector3) : undefined;
+      return {
+        ...(zeroVertex !== undefined ? { zeroVertex } : {}),
+        ...(pos ? { position: pos } : {}),
+        ...(rot ? { rotation: rot } : {}),
+      };
+    };
     const zero = this.shadowRoot?.querySelector<HTMLSelectElement>('#material-zero')?.value;
-    const common = {
+    const editedRef = normalizeRef({
       ...this.readTransform('material'),
       ...(zero === '' || zero === undefined ? {} : { zeroVertex: Number(zero) }),
+    });
+    const prev = this.materialDraft;
+    const ref1 = this.materialReferenceChannel === '1'
+      ? editedRef
+      : normalizeRef(prev ? getChannelMaterialReference(prev, '1') : { zeroVertex: type === 'box' ? 0 : 1 });
+    const baseDimensions = type === 'box'
+      ? {
+          type: 'box' as const,
+          width: requiredNumber(input('width')),
+          height: requiredNumber(input('height')),
+          depth: requiredNumber(input('depth')),
+        }
+      : {
+          type: 'cylinder' as const,
+          diameter: requiredNumber(input('diameter')),
+          length: requiredNumber(input('length')),
+        };
+    const channelReferences: ProgramMaterialChannelReferences = {};
+    for (const ch of ['2', '3'] as const) {
+      const candidate = this.materialReferenceChannel === ch
+        ? editedRef
+        : prev?.channelReferences?.[ch]
+          ? normalizeRef(prev.channelReferences[ch])
+          : undefined;
+      if (!candidate) continue;
+      const probe: ProgramMaterialDefinition = {
+        ...baseDimensions,
+        ...ref1,
+        channelReferences: { [ch]: candidate },
+      };
+      if (hasDistinctChannelReference(probe, ch)) {
+        channelReferences[ch] = candidate;
+      }
+    }
+    const material: ProgramMaterialDefinition = {
+      ...baseDimensions,
+      ...ref1,
+      ...(Object.keys(channelReferences).length ? { channelReferences } : {}),
     };
-    const material: ProgramMaterialDefinition = this.shadowRoot?.querySelector<HTMLSelectElement>('#material-type')?.value === 'box'
-      ? { type: 'box', width: requiredNumber(input('width')), height: requiredNumber(input('height')),
-        depth: requiredNumber(input('depth')), ...common }
-      : { type: 'cylinder', diameter: requiredNumber(input('diameter')), length: requiredNumber(input('length')), ...common };
     validateProgramMaterial(material);
     return material;
   }
@@ -644,9 +852,10 @@ export class NCToolManagerPanel extends HTMLElement {
         throw new Error('An active program and a safe simulation-comment syntax are required');
       }
       const machine = this.stateService.getState().activeMachine;
+      const material = remove ? undefined : this.buildMaterialFromForm();
       const setup: ProgramSetupDefinition = {
         machineName: this.programSnapshot?.setup?.machineName ?? machine?.machineName ?? 'CNC',
-        ...(remove ? {} : { material: this.buildMaterialFromForm() }),
+        ...(material ? { material } : {}),
       };
       const request: ProgramSetupUpdateRequest = {
         requestId: createId('setup'), channelId: this.channelId,
@@ -658,6 +867,44 @@ export class NCToolManagerPanel extends HTMLElement {
       this.setStatus('Applying raw material metadata...', 'info');
       this.eventBus.publish(EVENT_NAMES.PROGRAM_SETUP_UPDATE_REQUEST, request);
       this.relayUpdateRequest('PROGRAM_SETUP_UPDATE_REQUEST', request);
+
+      for (const otherCh of CHANNELS) {
+        if (otherCh === this.channelId) continue;
+        const otherSource = this.readProgramSource(otherCh);
+        if (!otherSource?.text.trim()) continue;
+        try {
+          const otherSnap = this.programTools.captureProgramSnapshot(
+            otherSource.identity,
+            otherSource.revision,
+            otherSource.text,
+            syntax,
+          );
+          if (!otherSnap.valid) continue;
+          const shouldSync =
+            otherSnap.setup?.material !== undefined ||
+            (!remove &&
+              (material?.channelReferences?.[otherCh] !== undefined || otherCh === '1'));
+          if (!shouldSync) continue;
+          const otherSetup: ProgramSetupDefinition = {
+            machineName: otherSnap.setup?.machineName ?? machine?.machineName ?? 'CNC',
+            ...(material ? { material: structuredClone(material) } : {}),
+          };
+          const otherRequest: ProgramSetupUpdateRequest = {
+            requestId: createId(`setup-${otherCh}`),
+            channelId: otherCh,
+            documentId: otherSource.identity.documentId,
+            programId: otherSource.identity.programId,
+            expectedRevision: otherSource.revision,
+            expectedText: otherSource.text,
+            syntax,
+            setup: otherSetup,
+          };
+          this.eventBus.publish(EVENT_NAMES.PROGRAM_SETUP_UPDATE_REQUEST, otherRequest);
+          this.relayUpdateRequest('PROGRAM_SETUP_UPDATE_REQUEST', otherRequest);
+        } catch {
+          // Best-effort sync to secondary channels
+        }
+      }
     } catch (cause) {
       this.setStatus(cause instanceof Error ? cause.message : String(cause), 'error');
     }
@@ -813,11 +1060,25 @@ export class NCToolManagerPanel extends HTMLElement {
       });
     });
     this.shadowRoot?.querySelector<HTMLSelectElement>('#manager-channel')?.addEventListener('change', (event) => {
+      let preservedDraft: ProgramMaterialDefinition | undefined;
+      if (this.activeTab === 'material' && this.shadowRoot?.querySelector('#material-form')) {
+        try {
+          preservedDraft = this.buildMaterialFromForm();
+        } catch {
+          preservedDraft = this.materialDraft;
+        }
+      }
       this.channelId = (event.currentTarget as HTMLSelectElement).value as ChannelId;
+      this.materialReferenceChannel = this.channelId;
       this.stateService.setWorkbenchSelectedChannel(this.channelId);
       this.selectedProgramKey = undefined;
       this.pendingRequestId = undefined;
-      void this.loadProgram();
+      void this.loadProgram(false).then(() => {
+        if (preservedDraft) {
+          this.materialDraft = preservedDraft;
+        }
+        this.render();
+      });
     });
     this.shadowRoot?.querySelector<HTMLInputElement>('#tool-search')?.addEventListener('input', (event) => {
       this.search = (event.currentTarget as HTMLInputElement).value;
@@ -859,13 +1120,145 @@ export class NCToolManagerPanel extends HTMLElement {
     materialForm?.addEventListener('input', () => this.refreshPreview());
     materialForm?.addEventListener('change', () => this.refreshPreview());
     this.shadowRoot?.querySelector<HTMLButtonElement>('#remove-material')?.addEventListener('click', () => this.applyProgramMaterial(true));
+    this.shadowRoot?.querySelectorAll<HTMLButtonElement>('[data-material-channel]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const nextChannel = button.dataset.materialChannel as ChannelId | undefined;
+        if (!nextChannel || nextChannel === this.materialReferenceChannel) return;
+        try {
+          this.materialDraft = this.buildMaterialFromForm();
+        } catch {
+          // Retain last valid draft if current form inputs are incomplete
+        }
+        this.materialReferenceChannel = nextChannel;
+        this.render();
+      });
+    });
+    this.shadowRoot?.querySelector<HTMLButtonElement>('#material-preset-pickup')?.addEventListener('click', () => {
+      if (this.materialReferenceChannel === '1') return;
+      try {
+        const base = this.buildMaterialFromForm();
+        const channelReferences: ProgramMaterialChannelReferences = {
+          ...(base.channelReferences ? structuredClone(base.channelReferences) : {}),
+          [this.materialReferenceChannel]: pickupChannelMaterialReference(base, '1'),
+        };
+        this.materialDraft = { ...base, channelReferences };
+        this.render();
+      } catch (cause) {
+        this.setStatus(cause instanceof Error ? cause.message : String(cause), 'error');
+      }
+    });
+    this.shadowRoot?.querySelector<HTMLButtonElement>('#material-preset-pickup-ch2')?.addEventListener('click', () => {
+      try {
+        const base = this.buildMaterialFromForm();
+        const channelReferences: ProgramMaterialChannelReferences = {
+          ...(base.channelReferences ? structuredClone(base.channelReferences) : {}),
+          '2': pickupChannelMaterialReference(base, '1'),
+        };
+        this.materialDraft = { ...base, channelReferences };
+        this.materialReferenceChannel = '2';
+        this.render();
+      } catch (cause) {
+        this.setStatus(cause instanceof Error ? cause.message : String(cause), 'error');
+      }
+    });
+    this.shadowRoot?.querySelector<HTMLButtonElement>('#material-preset-flip-z')?.addEventListener('click', () => {
+      try {
+        const base = this.buildMaterialFromForm();
+        const currentRef = getChannelMaterialReference(base, this.materialReferenceChannel);
+        const rot = currentRef.rotation ?? [0, 0, 0];
+        const nextRx = (((rot[0] + 180) % 360) + 360) % 360;
+        const nextRotation: Vector3 = [nextRx, rot[1], rot[2]];
+        if (this.materialReferenceChannel === '1') {
+          this.materialDraft = {
+            ...base,
+            ...(nextRotation.some((v) => v !== 0) ? { rotation: nextRotation } : { rotation: undefined }),
+          };
+          if (!this.materialDraft.rotation) delete this.materialDraft.rotation;
+        } else {
+          const channelReferences: ProgramMaterialChannelReferences = {
+            ...(base.channelReferences ? structuredClone(base.channelReferences) : {}),
+            [this.materialReferenceChannel]: {
+              ...currentRef,
+              ...(nextRotation.some((v) => v !== 0) ? { rotation: nextRotation } : { rotation: undefined }),
+            },
+          };
+          if (!channelReferences[this.materialReferenceChannel]?.rotation) {
+            delete channelReferences[this.materialReferenceChannel]!.rotation;
+          }
+          this.materialDraft = { ...base, channelReferences };
+        }
+        this.render();
+      } catch (cause) {
+        this.setStatus(cause instanceof Error ? cause.message : String(cause), 'error');
+      }
+    });
+    this.shadowRoot?.querySelector<HTMLButtonElement>('#material-preset-same-ch1')?.addEventListener('click', () => {
+      if (this.materialReferenceChannel === '1') return;
+      try {
+        const base = this.buildMaterialFromForm();
+        const channelReferences: ProgramMaterialChannelReferences = {
+          ...(base.channelReferences ? structuredClone(base.channelReferences) : {}),
+        };
+        delete channelReferences[this.materialReferenceChannel];
+        const next: ProgramMaterialDefinition = { ...base };
+        if (Object.keys(channelReferences).length) {
+          next.channelReferences = channelReferences;
+        } else {
+          delete next.channelReferences;
+        }
+        this.materialDraft = next;
+        this.render();
+      } catch (cause) {
+        this.setStatus(cause instanceof Error ? cause.message : String(cause), 'error');
+      }
+    });
     this.shadowRoot?.querySelector<HTMLSelectElement>('#material-type')?.addEventListener('change', (event) => {
       try {
-        const type = (event.currentTarget as HTMLSelectElement).value;
+        const type = (event.currentTarget as HTMLSelectElement).value === 'box' ? 'box' : 'cylinder';
+        const maxZero = type === 'box' ? 7 : 1;
+        const clampRef = (
+          ref: ProgramMaterialChannelReference | undefined,
+          fallbackZero?: number,
+        ): ProgramMaterialChannelReference => {
+          const zeroVertex =
+            ref?.zeroVertex === undefined
+              ? fallbackZero
+              : Math.min(maxZero, Math.max(0, ref.zeroVertex));
+          return {
+            ...(zeroVertex !== undefined ? { zeroVertex } : {}),
+            ...(ref?.position?.some((v) => v !== 0) ? { position: [...ref.position] as Vector3 } : {}),
+            ...(ref?.rotation?.some((v) => v !== 0) ? { rotation: [...ref.rotation] as Vector3 } : {}),
+          };
+        };
         const transform = this.readTransform('material');
+        const prev = this.materialDraft;
+        const ref1 = this.materialReferenceChannel === '1'
+          ? { zeroVertex: type === 'box' ? 0 : 1, ...transform }
+          : clampRef(prev ? getChannelMaterialReference(prev, '1') : undefined, type === 'box' ? 0 : 1);
+        const channelReferences: ProgramMaterialChannelReferences = {};
+        for (const ch of ['2', '3'] as const) {
+          const rawRef = this.materialReferenceChannel === ch
+            ? { zeroVertex: type === 'box' ? 0 : 1, ...transform }
+            : prev?.channelReferences?.[ch];
+          if (!rawRef) continue;
+          channelReferences[ch] = clampRef(rawRef);
+        }
         this.materialDraft = type === 'box'
-          ? { type: 'box', width: 100, height: 20, depth: 100, zeroVertex: 0, ...transform }
-          : { type: 'cylinder', diameter: 20, length: 100, zeroVertex: 1, ...transform };
+          ? {
+              type: 'box',
+              width: 100,
+              height: 20,
+              depth: 100,
+              ...ref1,
+              ...(Object.keys(channelReferences).length ? { channelReferences } : {}),
+            }
+          : {
+              type: 'cylinder',
+              diameter: 20,
+              length: 100,
+              ...ref1,
+              ...(Object.keys(channelReferences).length ? { channelReferences } : {}),
+            };
         this.render();
       } catch (cause) {
         this.setStatus(cause instanceof Error ? cause.message : String(cause), 'error');
@@ -940,7 +1333,12 @@ export class NCToolManagerPanel extends HTMLElement {
     if (this.previewElement && this.shadowRoot?.querySelector('#material-form')) {
       try {
         this.materialDraft = this.buildMaterialFromForm();
-        this.previewElement.setMaterial(this.materialDraft);
+        this.previewElement.setMaterial(
+          channelMaterial(this.materialDraft, this.materialReferenceChannel),
+          this.materialDraft,
+          this.materialReferenceChannel,
+        );
+        this.updateMaterialChannelCards();
       } catch (cause) {
         this.previewElement.setMessage(cause instanceof Error ? cause.message : String(cause), true);
       }
@@ -1365,6 +1763,12 @@ export class NCToolManagerPanel extends HTMLElement {
       .section-heading { display:flex; justify-content:space-between; align-items:baseline; gap:8px; }
       .field-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
       .transform-grid { grid-template-columns:repeat(3,minmax(0,1fr)); padding-top:8px; }
+      .material-channel-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:6px; }
+      .material-channel-card { display:flex; flex-direction:column; gap:3px; padding:7px 8px; border:1px solid var(--vscode-widget-border,#d0d7de); border-radius:3px; color:inherit; background:var(--vscode-editorGroupHeader-tabsBackground,#f6f8fa); text-align:left; cursor:pointer; }
+      .material-channel-card.active { border-color:var(--vscode-focusBorder,#0969da); background:var(--vscode-tab-activeBackground,#fff); box-shadow:inset 0 2px 0 var(--vscode-focusBorder,#0969da); }
+      .material-channel-title { font-size:11px; font-weight:600; }
+      .material-channel-meta { color:var(--vscode-descriptionForeground,#57606a); font-size:10px; line-height:1.3; overflow-wrap:anywhere; }
+      .material-preset-bar { display:flex; flex-wrap:wrap; gap:6px; }
       details { color:var(--vscode-descriptionForeground,#57606a); font-size:11px; }
       summary { cursor:pointer; }
       [hidden] { display:none !important; }

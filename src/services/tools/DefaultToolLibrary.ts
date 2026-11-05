@@ -166,10 +166,11 @@ export function getDefaultInsertPlacement(
 /** Suggests the matching standard library tool ID for a numeric STAR/lathe tool station. */
 export function recommendLibraryToolId(toolNumber: ToolIdentifier): string | undefined {
   if (typeof toolNumber !== 'number' || !Number.isFinite(toolNumber)) return undefined;
-  if (toolNumber >= 100 && toolNumber < 200) return 'default-turning-insert-L';
+  if (toolNumber >= 100 && toolNumber < 200) return 'default-cutoff-tool-L-3mm';
   if (toolNumber >= 200 && toolNumber < 1000) return 'default-turning-insert-V';
   if (toolNumber >= 1000 && toolNumber < 1300) return 'default-front-drill-3mm';
   if (toolNumber >= 1300 && toolNumber <= 1500) return 'default-counter-face-endmill-3mm';
+  if (toolNumber >= 2000 && toolNumber < 3000) return 'default-empty-tool';
   if (toolNumber > 1500) return 'default-counter-face-endmill-2mm';
   return undefined;
 }
@@ -218,8 +219,67 @@ function createTurningInsert(shape: InsertShape, preset: TurningPreset): Library
   };
 }
 
+function createGroovingBladeTool(
+  kind: 'cutoff' | 'cutin',
+  preset: TurningPreset,
+): LibraryToolDefinition {
+  const isCutoff = kind === 'cutoff';
+  const baseId = isCutoff ? 'default-cutoff-tool-L-3mm' : 'default-cutin-tool-L-3mm';
+  const baseName = isCutoff ? 'Cut-Off Tool L 3 mm' : 'Cut-In / Grooving Tool L 3 mm';
+  const suffix = preset.id === 'front-right' ? '' : `-${preset.id}`;
+  const label = preset.id === 'front-right' ? '' : ` ${preset.label}`;
+  const { cuttingPosition, cuttingRotation, holderPosition } = getDefaultInsertPlacement(
+    'L',
+    preset.mount,
+    preset.approachAngle,
+  );
+  return {
+    ...baseTool(
+      `${baseId}${suffix}`,
+      `${baseName}${label}`,
+      ['turning', 'insert', 'L', '3 mm', ...(isCutoff ? ['cutoff', 'parting'] : ['cutin', 'grooving']), preset.id],
+    ),
+    Q: preset.defaultQ,
+    R: 0.2,
+    cutting: [{
+      type: 'insert',
+      shape: 'L',
+      ic: 4.7625,
+      thickness: 1.59,
+      noseRadius: 0.2,
+      clearanceAngle: 7,
+      width: 3,
+      length: 6.25,
+      zeroVertex: isCutoff ? 0 : 3,
+      ...(cuttingPosition ? { position: cuttingPosition } : {}),
+      ...(cuttingRotation ? { rotation: cuttingRotation } : {}),
+    }],
+    holder: [{
+      type: 'turningHolderProfile',
+      width: SHANK_WIDTH,
+      depth: 12,
+      outline: preset.outline,
+      stickOut: 15,
+      ...(holderPosition ? { position: holderPosition } : {}),
+    }],
+    turning: {
+      hand: preset.hand,
+      mount: preset.mount,
+      approachAngle: preset.approachAngle,
+      activeCorner: preset.activeCorner,
+      reference: 'virtualTip',
+    },
+    orientation: [...TURNING_ORIENTATION],
+  };
+}
+
 const DEFAULT_TOOL_LIBRARY_TOOLS: LibraryToolDefinition[] = [
+  baseTool('default-empty-tool', 'Empty Tool (No Cutter)', ['empty', 'none', 'backside', 'pickup']),
   ...TURNING_PRESETS.flatMap((preset) => TURNING_INSERT_SHAPES.map((shape) => createTurningInsert(shape, preset))),
+  ...TURNING_PRESETS.flatMap((preset) => [
+    createGroovingBladeTool('cutoff', preset),
+    createGroovingBladeTool('cutin', preset),
+  ]),
   ...DIAMETERS_MM.map((diameter) => createEndMill(diameter)),
   ...DIAMETERS_MM.map((diameter) => createDrill(diameter)),
   ...DIAMETERS_MM.map((diameter) => createEndMill(diameter, FRONT_TOOL_VARIANT)),

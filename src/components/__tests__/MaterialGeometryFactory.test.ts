@@ -2,6 +2,12 @@ import * as THREE from 'three';
 import { describe, expect, it } from 'vitest';
 import { getMaterialPickPoints, MaterialGeometryFactory } from '../MaterialGeometryFactory';
 import { validateProgramMaterial, type ProgramMaterialDefinition } from '@services/tools/SimulationMetadata';
+import {
+  channelMaterial,
+  channelPlotTransform,
+  pickupChannelMaterialReference,
+  transformPlotMetadataForChannel,
+} from '@services/simulation/shared/SimulationTransforms';
 
 const factory = new MaterialGeometryFactory();
 const plate = { type: 'box', width: 100, height: 20, depth: 60 } as const;
@@ -66,5 +72,64 @@ describe('MaterialGeometryFactory', () => {
   ])('rejects invalid dimensions and zero points: %o', (material) => {
     expect(() => validateProgramMaterial(material)).toThrow();
     expect(() => factory.create(material)).toThrow();
+  });
+
+  it('transforms channel 2 and channel 3 toolpaths and poses onto the shared raw material frame', () => {
+    const shared: ProgramMaterialDefinition = {
+      type: 'cylinder',
+      diameter: 20,
+      length: 100,
+      zeroVertex: 0,
+      channelReferences: {
+        '2': pickupChannelMaterialReference({ type: 'cylinder', diameter: 20, length: 100, zeroVertex: 0 }, '1'),
+        '3': { zeroVertex: 1, position: [0, 0, -10], rotation: [180, 0, 0] },
+      },
+    };
+    expect(shared.channelReferences?.['2']).toEqual({ zeroVertex: 1, rotation: [180, 0, 0] });
+    expect(channelMaterial(shared, '2')).toEqual({
+      type: 'cylinder',
+      diameter: 20,
+      length: 100,
+      zeroVertex: 1,
+      rotation: [180, 0, 0],
+    });
+    expect(channelPlotTransform(shared, '1').equals(new THREE.Matrix4())).toBe(true);
+
+    const ch2Plot = transformPlotMetadataForChannel(
+      {
+        points: [
+          { x: 5, y: 0, z: 0, lineNumber: 1 },
+          { x: 5, y: 0, z: 15, lineNumber: 2 },
+        ],
+        segments: [
+          {
+            type: 'feed',
+            channelId: '2',
+            startPoint: { x: 5, y: 0, z: 0, lineNumber: 1 },
+            endPoint: { x: 5, y: 0, z: 15, lineNumber: 2 },
+            poses: [
+              { position: [5, 0, 0], orientation: [0, 0, 0, 1], reference: 'turningVirtualTip', frameId: 'workpiece:subSpindle' },
+              { position: [5, 0, 15], orientation: [0, 0, 0, 1], reference: 'turningVirtualTip', frameId: 'workpiece:subSpindle' },
+            ],
+          },
+        ],
+      },
+      shared,
+      '2',
+    );
+    // In CH 1's frame (zeroVertex 0 at Z=0, length 100 -> bar spans Z=0..100),
+    // CH 2's zero (End 1, rotated 180 deg around X) is at Z=100 and +Z_2 cuts toward Z=85.
+    expect(ch2Plot.points).toEqual([
+      { x: 5, y: 0, z: 100, lineNumber: 1 },
+      { x: 5, y: 0, z: 85, lineNumber: 2 },
+    ]);
+    expect(ch2Plot.segments[0].startPoint).toEqual({ x: 5, y: 0, z: 100, lineNumber: 1 });
+    expect(ch2Plot.segments[0].endPoint).toEqual({ x: 5, y: 0, z: 85, lineNumber: 2 });
+    expect(ch2Plot.segments[0].poses?.[0].position).toEqual([5, 0, 100]);
+    expect(ch2Plot.segments[0].poses?.[1].position).toEqual([5, 0, 85]);
+    expect(ch2Plot.segments[0].poses?.[0].orientation).toEqual([1, 0, 0, 0]);
+
+    const ch3Point = new THREE.Vector3(5, 0, 0).applyMatrix4(channelPlotTransform(shared, '3'));
+    expect(ch3Point.toArray()).toEqual([5, 0, 90]);
   });
 });

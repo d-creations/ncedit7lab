@@ -4,7 +4,11 @@ import type { PlotRunInput } from './PlotRunSnapshot';
 import type { DeepReadonly, ProgramMaterialDefinition } from './SimulationMetadata';
 import { MetadataValidationError } from './SimulationMetadata';
 import type { SimulationInput, StockBinding, RemovalStop } from '../simulation/shared/SimulationTypes';
-import { validateStockBinding, stockPlacement } from '../simulation/shared/SimulationTransforms';
+import {
+  validateStockBinding,
+  stockPlacement,
+  getChannelMaterialReference,
+} from '../simulation/shared/SimulationTransforms';
 import { CuttingToolModel } from '../simulation/shared/CuttingToolModel';
 import { buildTurningEnvelope } from '../simulation/shared/TurningEnvelope';
 import { SimulationCapabilityError } from '../simulation/shared/SimulationTypes';
@@ -34,7 +38,7 @@ export interface MaterialRemovalPreparation {
   simulation?: DeepReadonly<SimulationInput>;
 }
 
-function stockKey(stock: DeepReadonly<ProgramMaterialDefinition>): string {
+export function stockKey(stock: DeepReadonly<ProgramMaterialDefinition>): string {
   return JSON.stringify([
     stock.type,
     stock.type === 'box'
@@ -43,6 +47,10 @@ function stockKey(stock: DeepReadonly<ProgramMaterialDefinition>): string {
     stock.position ?? [0, 0, 0],
     stock.rotation ?? [0, 0, 0],
     stock.zeroVertex ?? null,
+    (['1', '2', '3'] as const).map((channelId) => {
+      const ref = getChannelMaterialReference(stock, channelId);
+      return [ref.zeroVertex ?? null, ref.position ?? [0, 0, 0], ref.rotation ?? [0, 0, 0]];
+    }),
   ]);
 }
 
@@ -124,20 +132,26 @@ export function prepareMaterialRemoval(
     'Geometric preview: supported feed motions are assumed cutting; spindle operation is not verified. Rapids do not remove stock.',
     'warning',
   );
-  if (inputs.length !== 1) {
+  const hasMultiChannelSetup =
+    Boolean(stock.channelReferences && Object.keys(stock.channelReferences).length > 0) ||
+    Boolean(setup) ||
+    inputs.some((input) =>
+      Boolean(input.materialSimulation || input.machineProfile?.simulation?.stockBindings?.length),
+    );
+  if (inputs.length !== 1 && !hasMultiChannelSetup) {
     add(
       'channel-order-unavailable',
       'Simulate one channel at a time; channel-local steps do not establish shared cutting order.',
     );
   }
-  let configured = setup ?? inputs[0]?.materialSimulation;
+  let configured = setup ?? inputs.find((input) => input.materialSimulation)?.materialSimulation;
   const frames = new Set(
     metadata.segments.flatMap(
       (segment) => segment.poses?.filter(validPose).map((pose) => pose.frameId) ?? [],
     ),
   );
   const frameId = frames.size === 1 ? [...frames][0] : undefined;
-  if (!configured && inputs.length === 1) {
+  if (!configured && (inputs.length === 1 || hasMultiChannelSetup)) {
     const binding = resolveMachineStockBinding(inputs[0], frames);
     if (binding) configured = { binding, resolutionMm: 0.05 };
   }
@@ -167,11 +181,43 @@ export function prepareMaterialRemoval(
     resolutionMm: configured.resolutionMm,
     motions: [],
   };
-  const tools = new Map(inputs[0].snapshot.tools.map((tool) => [tool.toolNumber, tool]));
-  const explicitTools = new Set(
-    inputs[0].snapshot.geometry
-      .filter((geometry) => geometry.status === 'single-cutter')
-      .map((geometry) => geometry.toolNumber),
+  const toolsByChannel = new Map(
+    inputs.map((input) => [
+      input.snapshot.identity.channelId,
+      new Map(input.snapshot.tools.map((tool) => [tool.toolNumber, structuredClone(tool)])),
+    ]),
+  );
+  const explicitToolsByChannel = new Map(
+    inputs.map((input) => [
+      input.snapshot.identity.channelId,
+      new Set(
+        input.snapshot.geometry
+          .filter((geometry) => geometry.status === 'single-cutter')
+          .map((geometry) => geometry.toolNumber),
+      ),
+    ]),
+  );
+  const emptyToolsByChannel = new Map(
+    inputs.map((input) => [
+      input.snapshot.identity.channelId,
+      new Set(
+        input.snapshot.geometry
+          .filter((geometry) => geometry.status === 'missing')
+          .map((geometry) => geometry.toolNumber),
+      ),
+    ]),
+  );
+  const fallbackTools = new Map(
+    inputs.flatMap((input) =>
+      input.snapshot.tools.map((tool) => [tool.toolNumber, structuredClone(tool)] as const),
+    ),
+  );
+  const fallbackExplicitTools = new Set(
+    inputs.flatMap((input) =>
+      input.snapshot.geometry
+        .filter((geometry) => geometry.status === 'single-cutter')
+        .map((geometry) => geometry.toolNumber),
+    ),
   );
   const inverse = stockPlacement(stock, configured.binding).invert();
   const spindleOrigin = new THREE.Vector3(...configured.binding.spindleOrigin).applyMatrix4(
@@ -181,7 +227,6 @@ export function prepareMaterialRemoval(
     inverse,
   );
   const cutters = new Map<string, CuttingToolModel>();
-  const capturedTools = new Map([...tools].map(([id, tool]) => [id, structuredClone(tool)]));
   const hasSelectedToolId = (toolNumber: PlotSegment['toolNumber']): boolean =>
     toolNumber !== undefined &&
     toolNumber !== null &&
@@ -189,24 +234,32 @@ export function prepareMaterialRemoval(
     toolNumber !== 0 &&
     toolNumber !== '0' &&
     toolNumber !== '';
-  const firstToolSegment = metadata.segments.find((segment) =>
-    hasSelectedToolId(segment.toolNumber),
-  );
-  const hasPreToolSegments =
-    firstToolSegment !== undefined &&
-    metadata.segments.some(
-      (segment) =>
-        !hasSelectedToolId(segment.toolNumber) &&
-        (segment.sourceSegmentIndex ?? Infinity) <
-          (firstToolSegment.sourceSegmentIndex ?? Infinity),
-    );
-  const firstToolSourceSegmentIndex = hasPreToolSegments
-    ? (firstToolSegment?.sourceSegmentIndex ?? 0)
-    : 0;
-  const rawStop = metadata.removalStops?.find(
-    (stop) =>
-      stop.channelId === channelIds[0] &&
-      stop.sourceSegmentIndex >= firstToolSourceSegmentIndex,
+  const rawStopByChannel = new Map(
+    channelIds.map((chId) => {
+      const channelSegments = metadata.segments.filter(
+        (segment) => (segment.channelId ?? channelIds[0]) === chId,
+      );
+      const firstToolSegment = channelSegments.find((segment) =>
+        hasSelectedToolId(segment.toolNumber),
+      );
+      const hasPreToolSegments =
+        firstToolSegment !== undefined &&
+        channelSegments.some(
+          (segment) =>
+            !hasSelectedToolId(segment.toolNumber) &&
+            (segment.sourceSegmentIndex ?? Infinity) <
+              (firstToolSegment.sourceSegmentIndex ?? Infinity),
+        );
+      const firstToolSourceSegmentIndex = hasPreToolSegments
+        ? (firstToolSegment?.sourceSegmentIndex ?? 0)
+        : 0;
+      const rawStop = metadata.removalStops?.find(
+        (stop) =>
+          stop.channelId === chId &&
+          stop.sourceSegmentIndex >= firstToolSourceSegmentIndex,
+      );
+      return [chId, rawStop] as const;
+    }),
   );
   const stopAt = (
     code: MaterialRemovalDiagnostic['code'],
@@ -216,11 +269,13 @@ export function prepareMaterialRemoval(
     add(code, message);
     simulation.stop = { ...stop, message };
   };
-  let hasSelectedTool = false;
+  const hasSelectedToolByChannel = new Map<ChannelId, boolean>();
   for (const segment of metadata.segments) {
+    const segChannel = segment.channelId ?? channelIds[0];
     if (hasSelectedToolId(segment.toolNumber)) {
-      hasSelectedTool = true;
+      hasSelectedToolByChannel.set(segChannel, true);
     }
+    const rawStop = rawStopByChannel.get(segChannel);
     if (rawStop && (segment.sourceSegmentIndex ?? Infinity) > rawStop.sourceSegmentIndex) {
       stopAt('unsupported-operation', rawStop.message, {
         executionStep: rawStop.executionStep ?? undefined,
@@ -229,11 +284,18 @@ export function prepareMaterialRemoval(
       });
       break;
     }
+    const channelEmptyTools = emptyToolsByChannel.get(segChannel);
+    const channelExplicitTools = explicitToolsByChannel.get(segChannel);
+    const channelTools = toolsByChannel.get(segChannel);
     const isNoToolActive =
-      !hasSelectedTool ||
+      !hasSelectedToolByChannel.get(segChannel) ||
       segment.toolNumber === 'unknown' ||
       segment.toolNumber === 0 ||
-      segment.toolNumber === '0';
+      segment.toolNumber === '0' ||
+      (segment.toolNumber !== null &&
+        segment.toolNumber !== undefined &&
+        Boolean(channelEmptyTools?.has(segment.toolNumber)) &&
+        !fallbackExplicitTools.has(segment.toolNumber));
     if (segment.type === 'rapid' || isNoToolActive) continue;
     const context = {
       executionStep: segment.executionStep ?? undefined,
@@ -275,11 +337,23 @@ export function prepareMaterialRemoval(
       stopAt('unsupported-operation', 'Motion has no valid execution occurrence', context);
       break;
     }
+    const hasChannelExplicit =
+      segment.toolNumber !== null &&
+      segment.toolNumber !== undefined &&
+      Boolean(channelExplicitTools?.has(segment.toolNumber));
     const tool =
       segment.toolNumber !== null && segment.toolNumber !== undefined
-        ? tools.get(segment.toolNumber)
+        ? hasChannelExplicit
+          ? channelTools?.get(segment.toolNumber)
+          : fallbackExplicitTools.has(segment.toolNumber)
+            ? fallbackTools.get(segment.toolNumber)
+            : channelTools?.get(segment.toolNumber) ?? fallbackTools.get(segment.toolNumber)
         : undefined;
-    if (tool?.cutting?.length !== 1 || !explicitTools.has(tool.toolNumber)) {
+    const isExplicitTool =
+      segment.toolNumber !== null &&
+      segment.toolNumber !== undefined &&
+      (hasChannelExplicit || fallbackExplicitTools.has(segment.toolNumber));
+    if (tool?.cutting?.length !== 1 || !isExplicitTool) {
       stopAt(
         'tool-geometry-unavailable',
         'Motion requires one explicit run-owned cutting part',
@@ -358,7 +432,7 @@ export function prepareMaterialRemoval(
       break;
     }
     const executedQ = segment.motionContext?.toolOffset?.tipOrientation;
-    const key = JSON.stringify([typeof tool.toolNumber, tool.toolNumber, executedQ]);
+    const key = JSON.stringify([segChannel, typeof tool.toolNumber, tool.toolNumber, executedQ]);
     let cutter = cutters.get(key);
     try {
       if (!cutter) {
@@ -430,18 +504,21 @@ export function prepareMaterialRemoval(
       mode: effectiveMode,
       start: structuredClone(start),
       end: structuredClone(end),
-      tool: capturedTools.get(tool.toolNumber)!,
+      tool,
       executedQ,
       executionStep: segment.executionStep!,
       lineNumber: segment.startPoint.lineNumber,
     });
   }
-  if (!simulation.stop && rawStop) {
-    stopAt('unsupported-operation', rawStop.message, {
-      executionStep: rawStop.executionStep ?? undefined,
-      lineNumber: rawStop.lineNumber,
-      message: rawStop.message,
-    });
+  if (!simulation.stop) {
+    const trailingStop = [...rawStopByChannel.values()].find((stop) => stop !== undefined);
+    if (trailingStop) {
+      stopAt('unsupported-operation', trailingStop.message, {
+        executionStep: trailingStop.executionStep ?? undefined,
+        lineNumber: trailingStop.lineNumber,
+        message: trailingStop.message,
+      });
+    }
   }
   return {
     status: 'ready',

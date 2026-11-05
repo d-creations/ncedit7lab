@@ -219,4 +219,64 @@ describe('completed plot runs', () => {
     expect(vi.mocked(backend.requestPlot).mock.calls[0][0].machinedata[0])
       .not.toHaveProperty('materialRemoval');
   });
+
+  it('transforms channel 2 and channel 3 segments, points and poses according to shared material channel references', async () => {
+    const sharedMaterial = {
+      type: 'cylinder' as const,
+      diameter: 20,
+      length: 100,
+      zeroVertex: 0,
+      channelReferences: {
+        '2': { zeroVertex: 1, rotation: [180, 0, 0] as [number, number, number] },
+        '3': { zeroVertex: 1, position: [0, 0, -5] as [number, number, number], rotation: [180, 0, 0] as [number, number, number] },
+      },
+    };
+    const ch1 = input('1');
+    ch1.snapshot = tools.captureProgramSnapshot(
+      ch1.snapshot.identity,
+      1,
+      codec.encodeSetup({ machineName: 'test', material: sharedMaterial }, syntax) + '\nG1 X5 Z10',
+      syntax,
+    );
+    const ch2 = input('2');
+    const ch3 = input('3');
+    vi.mocked(backend.requestPlot).mockResolvedValue({
+      canal: {
+        '1': {
+          segments: [{
+            geometry: 'LINEAR', traversal: 'FEED', toolNumber: 0, executionStep: 0, lineNumber: 2,
+            points: [{ x: 5, y: 0, z: 0 }, { x: 5, y: 0, z: 10 }],
+          }],
+        },
+        '2': {
+          segments: [{
+            geometry: 'LINEAR', traversal: 'FEED', toolNumber: 0, executionStep: 0, lineNumber: 1,
+            points: [{ x: 5, y: 0, z: 0 }, { x: 5, y: 0, z: 15 }],
+            poses: [
+              { position: [5, 0, 0], orientation: [0, 0, 0, 1], reference: 'turningVirtualTip', frameId: 'workpiece:subSpindle' },
+              { position: [5, 0, 15], orientation: [0, 0, 0, 1], reference: 'turningVirtualTip', frameId: 'workpiece:subSpindle' },
+            ],
+          }],
+        },
+        '3': {
+          segments: [{
+            geometry: 'LINEAR', traversal: 'FEED', toolNumber: 0, executionStep: 0, lineNumber: 1,
+            points: [{ x: 4, y: 0, z: 0 }, { x: 4, y: 0, z: 10 }],
+          }],
+        },
+      },
+    });
+    const run = await service.executePlotRun([ch1, ch2, ch3], false, 'simulation');
+    const seg1 = run.plotMetadata.segments.find((s) => s.channelId === '1')!;
+    const seg2 = run.plotMetadata.segments.find((s) => s.channelId === '2')!;
+    const seg3 = run.plotMetadata.segments.find((s) => s.channelId === '3')!;
+    expect(seg1.startPoint).toMatchObject({ x: 5, y: 0, z: 0 });
+    expect(seg1.endPoint).toMatchObject({ x: 5, y: 0, z: 10 });
+    expect(seg2.startPoint).toMatchObject({ x: 5, y: 0, z: 100 });
+    expect(seg2.endPoint).toMatchObject({ x: 5, y: 0, z: 85 });
+    expect(seg2.poses?.[0].position).toEqual([5, 0, 100]);
+    expect(seg2.poses?.[1].position).toEqual([5, 0, 85]);
+    expect(seg3.startPoint).toMatchObject({ x: 4, y: 0, z: 95 });
+    expect(seg3.endPoint).toMatchObject({ x: 4, y: 0, z: 85 });
+  });
 });

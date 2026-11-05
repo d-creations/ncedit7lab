@@ -296,9 +296,25 @@ export class RotationalProfile {
 
   private subtractPolygon(
     slabs: readonly Slab[],
-    polygon: readonly THREE.Vector2[],
+    rawPolygon: readonly THREE.Vector2[],
     reserve: (bytes: number) => void,
   ): Slab[] {
+    const scale = Math.max(
+      1,
+      this.radius,
+      this.length,
+      ...rawPolygon.map((p) => Math.max(Math.abs(p.x), Math.abs(p.y))),
+    );
+    const axialEpsilon = 64 * Number.EPSILON * scale;
+    const rawLevels = [...new Set(rawPolygon.map((p) => p.y))].sort((a, b) => a - b);
+    const snappedLevels = new Map<number, number>();
+    for (const y of rawLevels) {
+      const previous = rawLevels.find(
+        (candidate) => snappedLevels.has(candidate) && Math.abs(y - candidate) <= axialEpsilon,
+      );
+      snappedLevels.set(y, previous !== undefined ? snappedLevels.get(previous)! : y);
+    }
+    const polygon = rawPolygon.map((p) => new THREE.Vector2(p.x, snappedLevels.get(p.y) ?? p.y));
     const output: Slab[] = [];
     let bytes = 0;
     const levels = [...new Set(polygon.map((p) => p.y))].sort((a, b) => a - b);

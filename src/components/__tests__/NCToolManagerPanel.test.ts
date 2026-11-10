@@ -430,6 +430,81 @@ describe('NCToolManagerPanel', () => {
     delete (window as unknown as { vscodeApi?: unknown }).vscodeApi;
   });
 
+  it('configures tools via quick Tool Definition Templates and 1-click Assign & Apply', async () => {
+    const requests: ProgramToolUpdateRequest[] = [];
+    eventBus.subscribe(EVENT_NAMES.PROGRAM_TOOL_UPDATE_REQUEST, (req: ProgramToolUpdateRequest) => {
+      requests.push(req);
+      eventBus.publish(EVENT_NAMES.PROGRAM_TOOL_UPDATE_RESULT, {
+        requestId: req.requestId,
+        channelId: req.channelId,
+        success: true,
+        message: 'Applied',
+      });
+    });
+
+    (panel.shadowRoot?.querySelector('[data-manager-tab="program"]') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(panel.shadowRoot?.querySelector('[data-tool-template="id-boring"]')).toBeTruthy());
+
+    // Select ID Boring XS template and customize via quick pills
+    (panel.shadowRoot!.querySelector('[data-tool-template="id-boring"]') as HTMLButtonElement).click();
+    expect((panel.shadowRoot!.querySelector('#tool-description') as HTMLInputElement).value).toContain('ID Boring XS');
+    (panel.shadowRoot!.querySelector('[data-template-bore-dia="6"]') as HTMLButtonElement).click();
+    (panel.shadowRoot!.querySelector('[data-template-boring-side="front-wall"]') as HTMLButtonElement).click();
+    expect((panel.shadowRoot!.querySelector('#tool-q') as HTMLInputElement).value).toBe('3');
+    expect((panel.shadowRoot!.querySelector('#tool-description') as HTMLInputElement).value).toContain('Dmin 6 mm');
+
+    // Switch to Cut-Off / Grooving template
+    (panel.shadowRoot!.querySelector('[data-tool-template="cutoff-groove"]') as HTMLButtonElement).click();
+    (panel.shadowRoot!.querySelector('[data-template-groove-kind="grooving"]') as HTMLButtonElement).click();
+    (panel.shadowRoot!.querySelector('[data-template-blade-width="2"]') as HTMLButtonElement).click();
+    expect((panel.shadowRoot!.querySelector('#insert-width') as HTMLInputElement).value).toBe('2');
+    expect((panel.shadowRoot!.querySelector('#insert-zero-vertex') as HTMLInputElement).value).toBe('3');
+
+    // Test 1-click Assign & Apply from library dropdown
+    const select = panel.shadowRoot!.querySelector<HTMLSelectElement>('#assign-library-tool')!;
+    select.value = 'default-drill-5mm';
+    (panel.shadowRoot!.querySelector('#assign-and-apply-tool') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(requests).toHaveLength(1));
+    expect(requests[0].tool).toMatchObject({
+      toolNumber: 1,
+      description: 'Drill 5 mm',
+      cutting: [{ type: 'drill', diameter: 5 }],
+    });
+  });
+
+  it('applies Material Definition Templates and quick stock dimension chips', async () => {
+    const requests: ProgramSetupUpdateRequest[] = [];
+    eventBus.subscribe(EVENT_NAMES.PROGRAM_SETUP_UPDATE_REQUEST, (req: ProgramSetupUpdateRequest) => {
+      requests.push(req);
+      eventBus.publish(EVENT_NAMES.PROGRAM_SETUP_UPDATE_RESULT, {
+        requestId: req.requestId,
+        channelId: req.channelId,
+        success: true,
+        message: 'Material applied',
+      });
+    });
+
+    (panel.shadowRoot?.querySelector('[data-manager-tab="material"]') as HTMLButtonElement).click();
+    (panel.shadowRoot!.querySelector('[data-material-template="swiss-bar-main-sub"]') as HTMLButtonElement).click();
+    (panel.shadowRoot!.querySelector('[data-material-quick-diameter="16"]') as HTMLButtonElement).click();
+    (panel.shadowRoot!.querySelector('[data-material-quick-length="80"]') as HTMLButtonElement).click();
+
+    expect((panel.shadowRoot!.querySelector('#material-diameter') as HTMLInputElement).value).toBe('16');
+    expect((panel.shadowRoot!.querySelector('#material-length') as HTMLInputElement).value).toBe('80');
+
+    (panel.shadowRoot!.querySelector('#material-form') as HTMLFormElement).requestSubmit();
+    await vi.waitFor(() => expect(requests).toHaveLength(1));
+    expect(requests[0].setup.material).toMatchObject({
+      type: 'cylinder',
+      diameter: 16,
+      length: 80,
+      zeroVertex: 1,
+      channelReferences: {
+        '2': { zeroVertex: 0, rotation: [180, 0, 0] },
+      },
+    });
+  });
+
   it('shows stored-data failures instead of replacing corrupt local data', async () => {
     panel.remove();
     await registry.disposeAll();

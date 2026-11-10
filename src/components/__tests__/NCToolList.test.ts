@@ -87,5 +87,12 @@ describe('NCToolList', () => {
         cutting: [{ type: 'drill', diameter: 8, length: 45, tipAngle: 118 }],
       },
     });
+
+    // Shows tool description and opens Tool Manager when Setup is clicked
+    expect(root.querySelector('.tool-desc')?.textContent).toBe('Drill');
+    const openReq = vi.fn();
+    bus.subscribe(EVENT_NAMES.TOOL_MANAGER_OPEN_REQUEST, openReq);
+    root.querySelector<HTMLButtonElement>('.setup-button')!.click();
+    expect(openReq).toHaveBeenCalledWith({ channelId: '1', missing: [1] });
   });
 });

@@ -1,6 +1,48 @@
 {
   "templates": [
     {
+      "id": "material-definition-template-swiss-bar",
+      "name": "Material Definition Template - Swiss Bar",
+      "description": "Portable @NCE-SIM:1 material setup template for round bar stock with CH1 front zero and CH2 sub-spindle pick-up.",
+      "category": "setup & tools",
+      "content": "(@NCE-SIM:1 BEGIN SETUP)\n(machineName=\"STAR_SR20R\")\n(material={\"type\":\"cylinder\",\"diameter\":20,\"length\":100,\"zeroVertex\":1,\"channelReferences\":{\"2\":{\"zeroVertex\":0,\"rotation\":[180,0,0]}}})\n(@NCE-SIM:1 END SETUP)\n",
+      "tags": ["material", "setup", "swiss", "bar", "simulation"],
+      "channelScope": "any",
+      "insertMode": "insertAtCursor",
+      "source": "bundled",
+      "readonly": true,
+      "createdAt": 1735689600000,
+      "updatedAt": 1735689600000
+    },
+    {
+      "id": "material-definition-template-mill-plate",
+      "name": "Material Definition Template - Milling Plate",
+      "description": "Portable @NCE-SIM:1 material setup template for rectangular plate stock (100 x 80 x 20 mm) with top-corner zero.",
+      "category": "setup & tools",
+      "content": "(@NCE-SIM:1 BEGIN SETUP)\n(machineName=\"FANUC_MILL\")\n(material={\"type\":\"box\",\"width\":100,\"height\":20,\"depth\":80,\"zeroVertex\":6})\n(@NCE-SIM:1 END SETUP)\n",
+      "tags": ["material", "setup", "mill", "plate", "simulation"],
+      "channelScope": "any",
+      "insertMode": "insertAtCursor",
+      "source": "bundled",
+      "readonly": true,
+      "createdAt": 1735689600000,
+      "updatedAt": 1735689600000
+    },
+    {
+      "id": "tool-definition-template-swiss-starter",
+      "name": "Tool Definition Template - Turn / Swiss Set",
+      "description": "Portable @NCE-SIM:1 tool definitions for Cut-Off (T100), OD Turning V Insert (T200), ID Boring XS (T300), and Front Drill (T1100).",
+      "category": "setup & tools",
+      "content": "(@NCE-SIM:1 BEGIN TOOL)\n(toolNumber=100)\n(description=\"Cut-Off Tool L 3 mm\")\n(Q=3)\n(R=0.2)\n(holder=[{\"type\":\"turningHolderProfile\",\"width\":12,\"depth\":12,\"outline\":[[-0.5,1],[-0.5,40],[-12.5,40],[-12.5,14],[-7.5,9],[-7.5,1.367]],\"stickOut\":15,\"position\":[0,0,10]}])\n(cutting=[{\"type\":\"insert\",\"shape\":\"L\",\"ic\":4.7625,\"thickness\":1.59,\"noseRadius\":0.2,\"clearanceAngle\":7,\"width\":3,\"length\":6.25,\"zeroVertex\":0,\"rotation\":[0,-45,0]}])\n(orientation=[0,90,0])\n(turning={\"hand\":\"right\",\"mount\":\"front\",\"approachAngle\":93,\"activeCorner\":\"front-right\",\"reference\":\"virtualTip\"})\n(@NCE-SIM:1 END TOOL)\n(@NCE-SIM:1 BEGIN TOOL)\n(toolNumber=200)\n(description=\"Turning Insert V 4.8 mm\")\n(Q=3)\n(R=0.2)\n(holder=[{\"type\":\"turningHolderProfile\",\"width\":12,\"depth\":12,\"outline\":[[-0.5,1],[-0.5,40],[-12.5,40],[-12.5,14],[-7.5,9],[-7.5,1.367]],\"stickOut\":15,\"position\":[0,0,3]}])\n(cutting=[{\"type\":\"insert\",\"shape\":\"V\",\"ic\":4.7625,\"thickness\":1.59,\"noseRadius\":0.2,\"clearanceAngle\":7,\"zeroVertex\":0,\"position\":[-8,0,0],\"rotation\":[0,19,0]}])\n(orientation=[0,90,0])\n(turning={\"hand\":\"right\",\"mount\":\"front\",\"approachAngle\":93,\"activeCorner\":\"front-right\",\"reference\":\"virtualTip\"})\n(@NCE-SIM:1 END TOOL)\n(@NCE-SIM:1 BEGIN TOOL)\n(toolNumber=300)\n(description=\"ID Boring XS Dmin 4 mm L15\")\n(Q=2)\n(R=0.1)\n(holder=[{\"type\":\"cylinder\",\"diameter\":3.2,\"length\":15,\"stickOut\":15,\"position\":[1.12,0,7.5]}])\n(cutting=[{\"type\":\"insert\",\"shape\":\"V\",\"ic\":2.2,\"thickness\":1.44,\"noseRadius\":0.1,\"clearanceAngle\":7,\"zeroVertex\":0,\"rotation\":[0,-161,0]}])\n(orientation=[0,90,0])\n(turning={\"hand\":\"left\",\"mount\":\"back\",\"approachAngle\":93,\"activeCorner\":\"back-left\",\"reference\":\"virtualTip\"})\n(@NCE-SIM:1 END TOOL)\n(@NCE-SIM:1 BEGIN TOOL)\n(toolNumber=1100)\n(description=\"Front Drill 3 mm\")\n(holder=[{\"type\":\"cylinder\",\"diameter\":3,\"length\":12,\"stickOut\":18}])\n(cutting=[{\"type\":\"drill\",\"diameter\":3,\"length\":18,\"tipAngle\":118}])\n(orientation=[0,180,0])\n(@NCE-SIM:1 END TOOL)\n",
+      "tags": ["tool", "setup", "turning", "boring", "drill", "simulation"],
+      "channelScope": "any",
+      "insertMode": "insertAtCursor",
+      "source": "bundled",
+      "readonly": true,
+      "createdAt": 1735689600000,
+      "updatedAt": 1735689600000
+    },
+    {
       "id": "swiss-type-cutoff-skeleton",
       "name": "Swiss-type Cutoff Skeleton",
       "description": "Turnter block for cutoff operations on Swiss machines.",

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import bundledTemplates from '../../../../public/templates.json';
 import { SimulationCommentCodec } from '../SimulationCommentCodec';
 import type { SimulationCommentSyntax } from '../SimulationCommentCodec';
 import { METADATA_LIMITS } from '../SimulationMetadata';
@@ -230,5 +231,44 @@ describe('SimulationCommentCodec', () => {
       codec.parse(codec.encodeTool(drill, semicolon), { ...semicolon, maxLineLength: 30 })
         .diagnostics,
     ).not.toHaveLength(0);
+  });
+
+  it('parses bundled setup and tool definition templates without diagnostics', () => {
+    const swissBar = bundledTemplates.templates.find(
+      (tpl) => tpl.id === 'material-definition-template-swiss-bar',
+    );
+    const millPlate = bundledTemplates.templates.find(
+      (tpl) => tpl.id === 'material-definition-template-mill-plate',
+    );
+    const toolStarter = bundledTemplates.templates.find(
+      (tpl) => tpl.id === 'tool-definition-template-swiss-starter',
+    );
+    expect(swissBar).toBeTruthy();
+    expect(millPlate).toBeTruthy();
+    expect(toolStarter).toBeTruthy();
+
+    const parsedSwiss = codec.parse(swissBar!.content, parentheses);
+    expect(parsedSwiss.diagnostics).toEqual([]);
+    expect(parsedSwiss.setup?.material).toMatchObject({
+      type: 'cylinder',
+      diameter: 20,
+      length: 100,
+      zeroVertex: 1,
+      channelReferences: { '2': { zeroVertex: 0, rotation: [180, 0, 0] } },
+    });
+
+    const parsedPlate = codec.parse(millPlate!.content, parentheses);
+    expect(parsedPlate.diagnostics).toEqual([]);
+    expect(parsedPlate.setup?.material).toMatchObject({
+      type: 'box',
+      width: 100,
+      height: 20,
+      depth: 80,
+      zeroVertex: 6,
+    });
+
+    const parsedTools = codec.parse(toolStarter!.content, parentheses);
+    expect(parsedTools.diagnostics).toEqual([]);
+    expect(parsedTools.tools.map((t) => t.toolNumber)).toEqual([100, 200, 300, 1100]);
   });
 });

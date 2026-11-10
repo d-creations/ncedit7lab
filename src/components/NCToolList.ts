@@ -21,6 +21,7 @@ import type { ProgramToolDefinition } from '@services/tools/SimulationMetadata';
 interface ToolWithValues extends ToolRegisterEntry {
   qValue?: number;
   rValue?: number;
+  description?: string;
 }
 
 export class NCToolList extends HTMLElement {
@@ -114,12 +115,17 @@ export class NCToolList extends HTMLElement {
           });
 
           // Update tools list with new data, preserving user-set values
+          const descriptions = new Map<number | string, string>();
+          snapshot?.tools.forEach((def) => {
+            if (def.description) descriptions.set(def.toolNumber, def.description);
+          });
           this.tools = data.artifacts.toolRegisters.map((tool) => {
             const existing = existingToolValues.get(tool.toolNumber);
             return {
               ...tool,
               qValue: existing?.qValue,
               rValue: existing?.rValue,
+              description: descriptions.get(tool.toolNumber),
             };
           });
           this.updateList();
@@ -271,13 +277,48 @@ export class NCToolList extends HTMLElement {
           font-size: 11px;
         }
 
-        .apply-button {
-          padding: 2px 7px;
+        .apply-button,
+        .setup-button {
+          padding: 3px 8px;
           border: 1px solid var(--vscode-button-border, transparent);
           border-radius: 3px;
           color: var(--vscode-button-foreground, #fff);
           background: var(--vscode-button-background, #0e639c);
           cursor: pointer;
+          font-size: 11px;
+        }
+
+        .setup-button {
+          color: var(--vscode-button-secondaryForeground, #abb2bf);
+          background: var(--vscode-button-secondaryBackground, #3a3d41);
+          border-color: var(--vscode-widget-border, #454545);
+        }
+
+        .tool-desc {
+          color: var(--vscode-textLink-foreground, #61afef);
+          font-size: 11px;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          max-width: 140px;
+        }
+
+        .tool-inputs {
+          flex-wrap: wrap;
+        }
+
+        @media (pointer: coarse), (max-width: 720px) {
+          .input-group input {
+            min-height: 30px;
+            width: 60px;
+            font-size: 12px;
+          }
+          .apply-button,
+          .setup-button {
+            min-height: 30px;
+            padding: 4px 10px;
+            font-size: 12px;
+          }
         }
 
         .apply-status {
@@ -330,6 +371,13 @@ export class NCToolList extends HTMLElement {
       const toolParams = document.createElement('div');
       toolParams.className = 'tool-params';
 
+      if (tool.description) {
+        const descSpan = document.createElement('span');
+        descSpan.className = 'tool-desc';
+        descSpan.textContent = tool.description;
+        descSpan.title = tool.description;
+        toolParams.appendChild(descSpan);
+      }
       if (tool.qParameter !== undefined) {
         const qParam = document.createElement('span');
         qParam.className = 'tool-param';
@@ -397,6 +445,20 @@ export class NCToolList extends HTMLElement {
       applyButton.title = 'Write these tool defaults to managed NC program comments';
       applyButton.addEventListener('click', () => this.applyToolToProgram(index));
       toolInputs.appendChild(applyButton);
+
+      const setupButton = document.createElement('button');
+      setupButton.type = 'button';
+      setupButton.className = 'setup-button';
+      setupButton.textContent = 'Setup';
+      setupButton.title = 'Open this tool in the Tool Manager';
+      setupButton.addEventListener('click', () => {
+        const ch = (['1', '2', '3'].includes(this.channelId) ? this.channelId : '1') as ChannelId;
+        this.eventBus.publish(EVENT_NAMES.TOOL_MANAGER_OPEN_REQUEST, {
+          channelId: ch,
+          missing: [tool.toolNumber],
+        });
+      });
+      toolInputs.appendChild(setupButton);
 
       item.appendChild(toolRow);
       item.appendChild(toolInputs);

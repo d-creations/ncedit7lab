@@ -300,7 +300,7 @@ export class NCEditorApp extends HTMLElement {
 
         .app-plot-container.visible {
           display: flex;
-          width: 400px;
+          width: min(560px, 50vw);
           min-width: 200px; /* PLOT_PANEL_MIN_WIDTH */
           max-width: 80%; /* PLOT_PANEL_MAX_WIDTH_RATIO */
         }
@@ -459,6 +459,14 @@ export class NCEditorApp extends HTMLElement {
           }
           .plot-open-bar {
             display: none;
+          }
+
+          nc-editor-app.mobile-side-view-active > nc-file-manager {
+            display: none !important;
+          }
+
+          nc-editor-app.mobile-side-view-active .side-panel-tabs {
+            display: none !important;
           }
 
           .app-bottom-nav {
@@ -971,11 +979,13 @@ export class NCEditorApp extends HTMLElement {
 
     if (visible) {
       plotContainer.classList.add('visible');
+      this.classList.add('mobile-side-view-active');
       // hide the small open bar when the panel is visible
       plotOpenBar?.classList.add('hidden');
       plotToggle?.classList.add('active');
     } else {
       plotContainer.classList.remove('visible');
+      this.classList.remove('mobile-side-view-active');
       // show the small open bar so user has a clickable open affordance
       plotOpenBar?.classList.remove('hidden');
       plotToggle?.classList.remove('active');

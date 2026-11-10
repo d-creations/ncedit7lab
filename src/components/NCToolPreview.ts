@@ -22,16 +22,20 @@ const CLICK_TOLERANCE_PX = 5;
 
 const STYLE = `
   :host { display:block; }
-  .bar { display:flex; gap:4px; flex-wrap:wrap; margin-bottom:6px; }
-  button { padding:3px 8px; border:1px solid var(--vscode-widget-border,#d0d7de); border-radius:3px; cursor:pointer;
+  .bar { display:flex; gap:4px; flex-wrap:wrap; margin-bottom:5px; }
+  button { min-height:24px; padding:3px 8px; border:1px solid var(--vscode-widget-border,#d0d7de); border-radius:4px; cursor:pointer;
     color:var(--vscode-button-secondaryForeground,#24292f); background:var(--vscode-button-secondaryBackground,#eaeef2); font-size:11px; }
-  button.active { color:var(--vscode-button-foreground,#fff); background:var(--vscode-button-background,#0969da); }
-  .stage { position:relative; height:260px; overflow:hidden; border:1px solid var(--vscode-widget-border,#d0d7de);
-    background:var(--vscode-editor-background,#1e1e1e); }
+  button.active { color:var(--vscode-button-foreground,#fff); background:var(--vscode-button-background,#0969da); font-weight:600; }
+  .stage { position:relative; height:clamp(155px, 28vh, 220px); overflow:hidden; border:1px solid var(--vscode-widget-border,#d0d7de); border-radius:4px;
+    background:var(--vscode-editor-background,#1e1e1e); touch-action:none; }
   .stage canvas { display:block; width:100%; height:100%; }
-  .fallback { padding:12px; font-size:11px; color:var(--vscode-descriptionForeground,#57606a); }
-  .note { min-height:16px; margin-top:4px; font-size:11px; color:var(--vscode-descriptionForeground,#57606a); }
+  .fallback { padding:10px; font-size:11px; color:var(--vscode-descriptionForeground,#57606a); }
+  .note { min-height:14px; margin-top:4px; font-size:10px; color:var(--vscode-descriptionForeground,#57606a); }
   .note.error { color:var(--vscode-inputValidation-errorBackground,#cf222e); }
+  @media (pointer:coarse), (max-width:720px) {
+    button { min-height:30px; padding:4px 10px; font-size:12px; }
+    .stage { height:180px; }
+  }
 `;
 
 function disposeObject(root: THREE.Object3D, ownMaterials: boolean): void {
@@ -353,7 +357,8 @@ export class NCToolPreview extends HTMLElement {
   private handlePointerUp(event: PointerEvent): void {
     const down = this.pointerDown;
     this.pointerDown = undefined;
-    if (!down || !this.renderer || Math.hypot(event.clientX - down[0], event.clientY - down[1]) > CLICK_TOLERANCE_PX) return;
+    const tolerance = event.pointerType === 'touch' ? 16 : CLICK_TOLERANCE_PX;
+    if (!down || !this.renderer || Math.hypot(event.clientX - down[0], event.clientY - down[1]) > tolerance) return;
     const rect = this.renderer.domElement.getBoundingClientRect();
     const raycaster = new THREE.Raycaster();
     raycaster.setFromCamera(

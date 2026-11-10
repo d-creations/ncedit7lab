@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { CuttingToolModel, convexField, convexHull } from './CuttingToolModel';
+import { CuttingToolModel, convexField, convexHull, pointInPolygon } from './CuttingToolModel';
 import { SimulationCapabilityError } from './SimulationTypes';
 import type { ImplicitVolume } from './ImplicitGeometry';
 

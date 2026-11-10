@@ -46,6 +46,8 @@ function createDrill(
   const cuttingLength = roundMillimeters(Math.max(6, diameter * 6));
   return {
     ...baseTool(`${variant.idPrefix}-drill-${label}mm`, `${variant.namePrefix}Drill ${label} mm`, ['drill', `${label} mm`, ...variant.tags]),
+    Q: 0,
+    R: roundMillimeters(diameter / 2),
     cutting: [{ type: 'drill', diameter, length: cuttingLength, tipAngle: 118 }],
     holder: [{ type: 'cylinder', diameter, length: roundMillimeters(Math.max(12, diameter * 4)), stickOut: cuttingLength }],
     ...(variant.orientation ? { orientation: [...variant.orientation] as [number, number, number] } : {}),
@@ -87,9 +89,34 @@ function frontRightOutline(approachAngle: number): [number, number][] {
   ].map(([x, z]) => [roundMillimeters(x), roundMillimeters(z)]);
 }
 
+// Axial boring bar outline in tool X/Z for small inner-turning tools (cutting tip at (0,0), bar extending along -X).
+function innerTurningOutline(neckDiameter: number, neckLength: number, shankDiameter: number, shankLength: number): [number, number][] {
+  const tipBackZ = 0.25;
+  const neckBottomZ = roundMillimeters(tipBackZ - neckDiameter);
+  const shankTopZ = roundMillimeters(neckBottomZ / 2 + shankDiameter / 2);
+  const shankBottomZ = roundMillimeters(neckBottomZ / 2 - shankDiameter / 2);
+  const neckEnd = roundMillimeters(-neckLength);
+  const stepEnd = roundMillimeters(-(neckLength + 2));
+  const totalEnd = roundMillimeters(-(neckLength + shankLength));
+  return [
+    [-0.4, tipBackZ],
+    [neckEnd, tipBackZ],
+    [stepEnd, shankTopZ],
+    [totalEnd, shankTopZ],
+    [totalEnd, shankBottomZ],
+    [stepEnd, shankBottomZ],
+    [neckEnd, neckBottomZ],
+    [-0.4, neckBottomZ],
+  ];
+}
+
 // A back-left tool is the front-right tool turned 180 degrees about Y.
 const turnAroundY = (outline: [number, number][]): [number, number][] =>
   outline.map(([x, z]) => [roundMillimeters(-x), roundMillimeters(-z)]);
+
+// Flip a boring bar outline across tool Z so the cutting edge points toward -X instead of +X.
+const flipInnerZ = (outline: [number, number][]): [number, number][] =>
+  outline.map(([x, z]): [number, number] => [roundMillimeters(x), roundMillimeters(-z)]).reverse();
 
 const TURNING_PRESETS: TurningPreset[] = [
   {
@@ -168,11 +195,128 @@ export function recommendLibraryToolId(toolNumber: ToolIdentifier): string | und
   if (typeof toolNumber !== 'number' || !Number.isFinite(toolNumber)) return undefined;
   if (toolNumber >= 100 && toolNumber < 200) return 'default-cutoff-tool-L-3mm';
   if (toolNumber >= 200 && toolNumber < 1000) return 'default-turning-insert-V';
-  if (toolNumber >= 1000 && toolNumber < 1300) return 'default-front-drill-3mm';
+  if (toolNumber >= 1000 && toolNumber < 1200) return 'default-front-drill-3mm';
+  if (toolNumber >= 1200 && toolNumber < 1300) return 'default-inner-turning-V-2mm';
   if (toolNumber >= 1300 && toolNumber <= 1500) return 'default-counter-face-endmill-3mm';
   if (toolNumber >= 2000 && toolNumber < 3000) return 'default-empty-tool';
   if (toolNumber > 1500) return 'default-counter-face-endmill-2mm';
   return undefined;
+}
+
+type InnerTurningSize = {
+  minBoreMm: number;
+  ic: number;
+  thickness: number;
+  noseRadius: number;
+  neckDiameter: number;
+  neckLength: number;
+  shankDiameter: number;
+  shankLength: number;
+};
+
+const INNER_TURNING_SHAPES: readonly ('V' | 'D' | 'C')[] = ['V', 'D', 'C'];
+
+const INNER_TURNING_SIZES: readonly InnerTurningSize[] = [
+  { minBoreMm: 1.5, ic: 0.4, thickness: 0.5, noseRadius: 0.05, neckDiameter: 1.1, neckLength: 8, shankDiameter: 4, shankLength: 22 },
+  { minBoreMm: 2, ic: 0.55, thickness: 0.65, noseRadius: 0.08, neckDiameter: 1.5, neckLength: 10, shankDiameter: 4, shankLength: 22 },
+  { minBoreMm: 3, ic: 0.85, thickness: 0.9, noseRadius: 0.1, neckDiameter: 2.3, neckLength: 12, shankDiameter: 4, shankLength: 22 },
+  { minBoreMm: 4, ic: 1.15, thickness: 1.1, noseRadius: 0.15, neckDiameter: 3.1, neckLength: 16, shankDiameter: 6, shankLength: 24 },
+  { minBoreMm: 6, ic: 1.75, thickness: 1.4, noseRadius: 0.2, neckDiameter: 4.8, neckLength: 20, shankDiameter: 6, shankLength: 24 },
+];
+
+type InnerTurningVariant = {
+  id: 'upper' | 'lower' | 'counter-upper' | 'counter-lower';
+  suffix: string;
+  label: string;
+  mount: 'back' | 'front';
+  hand: 'right' | 'left';
+  activeCorner: 'back-left' | 'front-right';
+  defaultQ: number;
+  counterFace: boolean;
+};
+
+const INNER_TURNING_VARIANTS: readonly InnerTurningVariant[] = [
+  {
+    id: 'upper', suffix: '', label: 'Upper (+X)', mount: 'back', hand: 'right',
+    activeCorner: 'back-left', defaultQ: 2, counterFace: false,
+  },
+  {
+    id: 'lower', suffix: '-lower', label: 'Lower (-X)', mount: 'front', hand: 'left',
+    activeCorner: 'front-right', defaultQ: 3, counterFace: false,
+  },
+  {
+    id: 'counter-upper', suffix: '-counter-face', label: 'Counter Face (+X)', mount: 'back', hand: 'left',
+    activeCorner: 'back-left', defaultQ: 1, counterFace: true,
+  },
+];
+
+export function innerTurningPlateTurn(
+  shape: 'V' | 'D' | 'C',
+  mount: 'back' | 'front' = 'back',
+  counterFace = false,
+  approachAngle = 93,
+): number {
+  const tip = getInsertTipAngle(shape) ?? 55;
+  // With assembly orientation [0,90,0], local -Z maps to machine -X (toward spindle centerline)
+  // and local +X maps to machine -Z (into the bore). Rotate so the tip points toward +X (for back/upper)
+  // and the body of the insert trails along the boring bar axis (+Z) inside the bore.
+  const baseTurn = roundMillimeters(90 + (approachAngle - 90) + tip / 2);
+  if (counterFace) {
+    return roundMillimeters(-baseTurn);
+  }
+  return mount === 'back' ? roundMillimeters(baseTurn - 360) : roundMillimeters(180 - baseTurn);
+}
+
+function createInnerTurningTool(
+  shape: 'V' | 'D' | 'C',
+  size: InnerTurningSize,
+  variant: InnerTurningVariant,
+): LibraryToolDefinition {
+  const boreLabel = formatDiameter(size.minBoreMm);
+  const approachAngle = 93;
+  const turn = innerTurningPlateTurn(shape, variant.mount, variant.counterFace, approachAngle);
+  const baseOutline = innerTurningOutline(size.neckDiameter, size.neckLength, size.shankDiameter, size.shankLength);
+  const switchedAxisOutline = variant.counterFace
+    ? baseOutline.map(([x, z]): [number, number] => [roundMillimeters(-x), roundMillimeters(z)]).reverse()
+    : baseOutline;
+  const outline = variant.mount === 'front' ? flipInnerZ(switchedAxisOutline) : switchedAxisOutline;
+  return {
+    ...baseTool(
+      `default-inner-turning-${shape}-${boreLabel}mm${variant.suffix}`,
+      `Inner Turn ${shape} Ø${boreLabel} mm ${variant.label}`,
+      [
+        'turning', 'inner', 'boring', 'xs', shape, `${boreLabel} mm`,
+        variant.id, ...(variant.counterFace ? ['counterFace'] : ['front']),
+      ],
+    ),
+    Q: variant.defaultQ,
+    R: size.noseRadius,
+    cutting: [{
+      type: 'insert',
+      shape,
+      ic: size.ic,
+      thickness: size.thickness,
+      noseRadius: size.noseRadius,
+      clearanceAngle: 7,
+      zeroVertex: 0,
+      rotation: [0, turn, 0],
+    }],
+    holder: [{
+      type: 'turningHolderProfile',
+      width: size.shankDiameter,
+      depth: size.neckDiameter,
+      outline,
+      stickOut: size.neckLength,
+    }],
+    turning: {
+      hand: variant.hand,
+      mount: variant.mount,
+      approachAngle,
+      activeCorner: variant.activeCorner,
+      reference: 'virtualTip',
+    },
+    orientation: [...TURNING_ORIENTATION],
+  };
 }
 
 function createTurningInsert(shape: InsertShape, preset: TurningPreset): LibraryToolDefinition {
@@ -276,6 +420,11 @@ function createGroovingBladeTool(
 const DEFAULT_TOOL_LIBRARY_TOOLS: LibraryToolDefinition[] = [
   baseTool('default-empty-tool', 'Empty Tool (No Cutter)', ['empty', 'none', 'backside', 'pickup']),
   ...TURNING_PRESETS.flatMap((preset) => TURNING_INSERT_SHAPES.map((shape) => createTurningInsert(shape, preset))),
+  ...INNER_TURNING_VARIANTS.flatMap((variant) =>
+    INNER_TURNING_SHAPES.flatMap((shape) =>
+      INNER_TURNING_SIZES.map((size) => createInnerTurningTool(shape, size, variant)),
+    ),
+  ),
   ...TURNING_PRESETS.flatMap((preset) => [
     createGroovingBladeTool('cutoff', preset),
     createGroovingBladeTool('cutin', preset),

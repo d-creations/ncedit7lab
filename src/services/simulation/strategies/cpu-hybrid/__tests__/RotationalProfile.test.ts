@@ -248,6 +248,37 @@ describe('hybrid rotational base and local 3D removal', () => {
       }
     }
   });
+  it.each(['V', 'D', 'C'] as const)(
+    'bores an inner diameter with small %s inner-turning tool without bottom rubbing across centerline',
+    async (shape) => {
+      const { getDefaultToolLibraryTools } = await import('@services/tools/DefaultToolLibrary');
+      const { toProgramToolDefinition } = await import('@services/tools/ToolLibraryTypes');
+      const libTool = getDefaultToolLibraryTools().find(
+        (entry) => entry.id === `default-inner-turning-${shape}-2mm`,
+      )!;
+      expect(libTool).toBeTruthy();
+      const toolDef = toProgramToolDefinition(libTool, 1200);
+      const cutter = new CuttingToolModel(toolDef);
+      // Verify the entire insert section stays on the upper (+X) side of the bore when boring at r = 1.2 mm
+      const mounting = new THREE.Quaternion().setFromEuler(
+        new THREE.Euler(0, Math.PI / 2, 0, 'XYZ'),
+      );
+      const pose = (x: number, z: number): THREE.Matrix4 =>
+        new THREE.Matrix4().compose(
+          new THREE.Vector3(x, 0, z),
+          mounting,
+          new THREE.Vector3(1, 1, 1),
+        );
+      const origin = new THREE.Vector3(0, 0, 0);
+      const axis = new THREE.Vector3(0, 0, 1);
+      const sweep = buildTurningSweep(cutter, pose(1.2, 5.0), pose(1.2, -3.0), origin, axis);
+      const polygon = sweep.rotationalSection!.polygon;
+      // The cutting tip is at max radial x ~ 1.2 mm and the back of the small insert stays >= 0
+      // so it never crosses centerline to rub the bottom (-X) of a 2 mm pilot hole.
+      expect(Math.max(...polygon.map((p) => p.x))).toBeCloseTo(1.2, 2);
+      expect(Math.min(...polygon.map((p) => p.x))).toBeGreaterThan(-0.4);
+    },
+  );
   it.each([
     [0, 1],
     [1.17, 1],

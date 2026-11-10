@@ -26,6 +26,13 @@ import type {
 
 const syntax = { kind: 'block', open: '(', close: ')' } as const;
 
+/** The panel always opens in the simple view; most tests exercise the expert view. */
+async function openExpertView(panel: HTMLElement): Promise<void> {
+  await vi.waitFor(() => expect(panel.shadowRoot?.querySelector('.manager-shell.simple #toggle-view-mode')).toBeTruthy());
+  (panel.shadowRoot!.querySelector('#toggle-view-mode') as HTMLButtonElement).click();
+  await vi.waitFor(() => expect(panel.shadowRoot?.querySelector('[data-manager-tab="library"]')).toBeTruthy());
+}
+
 // jsdom has no canvas; the live preview then falls back to its no-WebGL notice.
 beforeEach(() => {
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null);
@@ -79,7 +86,7 @@ describe('NCToolManagerPanel', () => {
     registry.register(TOOL_CATALOG_SERVICE_TOKEN, () => catalog);
     panel = document.createElement('nc-tool-manager-panel');
     document.body.append(panel);
-    await vi.waitFor(() => expect(panel.shadowRoot?.querySelector('[data-manager-tab="library"]')).toBeTruthy());
+    await openExpertView(panel);
   });
 
   afterEach(async () => {
@@ -318,6 +325,93 @@ describe('NCToolManagerPanel', () => {
     await vi.waitFor(() => expect(panel.shadowRoot?.textContent).toContain('Applied'));
   });
 
+  it('defines a program tool from a template in the simple view', async () => {
+    const request = vi.fn((payload: ProgramToolUpdateRequest) => {
+      // The code pane announces the edited text before it reports the result.
+      eventBus.publish('program:content_changed', { channelId: '1' });
+      eventBus.publish(EVENT_NAMES.PROGRAM_TOOL_UPDATE_RESULT, {
+        requestId: payload.requestId, channelId: payload.channelId, success: true, message: 'Applied',
+      });
+    });
+    eventBus.subscribe(EVENT_NAMES.PROGRAM_TOOL_UPDATE_REQUEST, request);
+    const root = panel.shadowRoot!;
+    (root.querySelector('#toggle-view-mode') as HTMLButtonElement).click();
+    expect(root.querySelector('[data-manager-tab="library"]')).toBeNull();
+    await vi.waitFor(() => expect(root.querySelector('[data-simple-tool]')).toBeTruthy());
+    expect(root.textContent).toContain('0 of 1');
+    expect(root.textContent).toContain('Not set up yet');
+
+    (root.querySelector('[data-simple-tool]') as HTMLButtonElement).click();
+    (root.querySelector('[data-template-category="drill"]') as HTMLButtonElement).click();
+    (root.querySelector('[data-template-id="default-drill-3mm"]') as HTMLButtonElement).click();
+
+    expect((root.querySelector('#cutting-diameter') as HTMLInputElement).value).toBe('3');
+    expect((root.querySelector('#tool-q') as HTMLInputElement).value).toBe('0');
+    expect((root.querySelector('#tool-r') as HTMLInputElement).value).toBe('1.5');
+    expect(root.querySelector('#simple-orientation-label')?.textContent).toBe('X 0° · Y 90° · Z 0°');
+    (root.querySelector('[data-rotate-axis="z"]') as HTMLButtonElement).click();
+    (root.querySelector('[data-rotate-axis="y"]') as HTMLButtonElement).click();
+    expect(root.querySelector('#simple-orientation-label')?.textContent).toBe('X 0° · Y 180° · Z 90°');
+    expect(root.querySelector('.simple-form [data-advanced]')).toBeTruthy();
+    const diameter = root.querySelector('#cutting-diameter') as HTMLInputElement;
+    diameter.value = '4';
+    diameter.dispatchEvent(new Event('input', { bubbles: true }));
+    expect((root.querySelector('#holder-diameter') as HTMLInputElement).value).toBe('4');
+
+    (root.querySelector('#tool-form') as HTMLFormElement).requestSubmit();
+    await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(1));
+    expect(request.mock.calls[0][0].tool).toMatchObject({
+      toolNumber: 1,
+      description: 'Drill 3 mm',
+      cutting: [{ type: 'drill', diameter: 4, tipAngle: 118 }],
+      holder: [{ type: 'cylinder', diameter: 4 }],
+      orientation: [0, 180, 90],
+    });
+    await vi.waitFor(() => expect(root.querySelector('#simple-add-tool')).toBeTruthy());
+    expect(root.textContent).toContain('Applied');
+  });
+
+  it('configures a small inner turning V/D/C tool from the simple template picker', async () => {
+    const request = vi.fn((payload: ProgramToolUpdateRequest) => {
+      eventBus.publish('program:content_changed', { channelId: '1' });
+      eventBus.publish(EVENT_NAMES.PROGRAM_TOOL_UPDATE_RESULT, {
+        requestId: payload.requestId, channelId: payload.channelId, success: true, message: 'Applied',
+      });
+    });
+    eventBus.subscribe(EVENT_NAMES.PROGRAM_TOOL_UPDATE_REQUEST, request);
+    const root = panel.shadowRoot!;
+    (root.querySelector('#toggle-view-mode') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(root.querySelector('[data-simple-tool]')).toBeTruthy());
+
+    (root.querySelector('[data-simple-tool]') as HTMLButtonElement).click();
+    (root.querySelector('[data-template-category="inner-turning"]') as HTMLButtonElement).click();
+    expect(root.querySelector('[data-template-id="default-inner-turning-V-2mm"]')).toBeTruthy();
+    expect(root.querySelector('[data-template-id="default-inner-turning-D-2mm"]')).toBeTruthy();
+    expect(root.querySelector('[data-template-id="default-inner-turning-C-2mm"]')).toBeTruthy();
+
+    (root.querySelector('[data-template-id="default-inner-turning-V-2mm"]') as HTMLButtonElement).click();
+    expect((root.querySelector('#tool-q') as HTMLInputElement).value).toBe('2');
+    expect((root.querySelector('#tool-r') as HTMLInputElement).value).toBe('0.08');
+    expect((root.querySelector('#insert-nose-radius') as HTMLInputElement).value).toBe('0.08');
+
+    const preview = root.querySelector('nc-tool-preview') as HTMLElement;
+    expect(preview.shadowRoot?.querySelector('.bore-inset')?.hasAttribute('hidden')).toBe(false);
+    expect(preview.shadowRoot?.querySelector('.bore-inset')?.textContent).toContain('2D Bore Ø2 mm');
+    expect(preview.shadowRoot?.querySelector('.bore-inset')?.textContent).toContain('Bottom clears bore');
+
+    (root.querySelector('#tool-form') as HTMLFormElement).requestSubmit();
+    await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(1));
+    expect(request.mock.calls[0][0].tool).toMatchObject({
+      toolNumber: 1,
+      description: 'Inner Turn V Ø2 mm Upper (+X)',
+      Q: 2,
+      R: 0.08,
+      cutting: [{ type: 'insert', shape: 'V', ic: 0.55, noseRadius: 0.08, zeroVertex: 0, rotation: [0, -249.5, 0] }],
+      holder: [{ type: 'turningHolderProfile', stickOut: 10 }],
+      orientation: [0, 90, 0],
+    });
+  });
+
   it('publishes an explicit revision-checked offset update request', async () => {
     const request = vi.fn((payload: ProgramOffsetsUpdateRequest) => {
       eventBus.publish(EVENT_NAMES.PROGRAM_OFFSETS_UPDATE_RESULT, {
@@ -362,6 +456,7 @@ describe('NCToolManagerPanel', () => {
     panel.remove();
     panel = document.createElement('nc-tool-manager-panel');
     document.body.append(panel);
+    await openExpertView(panel);
     await vi.waitFor(() => expect(panel.shadowRoot?.textContent).toContain('T1'));
 
     const postedMessages: Array<{ type: string; payload: unknown }> = [];

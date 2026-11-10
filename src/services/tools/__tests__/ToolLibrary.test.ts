@@ -38,15 +38,25 @@ describe('web tool library', () => {
   it('creates a versioned seeded library and saves validated detached tool data', async () => {
     const seeded = await catalog.getLibrary();
     expect(seeded).toMatchObject({ schemaVersion: 1, revision: 0 });
-    expect(seeded.tools).toHaveLength(292);
+    expect(seeded.tools).toHaveLength(337);
     expect(seeded.tools.map((entry) => entry.description)).toEqual(expect.arrayContaining([
       'Empty Tool (No Cutter)',
       'Turning Insert C 4.8 mm', 'Turning Insert D 4.8 mm', 'Turning Insert V 4.8 mm',
+      'Inner Turn V Ø2 mm Upper (+X)', 'Inner Turn D Ø2 mm Upper (+X)', 'Inner Turn C Ø2 mm Upper (+X)',
       'Cut-Off Tool L 3 mm', 'Cut-In / Grooving Tool L 3 mm',
       'End Mill 0.5 mm', 'End Mill 20 mm', 'Drill 0.5 mm', 'Drill 20 mm',
       'Front End Mill 0.5 mm', 'Front Drill 20 mm',
       'Counter Face End Mill 0.5 mm', 'Counter Face Drill 20 mm',
     ]));
+    expect(seeded.tools.find((entry) => entry.id === 'default-inner-turning-V-2mm')?.cutting?.[0]).toMatchObject({
+      type: 'insert', shape: 'V', ic: 0.55, thickness: 0.65, noseRadius: 0.08, zeroVertex: 0, rotation: [0, -249.5, 0],
+    });
+    expect(seeded.tools.find((entry) => entry.id === 'default-inner-turning-D-2mm')?.cutting?.[0]).toMatchObject({
+      type: 'insert', shape: 'D', ic: 0.55, thickness: 0.65, noseRadius: 0.08, zeroVertex: 0, rotation: [0, -239.5, 0],
+    });
+    expect(seeded.tools.find((entry) => entry.id === 'default-inner-turning-C-2mm')?.cutting?.[0]).toMatchObject({
+      type: 'insert', shape: 'C', ic: 0.55, thickness: 0.65, noseRadius: 0.08, zeroVertex: 0, rotation: [0, -227, 0],
+    });
     expect(seeded.tools.find((entry) => entry.id === 'default-empty-tool')?.cutting).toBeUndefined();
     expect(seeded.tools.find((entry) => entry.id === 'default-cutoff-tool-L-3mm')?.cutting?.[0]).toMatchObject({
       type: 'insert', shape: 'L', width: 3, length: 6.25, zeroVertex: 0, rotation: [0, -45, 0],
@@ -108,7 +118,7 @@ describe('web tool library', () => {
     const merged = await repository.loadLibrary();
 
     expect(merged.revision).toBe(8);
-    expect(merged.tools).toHaveLength(292);
+    expect(merged.tools).toHaveLength(337);
     expect(merged.tools.find((entry) => entry.id === 'default-drill-20mm')).toBeTruthy();
     expect(merged.tools[0].description).toBe('My custom turning tool');
     expect(JSON.parse(storage.getItem(TOOL_LIBRARY_STORAGE_KEY)!).revision).toBe(8);

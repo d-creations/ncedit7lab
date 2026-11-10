@@ -53,6 +53,95 @@ const CHANNELS: ChannelId[] = ['1', '2', '3'];
 const INSERT_SHAPES: InsertShape[] = ['C', 'D', 'V', 'W', 'T', 'S', 'R', 'E', 'H', 'O', 'P', 'L', 'A', 'B', 'K'];
 
 type ManagerTab = 'library' | 'program' | 'material' | 'offsets' | 'simulation';
+type ViewMode = 'simple' | 'expert';
+type SimpleStep = 'list' | 'template' | 'edit';
+type TemplateCategory = 'turning' | 'inner-turning' | 'cutoff' | 'grooving' | 'drill' | 'mill' | 'empty' | 'custom';
+
+const TEMPLATE_CATEGORIES: { id: TemplateCategory; label: string; hint: string; icon: string }[] = [
+  { id: 'turning', label: 'Turning', hint: 'Outer insert tools', icon: '◆' },
+  { id: 'inner-turning', label: 'Inner turning', hint: 'Small boring V / D / C', icon: '◎' },
+  { id: 'cutoff', label: 'Cut-off', hint: 'Parting blade', icon: '▮' },
+  { id: 'grooving', label: 'Grooving', hint: 'Cut-in blade', icon: '⊓' },
+  { id: 'drill', label: 'Drill', hint: 'Twist drill', icon: '▼' },
+  { id: 'mill', label: 'End mill', hint: 'Milling cutter', icon: '▥' },
+  { id: 'empty', label: 'No cutter', hint: 'Empty / Q-R only', icon: '○' },
+  { id: 'custom', label: 'My tools', hint: 'Saved in library', icon: '★' },
+];
+
+const INSERT_SHAPE_NAMES: Partial<Record<InsertShape, string>> = {
+  C: '80° rhombic', D: '55° rhombic', V: '35° rhombic', W: '80° trigon', T: 'Triangle', S: 'Square',
+  R: 'Round', E: '75° rhombic', H: 'Hexagon', O: 'Octagon', P: 'Pentagon', L: 'Rectangle',
+  A: '85° parallelogram', B: '82° parallelogram', K: '55° parallelogram',
+};
+
+const CUTTER_LABELS: Record<string, string> = {
+  drill: 'Drill', endMill: 'End mill', ballMill: 'Ball mill', insert: 'Insert',
+};
+
+function templateCategoryOf(tool: LibraryToolDefinition): TemplateCategory {
+  if (!tool.id.startsWith('default-')) return 'custom';
+  const cutter = tool.cutting?.[0];
+  if (!cutter) return 'empty';
+  if (tool.tags.includes('inner') || tool.id.startsWith('default-inner-turning-')) return 'inner-turning';
+  if (tool.tags.includes('cutoff')) return 'cutoff';
+  if (tool.tags.includes('cutin')) return 'grooving';
+  if (cutter.type === 'insert') return 'turning';
+  if (cutter.type === 'drill') return 'drill';
+  return 'mill';
+}
+
+function templateVariantOf(tool: LibraryToolDefinition): { id: string; label: string } {
+  const tags = tool.tags;
+  if (tags.includes('inner') || tool.id.startsWith('default-inner-turning-')) {
+    if (tags.includes('counter-upper')) return { id: 'counter-upper', label: 'Counter face (+X)' };
+    if (tags.includes('lower')) return { id: 'lower', label: 'Lower wall (-X)' };
+    return { id: 'upper', label: 'Upper wall (+X)' };
+  }
+  if (tags.includes('front-right')) return { id: 'front-right', label: 'Front right' };
+  if (tags.includes('back-left')) return { id: 'back-left', label: 'Back left' };
+  if (tags.includes('center')) return { id: 'center', label: 'Center' };
+  if (tags.includes('front')) return { id: 'front', label: 'Front (axial)' };
+  if (tags.includes('counterFace')) return { id: 'counterFace', label: 'Counter face' };
+  const cutter = tool.cutting?.[0];
+  if (cutter && cutter.type !== 'insert' && tool.id.startsWith('default-')) return { id: 'cross', label: 'Cross (radial)' };
+  return { id: 'all', label: 'All' };
+}
+
+const VARIANT_ORDER = ['upper', 'lower', 'counter-upper', 'front-right', 'back-left', 'center', 'cross', 'front', 'counterFace', 'all'];
+
+function templateSortKey(tool: LibraryToolDefinition): number {
+  const cutter = tool.cutting?.[0];
+  if (cutter && 'diameter' in cutter) return cutter.diameter;
+  if ((tool.tags.includes('inner') || tool.id.startsWith('default-inner-turning-')) && cutter?.type === 'insert') {
+    const shapeOrder = ['V', 'D', 'C'].indexOf(cutter.shape);
+    const boreMatch = /(\d+(?:\.\d+)?) mm/.exec(tool.tags.join(' '));
+    const bore = boreMatch ? Number(boreMatch[1]) : cutter.ic;
+    return (shapeOrder >= 0 ? shapeOrder : 9) * 100 + bore;
+  }
+  if (cutter?.type === 'insert') return INSERT_SHAPES.indexOf(cutter.shape);
+  return 0;
+}
+
+function templateChoiceLabel(tool: LibraryToolDefinition, category: TemplateCategory): { title: string; sub: string } {
+  const cutter = tool.cutting?.[0];
+  if (category === 'drill' || category === 'mill') {
+    if (cutter && 'diameter' in cutter) return { title: `Ø ${cutter.diameter}`, sub: 'mm' };
+  }
+  if (category === 'inner-turning' && cutter?.type === 'insert') {
+    const holder = tool.holder?.[0];
+    const boreMatch = /Ø(\d+(?:\.\d+)?) mm/.exec(tool.description);
+    const bore = boreMatch ? `Min Ø${boreMatch[1]} mm` : `IC ${cutter.ic} mm`;
+    const depth = holder?.stickOut ? ` · L${holder.stickOut} mm` : '';
+    return { title: `${cutter.shape} · ${bore}`, sub: `r${cutter.noseRadius}${depth}` };
+  }
+  if (category === 'turning' && cutter?.type === 'insert') {
+    return { title: cutter.shape, sub: INSERT_SHAPE_NAMES[cutter.shape] ?? 'Insert' };
+  }
+  if ((category === 'cutoff' || category === 'grooving') && cutter?.type === 'insert') {
+    return { title: `${cutter.width ?? cutter.ic} mm`, sub: 'Blade width' };
+  }
+  return { title: tool.description || 'Unnamed tool', sub: '' };
+}
 
 function exactKey(value: ToolIdentifier): string {
   return JSON.stringify([typeof value, value]);
@@ -104,9 +193,17 @@ export class NCToolManagerPanel extends HTMLElement {
   private materialDraft?: ProgramMaterialDefinition;
   private offsetDrafts: ToolOffsetValue[] = [];
   private pendingRequestId?: string;
+  /** Survives content-change resets: the editor publishes content_changed before the update result. */
+  private lastRequestId?: string;
   private previewElement?: NCToolPreview;
   private status = '';
   private statusKind: 'info' | 'success' | 'error' = 'info';
+  private viewMode: ViewMode = 'simple';
+  private simpleStep: SimpleStep = 'list';
+  private templateCategory?: TemplateCategory;
+  private templateVariant?: string;
+  private showAddTool = false;
+  private returnToListOnSuccess = false;
 
   constructor() {
     super();
@@ -328,6 +425,8 @@ export class NCToolManagerPanel extends HTMLElement {
         this.programDefinitions.find((tool) => exactKey(tool.toolNumber) === this.selectedProgramKey) ??
         this.newProgramTool(first),
       );
+      this.simpleStep = this.findProgramDefinition(first) ? 'edit' : 'template';
+      this.preselectRecommendedTemplate(first);
     }
     const names = data.missing.map((id) => (typeof id === 'number' ? `T${id}` : id)).join(', ');
     this.setStatus(
@@ -495,6 +594,10 @@ export class NCToolManagerPanel extends HTMLElement {
 
   private render(): void {
     if (!this.shadowRoot) return;
+    if (this.viewMode === 'simple') {
+      this.renderSimpleShell();
+      return;
+    }
     this.shadowRoot.innerHTML = `
       <style>${this.styles}</style>
       <div class="manager-shell">
@@ -503,10 +606,13 @@ export class NCToolManagerPanel extends HTMLElement {
             <h2>Tool Manager</h2>
             <p>Reusable definitions and program-owned simulation metadata</p>
           </div>
-          <div class="channel-control">
-            <label for="manager-channel">Channel</label>
-            <select id="manager-channel">${CHANNELS.map((channel) =>
-              `<option value="${channel}" ${channel === this.channelId ? 'selected' : ''}>CH ${channel}</option>`).join('')}</select>
+          <div class="header-controls">
+            <button class="button" id="toggle-view-mode" type="button" title="Switch to the guided, touch-friendly view">Simple view</button>
+            <div class="channel-control">
+              <label for="manager-channel">Channel</label>
+              <select id="manager-channel">${CHANNELS.map((channel) =>
+                `<option value="${channel}" ${channel === this.channelId ? 'selected' : ''}>CH ${channel}</option>`).join('')}</select>
+            </div>
           </div>
         </header>
         <nav class="manager-tabs" aria-label="Tool manager views">
@@ -528,6 +634,345 @@ export class NCToolManagerPanel extends HTMLElement {
     this.attachListeners();
     this.mountPreview();
     this.updateGeometryVisibility();
+  }
+
+  private renderSimpleShell(): void {
+    if (!this.shadowRoot) return;
+    if (this.activeTab !== 'program' && this.activeTab !== 'material') this.activeTab = 'program';
+    const machine = this.stateService.getState().activeMachine;
+    const channelCount = Math.min(CHANNELS.length, Math.max(1, machine?.availableChannels ?? CHANNELS.length));
+    const channels = CHANNELS.slice(0, Math.max(channelCount, Number(this.channelId)));
+    this.shadowRoot.innerHTML = `
+      <style>${this.styles}</style>
+      <div class="manager-shell simple">
+        <header class="simple-header">
+          <div class="simple-title">
+            <h2>Tools</h2>
+            <span>${this.escape(this.fileManager?.getActiveProgram(this.channelId)?.name || this.programSource?.identity.programId || 'No program open')}</span>
+          </div>
+          <button class="link-button" id="toggle-view-mode" type="button" title="Show all technical settings">Expert view</button>
+        </header>
+        <div class="simple-toolbar">
+          ${channels.length > 1 ? `<div class="segmented" role="tablist" aria-label="Channel">${channels.map((channel) =>
+            `<button type="button" role="tab" class="${channel === this.channelId ? 'active' : ''}" aria-selected="${channel === this.channelId}" data-simple-channel="${channel}">CH ${channel}</button>`).join('')}</div>` : ''}
+          <div class="segmented" role="tablist" aria-label="Section">
+            <button type="button" role="tab" class="${this.activeTab === 'program' ? 'active' : ''}" aria-selected="${this.activeTab === 'program'}" data-manager-tab="program">Tools</button>
+            <button type="button" role="tab" class="${this.activeTab === 'material' ? 'active' : ''}" aria-selected="${this.activeTab === 'material'}" data-manager-tab="material">Raw material</button>
+          </div>
+        </div>
+        <div class="manager-body">
+          ${this.activeTab === 'material' ? this.renderMaterial() : this.renderSimpleProgram()}
+        </div>
+        <div id="manager-status" class="status ${this.statusKind}" role="status" aria-live="polite">${this.escape(this.status)}</div>
+      </div>
+    `;
+    this.attachListeners();
+    this.attachSimpleListeners();
+    this.mountPreview();
+    this.updateGeometryVisibility();
+  }
+
+  private renderSimpleProgram(): string {
+    if (!this.programSource) {
+      return `<main class="simple-pane"><div class="empty">Open a program on channel ${this.channelId} to set up its tools.</div></main>`;
+    }
+    if (this.simpleStep !== 'list' && this.programDraft) {
+      return this.simpleStep === 'template' ? this.renderSimpleTemplatePicker() : this.renderSimpleEditor();
+    }
+    return this.renderSimpleList();
+  }
+
+  private renderSimpleList(): string {
+    const syntax = this.getSimulationCommentSyntax();
+    const ids = this.detectedIdentifiers;
+    const ready = ids.filter((id) => this.findProgramDefinition(id)).length;
+    const percent = ids.length ? Math.round((ready / ids.length) * 100) : 0;
+    return `<main class="simple-pane">
+      ${!syntax ? '<div class="notice warning">This machine cannot store tool data in the program. Switch the machine to apply tools.</div>' : ''}
+      ${ids.length ? `
+        <div class="simple-progress">
+          <div><strong>${ready} of ${ids.length}</strong> tools ready</div>
+          <div class="progress-track" aria-hidden="true"><span style="width:${percent}%"></span></div>
+        </div>` : ''}
+      <div class="simple-card-list">
+        ${ids.length ? ids.map((id) => {
+          const definition = this.findProgramDefinition(id);
+          return `<button type="button" class="simple-tool-card ${definition ? 'ready' : 'missing'}" data-simple-tool="${this.escape(exactKey(id))}">
+            <span class="tool-badge">${this.escape(this.formatBadge(id))}</span>
+            <span class="card-text">
+              <span class="card-title">${this.escape(definition?.description || (definition ? 'Defined' : 'Not set up yet'))}</span>
+              <span class="card-sub">${this.escape(definition ? this.friendlySummary(definition) : 'Tap to choose a template')}</span>
+            </span>
+            <span class="card-state">${definition ? '✓' : 'Set up ›'}</span>
+          </button>`;
+        }).join('') : '<div class="empty">No tool calls (T…) found in this program. Add a tool manually below.</div>'}
+      </div>
+      ${this.showAddTool ? `
+        <form id="simple-add-form" class="simple-add-form">
+          <label>Tool number or name<input id="simple-new-identifier" inputmode="numeric" autocomplete="off" placeholder="e.g. 101"></label>
+          <div class="simple-add-actions">
+            <button type="button" class="button" id="simple-add-cancel">Cancel</button>
+            <button type="submit" class="button primary">Continue</button>
+          </div>
+        </form>` : '<button type="button" class="button big-button" id="simple-add-tool">+ Add tool</button>'}
+    </main>`;
+  }
+
+  private renderSimpleDetailHeader(title: string): string {
+    const identifier = this.programDraft?.toolNumber;
+    return `<div class="simple-detail-header">
+      <button type="button" class="link-button back-button" id="simple-back">‹ All tools</button>
+      ${identifier !== undefined ? `<span class="tool-badge">${this.escape(this.formatBadge(identifier))}</span>` : ''}
+      <h3>${this.escape(title)}</h3>
+    </div>`;
+  }
+
+  private renderSimpleTemplatePicker(): string {
+    const toolNumber = this.programDraft!.toolNumber;
+    const recommended = this.libraryTools.find((tool) => tool.id === recommendLibraryToolId(toolNumber));
+    const counts = new Map<TemplateCategory, number>();
+    this.libraryTools.forEach((tool) => {
+      const category = templateCategoryOf(tool);
+      counts.set(category, (counts.get(category) ?? 0) + 1);
+    });
+    const hasDefinition = !!this.findProgramDefinition(toolNumber);
+    const category = this.templateCategory;
+    let body: string;
+    if (!category) {
+      body = `
+        ${recommended ? `<button type="button" class="recommend-card" data-template-id="${this.escape(recommended.id)}">
+          <span class="recommend-label">Suggested for ${this.escape(this.formatBadge(toolNumber))}</span>
+          <strong>${this.escape(recommended.description || 'Unnamed tool')}</strong>
+          <span class="recommend-action">Use this ›</span>
+        </button>` : ''}
+        <div class="simple-subtitle">Or choose a tool type</div>
+        <div class="category-grid">
+          ${TEMPLATE_CATEGORIES.filter((item) => counts.get(item.id)).map((item) => `
+            <button type="button" class="category-tile" data-template-category="${item.id}">
+              <span class="category-icon" aria-hidden="true">${item.icon}</span>
+              <span class="category-label">${item.label}</span>
+              <span class="category-hint">${item.hint}</span>
+            </button>`).join('')}
+        </div>`;
+    } else {
+      const inCategory = this.libraryTools.filter((tool) => templateCategoryOf(tool) === category);
+      const variants = [...new Map(inCategory.map((tool) => {
+        const variant = templateVariantOf(tool);
+        return [variant.id, variant] as const;
+      })).values()].sort((left, right) => VARIANT_ORDER.indexOf(left.id) - VARIANT_ORDER.indexOf(right.id));
+      const activeVariant = variants.some((variant) => variant.id === this.templateVariant)
+        ? this.templateVariant : variants[0]?.id;
+      const choices = inCategory
+        .filter((tool) => templateVariantOf(tool).id === activeVariant)
+        .sort((left, right) => templateSortKey(left) - templateSortKey(right));
+      const info = TEMPLATE_CATEGORIES.find((item) => item.id === category)!;
+      body = `
+        <div class="simple-subtitle"><button type="button" class="link-button" data-template-category="">‹ Tool types</button> <span>${info.label}</span></div>
+        ${variants.length > 1 ? `<div class="chip-row" role="tablist" aria-label="Mounting">${variants.map((variant) =>
+          `<button type="button" role="tab" class="chip ${variant.id === activeVariant ? 'active' : ''}" data-template-variant="${this.escape(variant.id)}">${this.escape(variant.label)}</button>`).join('')}</div>` : ''}
+        <div class="choice-grid ${category === 'custom' || category === 'empty' || category === 'inner-turning' ? 'wide' : ''}">
+          ${choices.map((tool) => {
+            const label = templateChoiceLabel(tool, category);
+            return `<button type="button" class="choice-tile" data-template-id="${this.escape(tool.id)}" title="${this.escape(tool.description)}">
+              <strong>${this.escape(label.title)}</strong>${label.sub ? `<span>${this.escape(label.sub)}</span>` : ''}
+            </button>`;
+          }).join('')}
+        </div>`;
+    }
+    return `<main class="simple-pane">
+      ${this.renderSimpleDetailHeader('Choose a template')}
+      ${body}
+      ${hasDefinition ? '<button type="button" class="button big-button" id="simple-keep-current">Keep current definition</button>' : ''}
+    </main>`;
+  }
+
+  private renderSimpleEditor(): string {
+    const draft = this.programDraft!;
+    const diagnostic = this.programSnapshot?.diagnostics.map((item) => item.message).join('; ');
+    return `<main class="simple-pane simple-edit">
+      ${this.renderSimpleDetailHeader('Check and apply')}
+      ${!this.getSimulationCommentSyntax() ? '<div class="notice warning">This machine cannot store tool data in the program. Apply is disabled.</div>' : ''}
+      ${diagnostic ? `<div class="notice error">${this.escape(diagnostic)}</div>` : ''}
+      <div class="template-chip">
+        <span class="template-chip-text"><span>Template</span><strong>${this.escape(draft.description || this.friendlySummary(draft))}</strong></span>
+        <button type="button" class="button" id="simple-change-template">Change</button>
+      </div>
+      <div class="simple-form">${this.renderToolForm(draft, 'program')}</div>
+      <button type="button" class="link-button advanced-link" id="simple-advanced">Advanced settings (holder, position, rotation) ›</button>
+    </main>`;
+  }
+
+  private attachSimpleListeners(): void {
+    const root = this.shadowRoot;
+    if (!root) return;
+    root.querySelectorAll<HTMLButtonElement>('[data-simple-channel]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const next = button.dataset.simpleChannel as ChannelId;
+        if (next !== this.channelId) this.changeChannel(next);
+      });
+    });
+    root.querySelectorAll<HTMLButtonElement>('[data-simple-tool]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const identifier = this.detectedIdentifiers.find((id) => exactKey(id) === button.dataset.simpleTool);
+        if (identifier !== undefined) this.openSimpleTool(identifier);
+      });
+    });
+    root.querySelector('#simple-back')?.addEventListener('click', () => {
+      this.simpleStep = 'list';
+      this.status = '';
+      this.render();
+    });
+    root.querySelector('#simple-add-tool')?.addEventListener('click', () => {
+      this.showAddTool = true;
+      this.render();
+      root.querySelector<HTMLInputElement>('#simple-new-identifier')?.focus();
+    });
+    root.querySelector('#simple-add-cancel')?.addEventListener('click', () => {
+      this.showAddTool = false;
+      this.render();
+    });
+    root.querySelector<HTMLFormElement>('#simple-add-form')?.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const raw = root.querySelector<HTMLInputElement>('#simple-new-identifier')?.value.trim().replace(/^T(?=\d+$)/i, '') ?? '';
+      if (!raw) {
+        this.setStatus('Enter a tool number or name', 'error');
+        return;
+      }
+      const identifier: ToolIdentifier = /^\d+$/.test(raw) ? Number(raw) : raw;
+      this.detectedIdentifiers = this.uniqueIdentifiers([...this.detectedIdentifiers, identifier]);
+      this.showAddTool = false;
+      this.openSimpleTool(identifier);
+    });
+    root.querySelectorAll<HTMLButtonElement>('[data-template-category]').forEach((button) => {
+      button.addEventListener('click', () => {
+        this.templateCategory = (button.dataset.templateCategory || undefined) as TemplateCategory | undefined;
+        this.render();
+      });
+    });
+    root.querySelectorAll<HTMLButtonElement>('[data-template-variant]').forEach((button) => {
+      button.addEventListener('click', () => {
+        this.templateVariant = button.dataset.templateVariant;
+        this.render();
+      });
+    });
+    root.querySelectorAll<HTMLButtonElement>('[data-template-id]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const template = this.libraryTools.find((tool) => tool.id === button.dataset.templateId);
+        if (!template || !this.programDraft) return;
+        this.programDraft = toProgramToolDefinition(template, this.programDraft.toolNumber);
+        this.simpleStep = 'edit';
+        this.setStatus(`${template.description || 'Template'} loaded. Check the values and tap Apply.`, 'info');
+      });
+    });
+    root.querySelector('#simple-keep-current')?.addEventListener('click', () => {
+      const identifier = this.programDraft?.toolNumber;
+      const current = identifier !== undefined ? this.findProgramDefinition(identifier) : undefined;
+      if (current) this.programDraft = structuredClone(current);
+      this.simpleStep = 'edit';
+      this.render();
+    });
+    root.querySelector('#simple-change-template')?.addEventListener('click', () => {
+      if (this.programDraft) this.preselectRecommendedTemplate(this.programDraft.toolNumber);
+      this.simpleStep = 'template';
+      this.render();
+    });
+    root.querySelector('#simple-advanced')?.addEventListener('click', () => {
+      try {
+        if (this.programDraft) this.programDraft = this.buildToolFromForm(this.programDraft.toolNumber);
+      } catch {
+        // Keep the last valid draft; the expert form shows the validation problem
+      }
+      this.setViewMode('expert');
+    });
+
+    // Templates size the holder to the cutter; keep them in step while the user edits.
+    const linkFields = (sourceSelector: string, targetSelector: string) => {
+      const source = root.querySelector<HTMLInputElement>(sourceSelector);
+      const target = root.querySelector<HTMLInputElement>(targetSelector);
+      if (!source || !target) return;
+      let previous = source.value;
+      source.addEventListener('input', () => {
+        if (target.value === previous) target.value = source.value;
+        previous = source.value;
+      });
+    };
+    linkFields('#cutting-diameter', '#holder-diameter');
+    linkFields('#cutting-length', '#holder-stickout');
+
+    const orientationInputs = (['x', 'y', 'z'] as const).map((axis) =>
+      root.querySelector<HTMLInputElement>(`#tool-orientation-${axis}`));
+    const setOrientation = (values: number[]) => {
+      values.forEach((value, index) => {
+        const input = orientationInputs[index];
+        if (input) input.value = String(value);
+      });
+      const label = root.querySelector('#simple-orientation-label');
+      if (label) label.textContent = this.formatOrientation(values);
+      this.refreshPreview();
+    };
+    const currentOrientation = () => orientationInputs.map((input) => Number(input?.value) || 0);
+    root.querySelectorAll<HTMLButtonElement>('[data-rotate-axis]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const index = ['x', 'y', 'z'].indexOf(button.dataset.rotateAxis ?? '');
+        const values = currentOrientation();
+        values[index] = (((values[index] + 90) % 360) + 360) % 360;
+        setOrientation(values);
+      });
+    });
+    root.querySelector('#rotate-reset')?.addEventListener('click', () => {
+      setOrientation([...(this.programDraft?.orientation ?? [0, 0, 0])]);
+    });
+  }
+
+  private openSimpleTool(identifier: ToolIdentifier): void {
+    this.selectedProgramKey = exactKey(identifier);
+    const definition = this.findProgramDefinition(identifier);
+    this.programDraft = structuredClone(definition ?? this.newProgramTool(identifier));
+    this.simpleStep = definition ? 'edit' : 'template';
+    this.preselectRecommendedTemplate(identifier);
+    this.status = '';
+    this.render();
+  }
+
+  private preselectRecommendedTemplate(identifier: ToolIdentifier): void {
+    const recommended = this.libraryTools.find((tool) => tool.id === recommendLibraryToolId(identifier));
+    this.templateCategory = undefined;
+    this.templateVariant = recommended ? templateVariantOf(recommended).id : undefined;
+  }
+
+  private findProgramDefinition(identifier: ToolIdentifier): ProgramToolDefinition | undefined {
+    return this.programDefinitions.find((tool) => exactKey(tool.toolNumber) === exactKey(identifier));
+  }
+
+  private setViewMode(mode: ViewMode): void {
+    this.viewMode = mode;
+    if (mode === 'simple') {
+      if (this.activeTab !== 'material') this.activeTab = 'program';
+      this.simpleStep = 'list';
+      this.showAddTool = false;
+    } else if (this.activeTab === 'program' && this.programDraft) {
+      this.selectedProgramKey = exactKey(this.programDraft.toolNumber);
+    }
+    this.render();
+  }
+
+  private formatBadge(identifier: ToolIdentifier): string {
+    return typeof identifier === 'number' ? `T${identifier}` : identifier;
+  }
+
+  private formatOrientation(values: readonly number[]): string {
+    return ['X', 'Y', 'Z'].map((axis, index) => `${axis} ${values[index] ?? 0}°`).join(' · ');
+  }
+
+  private friendlySummary(tool: { cutting?: CuttingPart[]; Q?: number; R?: number }): string {
+    const cutter = tool.cutting?.[0];
+    const parts: string[] = [];
+    if (!cutter) parts.push('No cutter');
+    else if ('diameter' in cutter) parts.push(`${CUTTER_LABELS[cutter.type] ?? cutter.type} Ø${cutter.diameter} mm`);
+    else parts.push(`${CUTTER_LABELS[cutter.type] ?? cutter.type} ${cutter.shape}, r${cutter.noseRadius}`);
+    if (tool.Q !== undefined) parts.push(`Q${tool.Q}`);
+    if (tool.R !== undefined) parts.push(`R${tool.R}`);
+    return parts.join(' · ');
   }
 
   private renderLibrary(): string {
@@ -940,7 +1385,7 @@ export class NCToolManagerPanel extends HTMLElement {
         <section>
           <div class="section-heading"><h3>General</h3><span>Distances in mm, rotations in degrees</span></div>
           ${mode === 'program' ? `
-            <div class="field-grid compact">
+            <div class="field-grid compact" data-advanced>
               <label>Identifier type<select id="identifier-kind"><option value="number" ${typeof programTool?.toolNumber === 'number' ? 'selected' : ''}>Number</option><option value="name" ${typeof programTool?.toolNumber === 'string' ? 'selected' : ''}>Name</option></select></label>
               <label>Tool identifier<input id="tool-identifier" value="${this.escape(String(programTool?.toolNumber ?? 1))}" required></label>
             </div>` : ''}
@@ -950,14 +1395,15 @@ export class NCToolManagerPanel extends HTMLElement {
             <label>Q<input id="tool-q" type="number" step="any" value="${tool.Q ?? ''}" placeholder="Optional"></label>
             <label>R<input id="tool-r" type="number" step="any" value="${tool.R ?? ''}" placeholder="Optional"></label>
           </div>
-          <details><summary>Assembly orientation</summary>
+          <div class="simple-hint">Q = tool tip direction, R = nose radius (both optional).</div>
+          <details data-advanced><summary>Assembly orientation</summary>
             <div class="field-grid transform-grid">
               ${['X', 'Y', 'Z'].map((axis, index) => `<label>Rotation ${axis}<input id="tool-orientation-${axis.toLowerCase()}" type="number" step="any" value="${orientation[index]}"></label>`).join('')}
             </div>
           </details>
         </section>
 
-        <section>
+        <section data-advanced>
           <div class="section-heading"><h3>Holder</h3><span>Non-cutting assembly</span></div>
           <label>Holder type<select id="holder-type">
             ${this.option('none', 'None', holder?.type ?? 'none')}
@@ -987,7 +1433,7 @@ export class NCToolManagerPanel extends HTMLElement {
 
         <section>
           <div class="section-heading"><h3>Cutting Geometry</h3><span>One active cutter</span></div>
-          <label>Cutter type<select id="cutting-type">
+          <label data-advanced>Cutter type<select id="cutting-type">
             ${this.option('none', 'None / Q-R only', cutter?.type ?? 'none')}
             ${this.option('drill', 'Drill', cutter?.type)}
             ${this.option('endMill', 'End Mill', cutter?.type)}
@@ -999,18 +1445,18 @@ export class NCToolManagerPanel extends HTMLElement {
             <label>Diameter<input id="cutting-diameter" type="number" min="0" step="any" value="${cutter && 'diameter' in cutter ? cutter.diameter : ''}"></label>
             <label>Cutting length<input id="cutting-length" type="number" min="0" step="any" value="${cutter && 'diameter' in cutter && 'length' in cutter ? cutter.length : ''}"></label>
           </div>
-          <div data-cutting-fields="drill" class="field-grid compact"><label>Tip angle<input id="cutting-tip-angle" type="number" step="any" value="${cutter?.type === 'drill' ? cutter.tipAngle : 118}"></label></div>
-          <div data-cutting-fields="endMill" class="field-grid compact"><label>Corner radius<input id="cutting-corner-radius" type="number" min="0" step="any" value="${cutter?.type === 'endMill' ? cutter.cornerRadius ?? '' : ''}" placeholder="Optional"></label></div>
+          <div data-cutting-fields="drill" class="field-grid compact" data-advanced><label>Tip angle<input id="cutting-tip-angle" type="number" step="any" value="${cutter?.type === 'drill' ? cutter.tipAngle : 118}"></label></div>
+          <div data-cutting-fields="endMill" class="field-grid compact" data-advanced><label>Corner radius<input id="cutting-corner-radius" type="number" min="0" step="any" value="${cutter?.type === 'endMill' ? cutter.cornerRadius ?? '' : ''}" placeholder="Optional"></label></div>
           <div data-cutting-fields="insert">
             <div class="field-grid compact">
-              <label>Shape<select id="insert-shape">${INSERT_SHAPES.map((shape) => this.option(shape, shape, cutter?.type === 'insert' ? cutter.shape : 'C')).join('')}</select></label>
-              <label>IC<input id="insert-ic" type="number" min="0" step="any" value="${cutter?.type === 'insert' ? cutter.ic : ''}"></label>
-              <label>Thickness<input id="insert-thickness" type="number" min="0" step="any" value="${cutter?.type === 'insert' ? cutter.thickness : ''}"></label>
+              <label data-advanced>Shape<select id="insert-shape">${INSERT_SHAPES.map((shape) => this.option(shape, shape, cutter?.type === 'insert' ? cutter.shape : 'C')).join('')}</select></label>
+              <label data-advanced>IC<input id="insert-ic" type="number" min="0" step="any" value="${cutter?.type === 'insert' ? cutter.ic : ''}"></label>
+              <label data-advanced>Thickness<input id="insert-thickness" type="number" min="0" step="any" value="${cutter?.type === 'insert' ? cutter.thickness : ''}"></label>
               <label>Nose radius<input id="insert-nose-radius" type="number" min="0" step="any" value="${cutter?.type === 'insert' ? cutter.noseRadius : ''}"></label>
-              <label>Clearance angle<input id="insert-clearance" type="number" step="any" value="${cutter?.type === 'insert' ? cutter.clearanceAngle : 0}"></label>
-              <label>Width<input id="insert-width" type="number" min="0" step="any" value="${cutter?.type === 'insert' ? cutter.width ?? '' : ''}" placeholder="L/A/B/K"></label>
-              <label>Length<input id="insert-length" type="number" min="0" step="any" value="${cutter?.type === 'insert' ? cutter.length ?? '' : ''}" placeholder="L/A/B/K"></label>
-              <label>Zero vertex<input id="insert-zero-vertex" type="number" min="0" max="255" step="1" value="${cutter?.type === 'insert' ? cutter.zeroVertex ?? '' : ''}" placeholder="Auto" title="Plate outline vertex used as tool zero; stored in the NC program. Click a vertex in the preview."></label>
+              <label data-advanced>Clearance angle<input id="insert-clearance" type="number" step="any" value="${cutter?.type === 'insert' ? cutter.clearanceAngle : 0}"></label>
+              <label data-advanced>Width<input id="insert-width" type="number" min="0" step="any" value="${cutter?.type === 'insert' ? cutter.width ?? '' : ''}" placeholder="L/A/B/K"></label>
+              <label data-advanced>Length<input id="insert-length" type="number" min="0" step="any" value="${cutter?.type === 'insert' ? cutter.length ?? '' : ''}" placeholder="L/A/B/K"></label>
+              <label data-advanced>Zero vertex<input id="insert-zero-vertex" type="number" min="0" max="255" step="1" value="${cutter?.type === 'insert' ? cutter.zeroVertex ?? '' : ''}" placeholder="Auto" title="Plate outline vertex used as tool zero; stored in the NC program. Click a vertex in the preview."></label>
             </div>
           </div>
           ${this.renderTransformFields('cutting', cutterPosition, cutterRotation)}
@@ -1019,6 +1465,13 @@ export class NCToolManagerPanel extends HTMLElement {
         <section>
           <div class="section-heading"><h3>Preview</h3><span>Live setup preview, not collision geometry</span></div>
           <div id="tool-preview-slot"></div>
+          ${mode === 'program' ? `<div class="simple-only simple-rotate" role="group" aria-label="Rotate complete tool">
+            <div class="simple-rotate-head"><span>Rotate complete tool</span><strong id="simple-orientation-label">${this.formatOrientation(orientation)}</strong></div>
+            <div class="rotate-buttons">
+              ${['X', 'Y', 'Z'].map((axis) => `<button type="button" class="button" data-rotate-axis="${axis.toLowerCase()}" title="Rotate the complete tool 90° about ${axis}">↻ ${axis} 90°</button>`).join('')}
+              <button type="button" class="button" id="rotate-reset" title="Back to the template orientation">Reset</button>
+            </div>
+          </div>` : ''}
         </section>
 
         <div class="form-actions">
@@ -1026,7 +1479,7 @@ export class NCToolManagerPanel extends HTMLElement {
             <button class="button danger" type="button" id="delete-library-tool" ${(tool as LibraryToolDefinition).revision === 0 ? 'disabled' : ''}>Delete</button>
             <button class="button primary" type="submit">Save Tool</button>
           ` : `
-            <button class="button" type="button" id="save-program-to-library">Save Copy to Library</button>
+            <button class="button" type="button" id="save-program-to-library" data-advanced>Save Copy to Library</button>
             <button class="button primary" type="submit" ${!this.canApplyProgram ? 'disabled' : ''}>Apply to Program</button>
           `}
         </div>
@@ -1034,7 +1487,7 @@ export class NCToolManagerPanel extends HTMLElement {
   }
 
   private renderTransformFields(prefix: string, position: Vector3, rotation: Vector3): string {
-    return `<details><summary>Position and rotation</summary>
+    return `<details data-advanced><summary>Position and rotation</summary>
       <div class="field-grid transform-grid">
         ${['X', 'Y', 'Z'].map((axis, index) => `<label>Position ${axis}<input id="${prefix}-p${axis.toLowerCase()}" type="number" step="any" value="${position[index]}"></label>`).join('')}
         ${['X', 'Y', 'Z'].map((axis, index) => `<label>Rotation ${axis}<input id="${prefix}-r${axis.toLowerCase()}" type="number" step="any" value="${rotation[index]}"></label>`).join('')}
@@ -1044,6 +1497,29 @@ export class NCToolManagerPanel extends HTMLElement {
   private get canApplyProgram(): boolean {
     return !!this.programSource && !!this.getSimulationCommentSyntax() &&
       !this.pendingRequestId && this.programSnapshot?.valid !== false;
+  }
+
+  private changeChannel(next: ChannelId): void {
+    let preservedDraft: ProgramMaterialDefinition | undefined;
+    if (this.activeTab === 'material' && this.shadowRoot?.querySelector('#material-form')) {
+      try {
+        preservedDraft = this.buildMaterialFromForm();
+      } catch {
+        preservedDraft = this.materialDraft;
+      }
+    }
+    this.channelId = next;
+    this.materialReferenceChannel = this.channelId;
+    this.stateService.setWorkbenchSelectedChannel(this.channelId);
+    this.selectedProgramKey = undefined;
+    this.pendingRequestId = undefined;
+    this.simpleStep = 'list';
+    void this.loadProgram(false).then(() => {
+      if (preservedDraft) {
+        this.materialDraft = preservedDraft;
+      }
+      this.render();
+    });
   }
 
   private attachListeners(): void {
@@ -1060,25 +1536,10 @@ export class NCToolManagerPanel extends HTMLElement {
       });
     });
     this.shadowRoot?.querySelector<HTMLSelectElement>('#manager-channel')?.addEventListener('change', (event) => {
-      let preservedDraft: ProgramMaterialDefinition | undefined;
-      if (this.activeTab === 'material' && this.shadowRoot?.querySelector('#material-form')) {
-        try {
-          preservedDraft = this.buildMaterialFromForm();
-        } catch {
-          preservedDraft = this.materialDraft;
-        }
-      }
-      this.channelId = (event.currentTarget as HTMLSelectElement).value as ChannelId;
-      this.materialReferenceChannel = this.channelId;
-      this.stateService.setWorkbenchSelectedChannel(this.channelId);
-      this.selectedProgramKey = undefined;
-      this.pendingRequestId = undefined;
-      void this.loadProgram(false).then(() => {
-        if (preservedDraft) {
-          this.materialDraft = preservedDraft;
-        }
-        this.render();
-      });
+      this.changeChannel((event.currentTarget as HTMLSelectElement).value as ChannelId);
+    });
+    this.shadowRoot?.querySelector<HTMLButtonElement>('#toggle-view-mode')?.addEventListener('click', () => {
+      this.setViewMode(this.viewMode === 'simple' ? 'expert' : 'simple');
     });
     this.shadowRoot?.querySelector<HTMLInputElement>('#tool-search')?.addEventListener('input', (event) => {
       this.search = (event.currentTarget as HTMLInputElement).value;
@@ -1499,6 +1960,8 @@ export class NCToolManagerPanel extends HTMLElement {
       const tool = this.buildToolFromForm(this.readProgramIdentifier());
       const requestId = createId('tool-update');
       this.pendingRequestId = requestId;
+      this.lastRequestId = requestId;
+      this.returnToListOnSuccess = this.viewMode === 'simple';
       const request: ProgramToolUpdateRequest = {
         requestId,
         channelId: this.channelId,
@@ -1518,10 +1981,15 @@ export class NCToolManagerPanel extends HTMLElement {
   }
 
   private async handleUpdateResult(result: ProgramToolUpdateResult): Promise<void> {
-    if (!this.pendingRequestId || result.requestId !== this.pendingRequestId) return;
+    const requestId = result?.requestId;
+    if (!requestId || (requestId !== this.pendingRequestId && requestId !== this.lastRequestId)) return;
     this.pendingRequestId = undefined;
+    this.lastRequestId = undefined;
+    const returnToList = this.returnToListOnSuccess;
+    this.returnToListOnSuccess = false;
     this.setStatus(result.message, result.success ? 'success' : 'error', false);
     if (result.success) {
+      if (returnToList && this.viewMode === 'simple') this.simpleStep = 'list';
       if (result.updatedText !== undefined && this.programSource?.identity.documentId === 'external') {
         const activeProgram = this.fileManager?.getActiveProgram(this.channelId);
         if (activeProgram) {
@@ -1669,6 +2137,7 @@ export class NCToolManagerPanel extends HTMLElement {
       });
       const requestId = createId('offset-update');
       this.pendingRequestId = requestId;
+      this.lastRequestId = requestId;
       const request: ProgramOffsetsUpdateRequest = {
         requestId,
         channelId: this.channelId,
@@ -1783,6 +2252,78 @@ export class NCToolManagerPanel extends HTMLElement {
       .status { min-height:30px; padding:7px 10px; border-top:1px solid var(--vscode-editorGroup-border,#d0d7de); color:var(--vscode-descriptionForeground,#57606a); font-size:11px; }
       .status.success { color:#2f8f4e; } .status.error { color:var(--vscode-inputValidation-errorBackground,#cf222e); }
       @media (max-width:700px) { .manager-body { grid-template-columns:1fr; grid-template-rows:minmax(145px,32%) minmax(0,68%); } .tool-list-pane { border-right:0; border-bottom:1px solid var(--vscode-editorGroup-border,#d0d7de); } .manager-header { padding:9px; } .manager-header p { display:none; } .transform-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+      .header-controls { display:flex; align-items:flex-end; gap:8px; }
+      .simple-hint,.simple-only { display:none; }
+      .link-button { padding:6px 2px; border:0; background:transparent; color:var(--vscode-textLink-foreground,#0969da); cursor:pointer; font-size:13px; }
+      .manager-shell.simple { font-size:14px; }
+      .manager-shell.simple .manager-body { grid-template-columns:minmax(0,1fr); grid-template-rows:minmax(0,1fr); }
+      .simple-header { display:flex; justify-content:space-between; align-items:center; gap:10px; padding:10px 14px; border-bottom:1px solid var(--vscode-editorGroup-border,#d0d7de); background:var(--vscode-editorGroupHeader-tabsBackground,#f6f8fa); }
+      .simple-title { display:flex; flex-direction:column; min-width:0; } .simple-title h2 { font-size:18px; }
+      .simple-title span { color:var(--vscode-descriptionForeground,#57606a); font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+      .simple-toolbar { display:flex; flex-wrap:wrap; gap:8px; padding:8px 14px; border-bottom:1px solid var(--vscode-editorGroup-border,#d0d7de); }
+      .segmented { display:flex; flex:1 1 160px; padding:3px; gap:3px; border-radius:10px; background:var(--vscode-button-secondaryBackground,#eaeef2); }
+      .segmented button { flex:1; min-height:38px; border:0; border-radius:8px; background:transparent; color:inherit; cursor:pointer; font-size:14px; }
+      .segmented button.active { background:var(--vscode-editor-background,#fff); font-weight:600; box-shadow:0 1px 3px rgba(0,0,0,.15); }
+      .simple-pane { min-height:0; overflow:auto; display:flex; flex-direction:column; gap:12px; padding:14px; }
+      .simple-pane .notice,.simple-pane .empty { margin:0; font-size:13px; border-radius:8px; }
+      .simple-progress { display:grid; gap:6px; font-size:14px; }
+      .progress-track { height:8px; border-radius:4px; overflow:hidden; background:var(--vscode-button-secondaryBackground,#eaeef2); }
+      .progress-track span { display:block; height:100%; background:#2f8f4e; transition:width .2s; }
+      .simple-card-list { display:grid; gap:8px; }
+      .simple-tool-card { display:flex; align-items:center; gap:12px; width:100%; min-height:64px; padding:10px 12px; border:1px solid var(--vscode-widget-border,#d0d7de); border-left-width:4px; border-radius:10px; background:var(--vscode-editor-background,#fff); color:inherit; text-align:left; cursor:pointer; }
+      .simple-tool-card.ready { border-left-color:#2f8f4e; } .simple-tool-card.missing { border-left-color:#d4a72c; }
+      .simple-tool-card:active,.category-tile:active,.choice-tile:active { transform:scale(.98); }
+      .tool-badge { flex:none; min-width:48px; padding:6px 8px; border-radius:8px; background:var(--vscode-badge-background,#0969da); color:var(--vscode-badge-foreground,#fff); font-weight:700; font-size:14px; text-align:center; overflow-wrap:anywhere; }
+      .card-text { display:flex; flex-direction:column; gap:2px; flex:1; min-width:0; }
+      .card-title { font-size:15px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+      .card-sub { font-size:12px; color:var(--vscode-descriptionForeground,#57606a); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+      .card-state { flex:none; font-size:13px; font-weight:600; }
+      .ready .card-state { color:#2f8f4e; font-size:20px; } .missing .card-state { color:#9a6700; }
+      .big-button { width:100%; min-height:48px; border-radius:10px; font-size:15px; }
+      .simple-add-form { display:grid; gap:10px; padding:12px; border:1px solid var(--vscode-widget-border,#d0d7de); border-radius:10px; }
+      .simple-add-actions { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+      .simple-add-actions .button { min-height:44px; border-radius:8px; }
+      .simple-detail-header { display:flex; align-items:center; gap:10px; }
+      .simple-detail-header h3 { font-size:16px; flex:1; min-width:0; }
+      .back-button { font-size:14px; white-space:nowrap; }
+      .simple-subtitle { display:flex; align-items:center; gap:8px; font-size:13px; font-weight:600; color:var(--vscode-descriptionForeground,#57606a); }
+      .recommend-card { display:grid; gap:4px; width:100%; padding:14px; border:2px solid var(--vscode-focusBorder,#0969da); border-radius:12px; background:var(--vscode-editor-background,#fff); color:inherit; text-align:left; cursor:pointer; }
+      .recommend-card strong { font-size:16px; } .recommend-label { font-size:12px; color:var(--vscode-descriptionForeground,#57606a); }
+      .recommend-action { justify-self:end; color:var(--vscode-textLink-foreground,#0969da); font-weight:600; }
+      .category-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(130px,1fr)); gap:10px; }
+      .category-tile { display:flex; flex-direction:column; align-items:center; gap:4px; min-height:104px; padding:12px 8px; border:1px solid var(--vscode-widget-border,#d0d7de); border-radius:12px; background:var(--vscode-editor-background,#fff); color:inherit; cursor:pointer; }
+      .category-icon { font-size:28px; line-height:1.1; color:var(--vscode-textLink-foreground,#0969da); }
+      .category-label { font-size:15px; font-weight:600; } .category-hint { font-size:12px; color:var(--vscode-descriptionForeground,#57606a); }
+      .chip-row { display:flex; gap:8px; overflow-x:auto; padding-bottom:2px; }
+      .chip { flex:none; min-height:38px; padding:6px 14px; border:1px solid var(--vscode-widget-border,#d0d7de); border-radius:19px; background:var(--vscode-editor-background,#fff); color:inherit; cursor:pointer; font-size:13px; }
+      .chip.active { border-color:var(--vscode-focusBorder,#0969da); background:var(--vscode-focusBorder,#0969da); color:#fff; font-weight:600; }
+      .choice-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(78px,1fr)); gap:8px; }
+      .choice-grid.wide { grid-template-columns:1fr; }
+      .choice-tile { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px; min-height:56px; padding:8px 6px; border:1px solid var(--vscode-widget-border,#d0d7de); border-radius:10px; background:var(--vscode-editor-background,#fff); color:inherit; cursor:pointer; }
+      .choice-tile strong { font-size:15px; overflow-wrap:anywhere; text-align:center; } .choice-tile span { font-size:11px; color:var(--vscode-descriptionForeground,#57606a); text-align:center; }
+      .template-chip { display:flex; align-items:center; gap:10px; padding:10px 12px; border-radius:10px; background:var(--vscode-editorGroupHeader-tabsBackground,#f6f8fa); }
+      .template-chip-text { display:flex; flex-direction:column; flex:1; min-width:0; }
+      .template-chip-text span { font-size:11px; color:var(--vscode-descriptionForeground,#57606a); }
+      .template-chip-text strong { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+      .template-chip .button { min-height:38px; border-radius:8px; }
+      .simple-edit { padding-bottom:0; }
+      .simple-form { margin:0 -14px; }
+      .simple-form [data-advanced] { display:none !important; }
+      .simple-form .section-heading span { display:none; }
+      .simple-form section { padding:12px 14px; gap:12px; }
+      .simple-form label { font-size:13px; }
+      .simple-form input,.simple-form select { min-height:44px; padding:8px 10px; border-radius:8px; font-size:16px; }
+      .simple-form .simple-hint { display:block; font-size:12px; color:var(--vscode-descriptionForeground,#57606a); }
+      .simple-form .simple-rotate { display:grid; gap:8px; }
+      .simple-rotate-head { display:flex; justify-content:space-between; align-items:baseline; gap:8px; font-size:13px; color:var(--vscode-descriptionForeground,#57606a); }
+      .simple-rotate-head strong { color:var(--vscode-editor-foreground,#24292f); font-size:13px; }
+      .rotate-buttons { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:6px; }
+      .rotate-buttons .button { min-height:44px; border-radius:8px; font-size:14px; padding:6px 4px; }
+      .simple-form .form-actions { padding:10px 14px; }
+      .simple-form .form-actions .button.primary { flex:1; min-height:48px; border-radius:10px; font-size:16px; font-weight:600; }
+      .advanced-link { align-self:center; margin-bottom:12px; }
+      .manager-shell.simple .status { font-size:13px; }
+      .manager-shell.simple .status:empty { display:none; }
     `;
   }
 }

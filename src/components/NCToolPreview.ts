@@ -29,6 +29,13 @@ const STYLE = `
   .stage { position:relative; height:260px; overflow:hidden; border:1px solid var(--vscode-widget-border,#d0d7de);
     background:var(--vscode-editor-background,#1e1e1e); }
   .stage canvas { display:block; width:100%; height:100%; }
+  .bore-inset { position:absolute; top:8px; right:8px; width:112px; padding:6px; border:1px solid var(--vscode-widget-border,#d0d7de);
+    border-radius:4px; background:rgba(24,26,31,0.88); color:#e6edf3; font-size:10px; line-height:1.25; pointer-events:none; }
+  .bore-inset[hidden] { display:none; }
+  .bore-inset svg { display:block; width:98px; height:98px; margin:0 auto 4px; }
+  .bore-caption { text-align:center; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .bore-caption.ok { color:#3fb950; }
+  .bore-caption.warn { color:#f85149; }
   .fallback { padding:12px; font-size:11px; color:var(--vscode-descriptionForeground,#57606a); }
   .note { min-height:16px; margin-top:4px; font-size:11px; color:var(--vscode-descriptionForeground,#57606a); }
   .note.error { color:var(--vscode-inputValidation-errorBackground,#cf222e); }
@@ -144,7 +151,7 @@ export class NCToolPreview extends HTMLElement {
       <div class="bar">${(Object.keys(VIEW_LABELS) as PreviewView[]).map((view) =>
         `<button type="button" data-view="${view}" class="${view === this.view ? 'active' : ''}">${VIEW_LABELS[view]}</button>`).join('')}
         <button type="button" data-action="fit">Fit</button></div>
-      <div class="stage"></div><div class="note"></div>`;
+      <div class="stage"><div class="bore-inset" hidden></div></div><div class="note"></div>`;
     root.querySelectorAll<HTMLButtonElement>('[data-view]').forEach((button) => {
       button.addEventListener('click', () => this.setView(button.dataset.view as PreviewView));
     });
@@ -160,7 +167,10 @@ export class NCToolPreview extends HTMLElement {
     try {
       this.renderer = new THREE.WebGLRenderer({ antialias: true });
     } catch {
-      stage.innerHTML = '<div class="fallback">3D preview unavailable: WebGL could not be created.</div>';
+      const fallback = document.createElement('div');
+      fallback.className = 'fallback';
+      fallback.textContent = '3D preview unavailable: WebGL could not be created.';
+      stage.prepend(fallback);
       return;
     }
     this.renderer.setPixelRatio(window.devicePixelRatio);
@@ -225,12 +235,62 @@ export class NCToolPreview extends HTMLElement {
         this.tool ? getInsertPickPoints(this.tool) : []);
     }
     this.updateDecor();
+    this.updateBoreInset();
     if (group && (forceFit || !this.fitted)) {
       this.fit();
       this.fitted = true;
     }
     this.updateNote();
     this.requestRender();
+  }
+
+  private updateBoreInset(): void {
+    const inset = this.shadowRoot?.querySelector<HTMLElement>('.bore-inset');
+    if (!inset) return;
+    const tool = this.tool;
+    const cutter = tool?.cutting?.[0];
+    const holder = tool?.holder?.[0];
+    const isInner = Boolean(
+      tool &&
+      cutter?.type === 'insert' &&
+      holder?.type === 'turningHolderProfile' &&
+      (/inner|boring/i.test(tool.description) || holder.outline.every(([x]) => x <= 0.5) && holder.outline.some(([x]) => x <= -4)),
+    );
+    if (!isInner || !tool || cutter?.type !== 'insert' || holder?.type !== 'turningHolderProfile') {
+      inset.hidden = true;
+      inset.innerHTML = '';
+      return;
+    }
+    const zs = holder.outline.slice(0, 2).concat(holder.outline.slice(-2)).map(([, z]) => z);
+    const neckTop = Math.max(...zs);
+    const neckBottom = Math.min(...zs);
+    const neckHeight = Math.max(0.6, neckTop - neckBottom);
+    const boreMatch = /Ø\s*(\d+(?:\.\d+)?)\s*mm/i.exec(tool.description);
+    const minBore = boreMatch ? Number(boreMatch[1]) : Number((neckHeight * 1.25).toFixed(2));
+    const boreRadius = Math.max(0.5, minBore / 2);
+    const upperWall = (tool.Q ?? 2) !== 3 && (tool.Q ?? 2) !== 4;
+    const sign = upperWall ? 1 : -1;
+    const scale = 36 / boreRadius;
+    const tipY = -sign * 36;
+    const barHalfW = Math.min(32, (Math.min(holder.depth, neckHeight) / 2) * scale);
+    const barRadialH = Math.min(68, neckHeight * scale);
+    const heelRadius = Math.hypot(barHalfW, 36 - barRadialH);
+    const clearsBottom = barRadialH < 70 && heelRadius <= 36.5;
+    const backY = tipY + sign * barRadialH;
+    const midY = (tipY + backY) / 2;
+    inset.hidden = false;
+    inset.innerHTML = `
+      <svg viewBox="-50 -50 100 100" aria-label="2D bore cross-section">
+        <circle cx="0" cy="0" r="36" fill="none" stroke="#8b949e" stroke-width="1.5" stroke-dasharray="3 2" />
+        <line x1="-44" y1="0" x2="44" y2="0" stroke="#2ea043" stroke-width="1" opacity="0.7" />
+        <line x1="0" y1="-44" x2="0" y2="44" stroke="#2ea043" stroke-width="1" opacity="0.7" />
+        <path d="M 0 ${tipY.toFixed(1)} L ${barHalfW.toFixed(1)} ${midY.toFixed(1)} A ${barHalfW.toFixed(1)} ${(barRadialH * 0.5).toFixed(1)} 0 0 ${upperWall ? 1 : 0} ${(-barHalfW).toFixed(1)} ${midY.toFixed(1)} Z"
+          fill="#f4c542" fill-opacity="0.85" stroke="#d29922" stroke-width="1.2" />
+        <circle cx="0" cy="${tipY.toFixed(1)}" r="2.8" fill="#2ecc71" />
+      </svg>
+      <div class="bore-caption">2D Bore Ø${minBore} mm (${upperWall ? '+X tip' : '-X tip'})</div>
+      <div class="bore-caption ${clearsBottom ? 'ok' : 'warn'}">${clearsBottom ? '✓ Bottom clears bore' : '⚠ Check bore clearance'}</div>
+    `;
   }
 
   private bounds(): THREE.Sphere {

@@ -25,4 +25,27 @@ describe('VS Code program machine restoration', () => {
     expect(state.getState().globalMachine).toBe('SAVED');
     expect(state.getState().activeMachine?.machineName).toBe('SAVED');
   });
+
+  it('updates only the targeted channel on immediate FILE_UPDATED_EXTERNALLY undo after an edit', async () => {
+    const bus = new EventBus();
+    const state = new StateService(bus, false);
+    const manager = new VsCodeFileManagerService(bus, state);
+    window.dispatchEvent(new CustomEvent('vscode:files-opened', {
+      detail: { type: 'FILES_OPENED', channels: { '1': 'G0 X10', '2': 'G0 Z20' } },
+    }));
+    await Promise.resolve();
+
+    manager.updateActiveProgramContent('2', 'G0 Z99');
+    expect(manager.getActiveProgram('1')?.content).toBe('G0 X10');
+    expect(manager.getActiveProgram('2')?.content).toBe('G0 Z99');
+
+    // Immediate undo from VS Code host within the 50ms internalUpdate window
+    window.dispatchEvent(new CustomEvent('vscode:files-opened', {
+      detail: { type: 'FILE_UPDATED_EXTERNALLY', channel: '2', text: 'G0 Z20', activeChannel: '2' },
+    }));
+
+    expect(manager.getActiveProgram('1')?.content).toBe('G0 X10');
+    expect(manager.getActiveProgram('2')?.content).toBe('G0 Z20');
+  });
 });
+

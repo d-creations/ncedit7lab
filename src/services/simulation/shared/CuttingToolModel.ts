@@ -46,6 +46,92 @@ export function cuttingRadiusAt(
   return radius;
 }
 
+export function polygonDistance(x: number, y: number, polygon: readonly THREE.Vector2[]): number {
+  let squared = Infinity;
+  for (let i = 0; i < polygon.length; i++) {
+    const a = polygon[i],
+      b = polygon[(i + 1) % polygon.length];
+    const dx = b.x - a.x,
+      dy = b.y - a.y;
+    const length = dx * dx + dy * dy;
+    const t =
+      length === 0 ? 0 : THREE.MathUtils.clamp(((x - a.x) * dx + (y - a.y) * dy) / length, 0, 1);
+    squared = Math.min(squared, (x - a.x - t * dx) ** 2 + (y - a.y - t * dy) ** 2);
+  }
+
+  return Math.sqrt(squared) * (pointInPolygon(x, y, polygon) ? -1 : 1);
+}
+
+export function convexHull(points: THREE.Vector2[]): THREE.Vector2[] {
+  const sorted = points.slice().sort((a, b) => a.x - b.x || a.y - b.y);
+  const cross = (a: THREE.Vector2, b: THREE.Vector2, c: THREE.Vector2): number =>
+    (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+  const half = (vertices: THREE.Vector2[]): THREE.Vector2[] => {
+    const result: THREE.Vector2[] = [];
+    for (const vertex of vertices) {
+      while (
+        result.length >= 2 &&
+        cross(result[result.length - 2], result[result.length - 1], vertex) <= 0
+      )
+        result.pop();
+      result.push(vertex);
+    }
+    result.pop();
+    return result;
+  };
+  return [...half(sorted), ...half(sorted.slice().reverse())];
+}
+
+export function convexField(polygon: readonly THREE.Vector2[]) {
+  let area = 0;
+  for (let i = 0; i < polygon.length; i++) {
+    const a = polygon[i],
+      b = polygon[(i + 1) % polygon.length];
+    area += a.x * b.y - b.x * a.y;
+  }
+  const winding = Math.sign(area);
+  if (Math.abs(area) < 1e-12)
+    throw new SimulationCapabilityError('Degenerate turning envelope section');
+  const edges = polygon.map((a, i) => {
+    const b = polygon[(i + 1) % polygon.length];
+    const length = a.distanceTo(b);
+    if (length < 1e-12) throw new SimulationCapabilityError('Degenerate turning envelope edge');
+    const x = (winding * (b.y - a.y)) / length;
+    const y = (winding * (a.x - b.x)) / length;
+    return { x, y, offset: -(x * a.x + y * a.y) };
+  });
+  // Only convex sections admit a sign-correct maximum of supporting planes.
+  const convex = polygon.every((point) =>
+    edges.every((edge) => edge.x * point.x + edge.y * point.y + edge.offset <= 1e-8),
+  );
+  const activeEdge = (x: number, y: number): number => {
+    let distance = -Infinity,
+      index = 0;
+    for (let i = 0; i < edges.length; i++) {
+      const edge = edges[i];
+      const value = edge.x * x + edge.y * y + edge.offset;
+      if (value > distance) {
+        distance = value;
+        index = i;
+      }
+    }
+    return index;
+  };
+  return {
+    planes: convex ? edges : undefined,
+    normal: convex ? (x: number, y: number) => edges[activeEdge(x, y)] : undefined,
+    distance: (x: number, y: number): number => {
+      if (!convex) return polygonDistance(x, y, polygon);
+      let distance = -Infinity;
+      for (const edge of edges) {
+        const value = edge.x * x + edge.y * y + edge.offset;
+        if (value > distance) distance = value;
+      }
+      return distance;
+    },
+  };
+}
+
 export class CuttingToolModel {
   readonly part: DeepReadonly<CuttingPart>;
   readonly partToAssembly: THREE.Matrix4;
@@ -53,6 +139,8 @@ export class CuttingToolModel {
   readonly bounds: THREE.Box3;
   readonly sweepRadius: number;
   readonly insertSection?: THREE.Vector3[];
+  private readonly insertPolygon?: THREE.Vector2[];
+  private readonly insertField?: ReturnType<typeof convexField>;
   private readonly point = new THREE.Vector3();
   private readonly ballField?: BallMillSweep;
 
@@ -102,6 +190,8 @@ export class CuttingToolModel {
           'Round insert Q mounting requires a separately verified reference',
         );
       }
+      this.insertPolygon = contour.contour.map(([x, z]) => new THREE.Vector2(x, z));
+      this.insertField = convexField(this.insertPolygon);
       this.insertSection = contour.contour.map(([x, z]) =>
         new THREE.Vector3(x, 0, z).applyMatrix4(this.partToAssembly),
       );
@@ -127,9 +217,11 @@ export class CuttingToolModel {
 
   containsAssembly(point: THREE.Vector3): boolean {
     const part = this.part;
-    if (part.type === 'insert')
-      throw new Error('An insert requires the conventional-turning envelope');
     this.point.copy(point).applyMatrix4(this.assemblyToPart);
+    if (part.type === 'insert') {
+      if (Math.abs(this.point.y) > part.thickness / 2) return false;
+      return pointInPolygon(this.point.x, this.point.z, this.insertPolygon!);
+    }
     const z = this.point.z;
     if (z < 0 || z > part.length) return false;
     const cuttingRadius = cuttingRadiusAt(part, z);
@@ -138,7 +230,12 @@ export class CuttingToolModel {
 
   private distancePart(point: THREE.Vector3, length?: number): number {
     const part = this.part;
-    if (part.type === 'insert') throw new Error('An insert requires the turning envelope');
+    if (part.type === 'insert') {
+      return Math.max(
+        this.insertField!.distance(point.x, point.z),
+        Math.abs(point.y) - part.thickness / 2,
+      );
+    }
     const radius = part.diameter / 2;
     const top = length ?? part.length;
     const radial = Math.hypot(point.x, point.y);
@@ -184,9 +281,8 @@ export class CuttingToolModel {
     };
   }
 
-  /** Continuous fixed-orientation sweeps for balls, axial travel and flat-mill lateral travel. */
+  /** Continuous fixed-orientation sweeps for balls, inserts, axial travel and flat-mill lateral travel. */
   translationSweep(start: THREE.Matrix4, end: THREE.Matrix4): ImplicitVolume | undefined {
-    if (this.part.type === 'insert') return undefined;
     const inverse = start.clone().multiply(this.partToAssembly).invert();
     const endOrigin = new THREE.Vector3()
       .setFromMatrixPosition(end.clone().multiply(this.partToAssembly))
@@ -196,6 +292,48 @@ export class CuttingToolModel {
       .clone()
       .applyMatrix4(start)
       .union(this.bounds.clone().applyMatrix4(end));
+    if (this.part.type === 'insert') {
+      const halfThickness = this.part.thickness / 2;
+      if (Math.hypot(endOrigin.x, endOrigin.z) < 1e-9) {
+        const lower = Math.min(0, endOrigin.y) - halfThickness;
+        const upper = Math.max(0, endOrigin.y) + halfThickness;
+        const field = this.insertField!;
+        return {
+          bounds,
+          identity: JSON.stringify(['insertAxialY', this.part, inverse.elements, lower, upper]),
+          distance: (value) => {
+            point.copy(value).applyMatrix4(inverse);
+            return Math.max(field.distance(point.x, point.z), lower - point.y, point.y - upper);
+          },
+        };
+      }
+      if (Math.abs(endOrigin.y) < 1e-9 && this.insertField?.planes) {
+        const sweptPolygon = convexHull([
+          ...this.insertPolygon!,
+          ...this.insertPolygon!.map(
+            (vertex) => new THREE.Vector2(vertex.x + endOrigin.x, vertex.y + endOrigin.z),
+          ),
+        ]);
+        const sweptField = convexField(sweptPolygon);
+        return {
+          bounds,
+          identity: JSON.stringify([
+            'insertPlanarXZ',
+            this.part,
+            inverse.elements,
+            endOrigin.toArray(),
+          ]),
+          distance: (value) => {
+            point.copy(value).applyMatrix4(inverse);
+            return Math.max(
+              sweptField.distance(point.x, point.z),
+              Math.abs(point.y) - halfThickness,
+            );
+          },
+        };
+      }
+      return undefined;
+    }
     if (this.part.type === 'ballMill') {
       const field = new BallMillSweep(this.part.diameter / 2, this.part.length, endOrigin);
       const partMatrix = start.clone().multiply(this.partToAssembly);

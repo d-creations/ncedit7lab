@@ -449,4 +449,48 @@ describe('material removal prerequisites', () => {
     expect(result.simulation?.motions).toHaveLength(2);
     expect(result.simulation?.motions.map((m) => m.executionStep)).toEqual([0, 1]);
   });
+
+  it('prepares a turning insert in milling mode with turningVirtualTip poses', () => {
+    const original = input('1', stock);
+    const insertTool: ProgramToolDefinition = {
+      toolNumber: 300,
+      description: 'Turning Insert V 4.8 mm',
+      Q: 3,
+      cutting: [
+        {
+          type: 'insert',
+          shape: 'V',
+          ic: 4.7625,
+          thickness: 1.59,
+          noseRadius: 0.2,
+          clearanceAngle: 7,
+          zeroVertex: 0,
+          rotation: [0, 19, 0],
+        },
+      ],
+    };
+    original.snapshot = tools.captureProgramSnapshot(
+      original.snapshot.identity,
+      1,
+      codec.encodeSetup({ machineName: 'test', material: stock }, syntax) +
+        '\n' +
+        codec.encodeTool(insertTool, syntax),
+      syntax,
+    );
+    const insertMilling = move({
+      toolNumber: 300,
+      machiningMode: 'milling',
+      sourceCode: 'G1',
+      poses: [
+        { position: [2.5, 0, 0], orientation: [0, 0, 0, 1], reference: 'turningVirtualTip', frameId: setup.binding.frameId },
+        { position: [2.5, 0, -5], orientation: [0, 0, 0, 1], reference: 'turningVirtualTip', frameId: setup.binding.frameId },
+      ],
+    });
+    const result = prepareMaterialRemoval([original], metadata(insertMilling), setup);
+    expect(result.status).toBe('ready');
+    expect(result.simulation?.stop).toBeUndefined();
+    expect(result.simulation?.motions).toHaveLength(1);
+    expect(result.simulation?.motions[0].mode).toBe('milling');
+  });
 });
+

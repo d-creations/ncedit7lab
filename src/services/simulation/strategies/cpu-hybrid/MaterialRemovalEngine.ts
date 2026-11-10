@@ -260,8 +260,6 @@ export class MaterialRemovalEngine {
     if (motion.mode === 'turning') {
       if (angle > 1e-6)
         throw new Error('Changing insert orientation during turning is not supported');
-    } else if (cutter.part.type === 'insert') {
-      throw new Error('Insert milling is not supported');
     }
     const divisions = Math.max(
       1,

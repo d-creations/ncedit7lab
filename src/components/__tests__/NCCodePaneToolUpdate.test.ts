@@ -148,4 +148,33 @@ describe('NCCodePane program tool updates', () => {
       requestId: 'setup-ext', success: true, updatedText: nextText,
     }));
   });
+
+  it('does not overwrite channel 1 when FILE_UPDATED_EXTERNALLY arrives for channel 2 via message.channel', () => {
+    const { pane, setValue } = harness('G0 X10');
+    const updateChannel = vi.fn();
+    const triggerParse = vi.fn();
+    Object.assign(pane, {
+      editor: { getValue: () => 'G0 X10', execCommand: vi.fn() },
+      stateService: { updateChannel },
+      triggerParse,
+      addEventListener: vi.fn(),
+    });
+    (pane as unknown as { setupEventListeners(): void }).setupEventListeners();
+
+    window.dispatchEvent(new MessageEvent('message', {
+      data: { type: 'FILE_UPDATED_EXTERNALLY', channel: '2', text: 'G0 Z20', activeChannel: '2' },
+    }));
+    expect(setValue).not.toHaveBeenCalled();
+    expect(updateChannel).not.toHaveBeenCalled();
+
+    window.dispatchEvent(new MessageEvent('message', {
+      data: { type: 'FILE_UPDATED_EXTERNALLY', channel: '1', text: 'G0 X99', activeChannel: '1' },
+    }));
+    expect(setValue).toHaveBeenCalledExactlyOnceWith('G0 X99');
+    expect(updateChannel).toHaveBeenCalledExactlyOnceWith('1', { program: 'G0 X99' });
+    expect(triggerParse).toHaveBeenCalledTimes(1);
+
+    (pane as unknown as { disconnectedCallback(): void }).disconnectedCallback();
+  });
 });
+

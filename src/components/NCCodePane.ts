@@ -220,6 +220,7 @@ export class NCCodePane extends HTMLElement {
         if (editorText !== incomingText) {
             this.setValue(incomingText);
             this.stateService.updateChannel(this.channelId, { program: incomingText });
+            this.triggerParse();
         }
         if (this.scrollSyncEnabled) {
           this.updateSyncScrollMargin();
@@ -229,7 +230,7 @@ export class NCCodePane extends HTMLElement {
 
     this.messageListener = (event: MessageEvent) => {
       const message = event.data;
-      if (!this.editor) return;
+      if (!message || typeof message !== 'object' || !this.editor) return;
       
       if (message.type === 'TRIGGER_FIND') {
         this.editor.execCommand('find');
@@ -252,11 +253,25 @@ export class NCCodePane extends HTMLElement {
       }
       
       if (message.type === 'FILE_UPDATED_EXTERNALLY') {
-        // Update to handle external text injection, optionally scoping by channel if provided
-        if (!message.channelId || message.channelId === this.channelId) {
+        // Handle external text injection scoped by channel/channelId or channels map
+        if (message.channels && typeof message.channels === 'object') {
+          const channelText = message.channels[this.channelId];
+          if (typeof channelText === 'string') {
+            const normalized = channelText.replace(/\r\n/g, '\n');
+            this.setValue(normalized);
+            this.stateService.updateChannel(this.channelId, { program: normalized });
+            this.triggerParse();
+          }
+          return;
+        }
+        const targetChannelId = message.channelId ?? message.channel;
+        if (!targetChannelId || String(targetChannelId) === this.channelId) {
           const newText = message.text !== undefined ? message.text : message.content;
-          if (newText !== undefined) {
-            this.setValue(newText);
+          if (typeof newText === 'string') {
+            const normalized = newText.replace(/\r\n/g, '\n');
+            this.setValue(normalized);
+            this.stateService.updateChannel(this.channelId, { program: normalized });
+            this.triggerParse();
           }
         }
       }

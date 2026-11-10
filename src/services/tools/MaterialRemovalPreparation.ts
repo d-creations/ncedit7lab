@@ -422,8 +422,13 @@ export function prepareMaterialRemoval(
       if (checkCoaxial()) effectiveMode = 'milling';
     }
     const turning = effectiveMode === 'turning';
-    const reference = turning ? 'turningVirtualTip' : 'millingTip';
-    if (start.reference !== reference || end.reference !== reference || turning !== isInsert) {
+    const validReference = isInsert
+      ? turning
+        ? start.reference === 'turningVirtualTip' && end.reference === 'turningVirtualTip'
+        : start.reference === end.reference &&
+          (start.reference === 'turningVirtualTip' || start.reference === 'millingTip')
+      : !turning && start.reference === 'millingTip' && end.reference === 'millingTip';
+    if (!validReference) {
       stopAt(
         'turning-reference-unverified',
         'Machining mode, cutter type and pose reference do not agree',

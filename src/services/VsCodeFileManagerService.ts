@@ -25,8 +25,9 @@ export class VsCodeFileManagerService implements IFileManagerService {
         });
 
         window.addEventListener('vscode:files-opened', (event: any) => {
-            if (this.isInternalUpdate) return;
             const data = event.detail; // { type, activeChannel, isSingleFile, channels: { '1':'..', '2': '..' } }
+            if (!data) return;
+            if (this.isInternalUpdate && data.type !== 'FILE_UPDATED_EXTERNALLY') return;
             
             if (data.type === 'FILES_OPENED') {
                 this.loadChannels(data.channels);

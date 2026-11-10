@@ -360,4 +360,20 @@ describe('computational cutter references', () => {
       expect(new CuttingToolModel(tool).insertSection).toHaveLength(contour.contour.length);
     },
   );
+
+  it('supports a turning insert in milling mode for 3D slotting/broaching without revolving around the spindle', () => {
+    const model = new CuttingToolModel(insert);
+    expect(model.containsAssembly(new THREE.Vector3(0, 0, 1))).toBe(true);
+    expect(model.containsAssembly(new THREE.Vector3(0, 0.75, 1))).toBe(false);
+
+    const setup = input();
+    setup.stock = { type: 'cylinder', diameter: 8, length: 8, zeroVertex: 1 };
+    const engine = new MaterialRemovalEngine(setup);
+    engine.applyMotion(motion([2.5, 0, 0], [2.5, 0, -6], insert, 'milling'));
+    // Cuts a slot along +X within the insert's Y thickness, leaving the opposite -X side intact
+    expect(occupied(engine, [2.75, 0.125, -3])).toBe(false);
+    expect(occupied(engine, [2.75, 1.5, -3])).toBe(true);
+    expect(occupied(engine, [-2.75, 0.125, -3])).toBe(true);
+  });
 });
+

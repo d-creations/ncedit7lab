@@ -33,24 +33,98 @@ function parseMachiningMode(value: unknown): MachiningMode {
   throw new Error(`Invalid backend machining mode: ${String(value)}`);
 }
 
-function isNonCuttingStateMarker(segment: BackendPlotSegment, sourceLine: string | undefined): boolean {
+function clonePlotMetadataPreservingSharing(
+  source: NonNullable<ExecutedProgramResult['plotMetadata']>,
+): NonNullable<ExecutedProgramResult['plotMetadata']> {
+  const poseMap = new WeakMap<readonly unknown[], readonly unknown[]>();
+  const contextMap = new WeakMap<object, object>();
+  const clonePoses = <T extends readonly unknown[] | undefined>(poses: T): T => {
+    if (!poses) return poses;
+    let cached = poseMap.get(poses);
+    if (!cached) {
+      cached = structuredClone(poses);
+      poseMap.set(poses, cached);
+    }
+    return cached as T;
+  };
+  const cloneContext = <T extends object | undefined>(ctx: T): T => {
+    if (!ctx) return ctx;
+    let cached = contextMap.get(ctx);
+    if (!cached) {
+      cached = structuredClone(ctx);
+      contextMap.set(ctx, cached);
+    }
+    return cached as T;
+  };
+  return {
+    points: source.points.map((pt) => ({ ...pt })),
+    segments: source.segments.map((seg) => ({
+      ...seg,
+      startPoint: { ...seg.startPoint },
+      endPoint: { ...seg.endPoint },
+      ...(seg.motionContext !== undefined
+        ? { motionContext: cloneContext(seg.motionContext) }
+        : {}),
+      ...(seg.poses !== undefined ? { poses: clonePoses(seg.poses) } : {}),
+    })),
+    ...(source.executionOccurrences !== undefined
+      ? {
+          executionOccurrences: source.executionOccurrences.map((occ) => ({
+            ...occ,
+            ...(occ.toolState
+              ? {
+                  toolState: {
+                    ...occ.toolState,
+                    ...(occ.toolState.motionContext !== undefined
+                      ? { motionContext: cloneContext(occ.toolState.motionContext) }
+                      : {}),
+                    ...(occ.toolState.poses !== undefined
+                      ? { poses: clonePoses(occ.toolState.poses) }
+                      : {}),
+                  },
+                }
+              : {}),
+          })),
+        }
+      : {}),
+    ...(source.removalStops !== undefined
+      ? { removalStops: source.removalStops.map((stop) => ({ ...stop })) }
+      : {}),
+  };
+}
+
+function isNonCuttingStateMarker(
+  segment: BackendPlotSegment,
+  sourceLine: string | undefined,
+): boolean {
   if (segment.recordKind !== undefined) {
-    return segment.recordKind === 'state' &&
-      segment.geometry == null && segment.traversal == null && segment.sourceCode == null;
+    return (
+      segment.recordKind === 'state' &&
+      segment.geometry == null &&
+      segment.traversal == null &&
+      segment.sourceCode == null
+    );
   }
   if (
     segment.points?.length !== 1 ||
-    segment.geometry != null || segment.traversal != null || segment.sourceCode != null ||
+    segment.geometry != null ||
+    segment.traversal != null ||
+    segment.sourceCode != null ||
     !sourceLine
-  ) return false;
+  )
+    return false;
   // Verify the executed source: missing motion metadata alone must never authorize skipping.
-  const code = sourceLine.replace(/\([^()]*\)/g, ' ').replace(/^\s*N\d+\s*/i, '').trim();
+  const code = sourceLine
+    .replace(/\([^()]*\)/g, ' ')
+    .replace(/^\s*N\d+\s*/i, '')
+    .trim();
   const selection = /^T(\d+)\s*(?:M0?6\s*)?$/i.exec(code);
   if (selection) {
     return segment.toolNumber === Number(selection[1]) || segment.toolNumber === selection[1];
   }
-  return /M0?[34589]/i.test(code) &&
-    /^(?:(?:M0?[34589]|S[+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*)+$/i.test(code);
+  return (
+    /M0?[34589]/i.test(code) && /^(?:(?:M0?[34589]|S[+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*)+$/i.test(code)
+  );
 }
 
 export interface ExecutionRequest {
@@ -90,11 +164,16 @@ export class ExecutedProgramService {
     }
     const channels = new Set<string>();
     for (const input of inputs) {
-      if (!input.snapshot.valid) throw new Error('Resolve program metadata diagnostics before plotting');
-      if (input.snapshot.setup?.machineName && input.snapshot.setup.machineName !== input.machineName) {
+      if (!input.snapshot.valid)
+        throw new Error('Resolve program metadata diagnostics before plotting');
+      if (
+        input.snapshot.setup?.machineName &&
+        input.snapshot.setup.machineName !== input.machineName
+      ) {
         throw new Error('Program setup machine conflicts with the selected machine');
       }
-      if (channels.has(input.snapshot.identity.channelId)) throw new Error('Duplicate plot channel');
+      if (channels.has(input.snapshot.identity.channelId))
+        throw new Error('Duplicate plot channel');
       channels.add(input.snapshot.identity.channelId);
     }
     // Clone before freezing: callers, editor state and legacy execution consumers remain mutable.
@@ -114,14 +193,22 @@ export class ExecutedProgramService {
     freezeMetadata(captured);
     let results: ExecutedProgramResult[];
     try {
-      const response = await this.backend.requestPlot(this.buildPlotRequest(requests, toolPathMode));
+      const response = await this.backend.requestPlot(
+        this.buildPlotRequest(requests, toolPathMode),
+      );
       if (response.success === false) throw new Error(this.rejectionMessage(response));
-      results = requests.map((request) => this.parseExecutionResponse(response, request.channelId, request));
+      results = requests.map((request) =>
+        this.parseExecutionResponse(response, request.channelId, request),
+      );
     } catch (error) {
       if (generation === this.plotGeneration) {
-        requests.forEach((request) => this.eventBus.publish(EVENT_NAMES.EXECUTION_ERROR, {
-          channelId: request.channelId, runId, error,
-        }));
+        requests.forEach((request) =>
+          this.eventBus.publish(EVENT_NAMES.EXECUTION_ERROR, {
+            channelId: request.channelId,
+            runId,
+            error,
+          }),
+        );
       }
       throw error;
     }
@@ -132,17 +219,29 @@ export class ExecutedProgramService {
         if (!meta) return result;
         let maxStep = -1;
         for (const seg of meta.segments) {
-          if (typeof seg.executionStep === 'number' && Number.isSafeInteger(seg.executionStep) && seg.executionStep > maxStep) {
+          if (
+            typeof seg.executionStep === 'number' &&
+            Number.isSafeInteger(seg.executionStep) &&
+            seg.executionStep > maxStep
+          ) {
             maxStep = seg.executionStep;
           }
         }
         for (const occ of meta.executionOccurrences ?? []) {
-          if (typeof occ.executionStep === 'number' && Number.isSafeInteger(occ.executionStep) && occ.executionStep > maxStep) {
+          if (
+            typeof occ.executionStep === 'number' &&
+            Number.isSafeInteger(occ.executionStep) &&
+            occ.executionStep > maxStep
+          ) {
             maxStep = occ.executionStep;
           }
         }
         for (const stop of meta.removalStops ?? []) {
-          if (typeof stop.executionStep === 'number' && Number.isSafeInteger(stop.executionStep) && stop.executionStep > maxStep) {
+          if (
+            typeof stop.executionStep === 'number' &&
+            Number.isSafeInteger(stop.executionStep) &&
+            stop.executionStep > maxStep
+          ) {
             maxStep = stop.executionStep;
           }
         }
@@ -157,7 +256,9 @@ export class ExecutedProgramService {
             ...meta,
             segments: meta.segments.map((seg) => ({
               ...seg,
-              ...(typeof seg.executionStep === 'number' && Number.isSafeInteger(seg.executionStep) && seg.executionStep >= 0
+              ...(typeof seg.executionStep === 'number' &&
+              Number.isSafeInteger(seg.executionStep) &&
+              seg.executionStep >= 0
                 ? { executionStep: seg.executionStep + currentOffset }
                 : {}),
             })),
@@ -165,7 +266,9 @@ export class ExecutedProgramService {
               ? {
                   executionOccurrences: meta.executionOccurrences.map((occ) => ({
                     ...occ,
-                    ...(typeof occ.executionStep === 'number' && Number.isSafeInteger(occ.executionStep) && occ.executionStep >= 0
+                    ...(typeof occ.executionStep === 'number' &&
+                    Number.isSafeInteger(occ.executionStep) &&
+                    occ.executionStep >= 0
                       ? { executionStep: occ.executionStep + currentOffset }
                       : {}),
                   })),
@@ -175,7 +278,9 @@ export class ExecutedProgramService {
               ? {
                   removalStops: meta.removalStops.map((stop) => ({
                     ...stop,
-                    ...(typeof stop.executionStep === 'number' && Number.isSafeInteger(stop.executionStep) && stop.executionStep >= 0
+                    ...(typeof stop.executionStep === 'number' &&
+                    Number.isSafeInteger(stop.executionStep) &&
+                    stop.executionStep >= 0
                       ? { executionStep: stop.executionStep + currentOffset }
                       : {}),
                   })),
@@ -219,12 +324,16 @@ export class ExecutedProgramService {
           : result,
       );
     }
-    const plotMetadata = structuredClone({
+    const plotMetadata = clonePlotMetadataPreservingSharing({
       points: results.flatMap((result) => result.plotMetadata?.points ?? []),
       segments: results.flatMap((result) => result.plotMetadata?.segments ?? []),
-      ...(results.some((result) => result.plotMetadata?.executionOccurrences !== undefined) ? {
-        executionOccurrences: results.flatMap((result) => result.plotMetadata?.executionOccurrences ?? []),
-      } : {}),
+      ...(results.some((result) => result.plotMetadata?.executionOccurrences !== undefined)
+        ? {
+            executionOccurrences: results.flatMap(
+              (result) => result.plotMetadata?.executionOccurrences ?? [],
+            ),
+          }
+        : {}),
       removalStops: results.flatMap((result) => result.plotMetadata?.removalStops ?? []),
     });
     const run = freezeMetadata({
@@ -233,9 +342,8 @@ export class ExecutedProgramService {
       inputs: captured,
       plotMetadata,
       ...(focusChannelId ? { focusChannelId } : {}),
-      materialRemoval: toolPathMode === 'simulation'
-        ? prepareMaterialRemoval(captured, plotMetadata)
-        : undefined,
+      materialRemoval:
+        toolPathMode === 'simulation' ? prepareMaterialRemoval(captured, plotMetadata) : undefined,
     });
     // Superseded/cleared requests must not evict or replace the displayed run.
     if (generation === this.plotGeneration) {
@@ -246,7 +354,9 @@ export class ExecutedProgramService {
       requests.forEach((request, index) => {
         if (generation === this.plotGeneration) {
           this.eventBus.publish(EVENT_NAMES.EXECUTION_COMPLETED, {
-            channelId: request.channelId, runId, result: results[index],
+            channelId: request.channelId,
+            runId,
+            result: results[index],
           });
         }
       });
@@ -261,10 +371,21 @@ export class ExecutedProgramService {
     return this.plotRuns.get(runId);
   }
 
-  getRunTool(runId: string, programId: string, channelId: ChannelId, toolNumber: number | string | null | undefined) {
-    if (toolNumber === undefined || toolNumber === null || toolNumber === 'unknown') return undefined;
-    const input = this.plotRuns.get(runId)?.inputs.find((entry) =>
-      entry.snapshot.identity.programId === programId && entry.snapshot.identity.channelId === channelId);
+  getRunTool(
+    runId: string,
+    programId: string,
+    channelId: ChannelId,
+    toolNumber: number | string | null | undefined,
+  ) {
+    if (toolNumber === undefined || toolNumber === null || toolNumber === 'unknown')
+      return undefined;
+    const input = this.plotRuns
+      .get(runId)
+      ?.inputs.find(
+        (entry) =>
+          entry.snapshot.identity.programId === programId &&
+          entry.snapshot.identity.channelId === channelId,
+      );
     return input?.snapshot.tools.find((tool) => tool.toolNumber === toolNumber);
   }
 
@@ -354,9 +475,14 @@ export class ExecutedProgramService {
     }
   }
 
-  private buildPlotRequest(requests: ExecutionRequest[], toolPathMode: ToolPathMode = 'effective'): PlotRequest {
-    const includesPoseRequest = toolPathMode === 'simulation' &&
-      requests.length > 0 && requests.every((request) => request.simulation !== undefined);
+  private buildPlotRequest(
+    requests: ExecutionRequest[],
+    toolPathMode: ToolPathMode = 'effective',
+  ): PlotRequest {
+    const includesPoseRequest =
+      toolPathMode === 'simulation' &&
+      requests.length > 0 &&
+      requests.every((request) => request.simulation !== undefined);
     return {
       toolPathMode: 'center',
       ...(includesPoseRequest ? { poseContract: WORKPIECE_TOOL_REFERENCE_POSE_CONTRACT } : {}),
@@ -377,9 +503,12 @@ export class ExecutedProgramService {
     tools: readonly ProgramToolDefinition[],
   ): SimulationChannelInput | undefined {
     const simulation = machine?.simulation;
-    if (!machine?.profileRevision || !simulation ||
+    if (
+      !machine?.profileRevision ||
+      !simulation ||
       !machine.supportedPoseContracts?.includes(WORKPIECE_TOOL_REFERENCE_POSE_CONTRACT) ||
-      simulation.poseContract !== WORKPIECE_TOOL_REFERENCE_POSE_CONTRACT) {
+      simulation.poseContract !== WORKPIECE_TOOL_REFERENCE_POSE_CONTRACT
+    ) {
       return undefined;
     }
     const inputs = tools.map((tool) => {
@@ -388,17 +517,29 @@ export class ExecutedProgramService {
       return {
         toolNumber: tool.toolNumber,
         reference,
-        mountingOrientationDegrees: [...(tool.orientation ?? [0, 0, 0])] as [number, number, number],
+        mountingOrientationDegrees: [...(tool.orientation ?? [0, 0, 0])] as [
+          number,
+          number,
+          number,
+        ],
         ...(machine.turningReferenceContract === 'resolved-center-path-v1' &&
-          tool.cutting?.length === 1 && tool.cutting[0].type === 'insert'
+        tool.cutting?.length === 1 &&
+        tool.cutting[0].type === 'insert'
           ? {
-            turningNoseRadius: tool.cutting[0].noseRadius,
-            turningTipPosition: [...(tool.cutting[0].position ?? [0, 0, 0])] as [number, number, number],
-            ...(tool.Q !== undefined ? { turningTipOrientation: tool.Q } : {}),
-          } : {}),
+              turningNoseRadius: tool.cutting[0].noseRadius,
+              turningTipPosition: [...(tool.cutting[0].position ?? [0, 0, 0])] as [
+                number,
+                number,
+                number,
+              ],
+              ...(tool.Q !== undefined ? { turningTipOrientation: tool.Q } : {}),
+            }
+          : {}),
       };
     });
-    const supportedInputs = inputs.filter((input): input is SimulationChannelInput['tools'][number] => input !== undefined);
+    const supportedInputs = inputs.filter(
+      (input): input is SimulationChannelInput['tools'][number] => input !== undefined,
+    );
     if (supportedInputs.length === 0) return undefined;
     return { profileRevision: machine.profileRevision, tools: supportedInputs };
   }
@@ -426,7 +567,9 @@ export class ExecutedProgramService {
       .map((error) => `Line ${error.line} (canal ${error.canal}): ${error.message}`)
       .join('; ');
     if (details) return details;
-    const message = Array.isArray(response.message) ? response.message.join('; ') : response.message;
+    const message = Array.isArray(response.message)
+      ? response.message.join('; ')
+      : response.message;
     return message || 'Backend rejected the plot request';
   }
 
@@ -494,9 +637,12 @@ export class ExecutedProgramService {
 
         if (canal.executionOccurrences) {
           result.plotMetadata!.executionOccurrences ??= [];
-          result.plotMetadata!.executionOccurrences.push(...canal.executionOccurrences.map(
-            (occurrence) => ({ ...occurrence, channelId: canalNr as ChannelId }),
-          ));
+          result.plotMetadata!.executionOccurrences.push(
+            ...canal.executionOccurrences.map((occurrence) => ({
+              ...occurrence,
+              channelId: canalNr as ChannelId,
+            })),
+          );
         }
 
         // Parse executed lines
@@ -508,7 +654,8 @@ export class ExecutedProgramService {
         // not for every executed line, so index them by the matching segment line.
         if (canal.timing && Array.isArray(canal.timing)) {
           canal.timing.forEach((time, index) => {
-            const lineNumber = canal.segments?.[index]?.lineNumber ?? canal.executedLines?.[index] ?? index + 1;
+            const lineNumber =
+              canal.segments?.[index]?.lineNumber ?? canal.executedLines?.[index] ?? index + 1;
             const priorTime = result.timingData.get(lineNumber) ?? 0;
             result.timingData.set(lineNumber, priorTime + time);
           });
@@ -543,9 +690,8 @@ export class ExecutedProgramService {
         if (canal.segments && Array.isArray(canal.segments)) {
           canal.segments.forEach((segment, sourceSegmentIndex) => {
             const machiningMode = parseMachiningMode(segment.machiningMode);
-            if (
-              isNonCuttingStateMarker(segment, sourceLines?.[(segment.lineNumber ?? 0) - 1])
-            ) return;
+            if (isNonCuttingStateMarker(segment, sourceLines?.[(segment.lineNumber ?? 0) - 1]))
+              return;
             if (segment.points && segment.points.length >= 2) {
               let segmentType: 'rapid' | 'feed' | 'arc' | undefined;
               const traversal = segment.traversal?.toUpperCase();
@@ -553,7 +699,10 @@ export class ExecutedProgramService {
 
               if (traversal === 'RAPID') {
                 segmentType = 'rapid';
-              } else if (traversal === 'FEED' && (geometry === 'ARC_CW' || geometry === 'ARC_CCW')) {
+              } else if (
+                traversal === 'FEED' &&
+                (geometry === 'ARC_CW' || geometry === 'ARC_CCW')
+              ) {
                 segmentType = 'arc';
               } else if (traversal === 'FEED' && geometry === 'LINEAR') {
                 segmentType = 'feed';
@@ -562,8 +711,10 @@ export class ExecutedProgramService {
               if (!segmentType) {
                 console.warn('Skipping segment without supported motion semantics:', segment);
                 (result.plotMetadata!.removalStops ??= []).push({
-                  channelId: canalNr as ChannelId, sourceSegmentIndex,
-                  executionStep: segment.executionStep, lineNumber: segment.lineNumber,
+                  channelId: canalNr as ChannelId,
+                  sourceSegmentIndex,
+                  executionStep: segment.executionStep,
+                  lineNumber: segment.lineNumber,
                   message: 'Motion has unsupported or unknown traversal/geometry',
                 });
                 return;
@@ -612,8 +763,10 @@ export class ExecutedProgramService {
                 (segment.sourceCode && !/^G0?0$/i.test(segment.sourceCode)))
             ) {
               (result.plotMetadata!.removalStops ??= []).push({
-                channelId: canalNr as ChannelId, sourceSegmentIndex,
-                executionStep: segment.executionStep, lineNumber: segment.lineNumber,
+                channelId: canalNr as ChannelId,
+                sourceSegmentIndex,
+                executionStep: segment.executionStep,
+                lineNumber: segment.lineNumber,
                 message: 'Motion has fewer than two samples',
               });
             }

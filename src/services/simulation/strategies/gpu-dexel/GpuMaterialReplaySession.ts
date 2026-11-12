@@ -2,7 +2,11 @@ import * as THREE from 'three';
 import type { WebGPURenderer } from 'three/webgpu';
 import type { DeepReadonly } from '@services/tools/SimulationMetadata';
 import type { MaterialReplayStrategy } from '../../replay/MaterialReplayStrategy';
-import { compileGpuSweeps, GPU_SWEEP_STRIDE, type CompiledGpuSweep } from './GpuSweepCompiler';
+import {
+  compileGpuSweeps,
+  GPU_SWEEP_HEADER_STRIDE,
+  type CompiledGpuSweep,
+} from './GpuSweepCompiler';
 import { recordGpuDiagnostic } from './GpuDiagnostics';
 import { GpuDexelHistory } from './GpuDexelHistory';
 import { GpuDexelStock } from './GpuDexelStock';
@@ -63,6 +67,7 @@ export interface GpuReplayOptions {
   refinementDelayMs?: number;
   residentBytes?: number;
   memoryLimitBytes?: number;
+  bindingLimitBytes?: number;
   onRefined(frame: GpuReplayFrame): void;
   onRefinementError(error: Error): void;
 }
@@ -107,6 +112,7 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
   private readonly checkpointStocks = new Set<GpuDexelStock>();
   private readonly knownCapacity = new Map<'coarse' | 'fine', DexelIntervalCapacity>();
   private readonly memoryLimitBytes: number;
+  private readonly bindingLimitBytes: number;
   private finePitchMm: number;
   private currentPosition = 0;
   private progress: (processed: number, total: number) => void = () => {};
@@ -118,6 +124,18 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
     private readonly options: GpuReplayOptions,
   ) {
     this.memoryLimitBytes = options.memoryLimitBytes ?? DEXEL_MEMORY_BYTES;
+    const requestedBindingLimit = options.bindingLimitBytes ?? DEXEL_BINDING_BYTES;
+    const deviceBindingLimit = device.limits?.maxStorageBufferBindingSize;
+    this.bindingLimitBytes =
+      typeof deviceBindingLimit === 'number' && deviceBindingLimit > 0
+        ? Math.min(requestedBindingLimit, deviceBindingLimit)
+        : requestedBindingLimit;
+    if (
+      !Number.isSafeInteger(this.bindingLimitBytes) ||
+      this.bindingLimitBytes < 16 * 1024 * 1024
+    ) {
+      throw new SimulationCapabilityError('GPU storage binding limit must be at least 16 MiB');
+    }
     this.finePitchMm = options.finePitchMm;
     if (
       !Number.isFinite(this.finePitchMm) ||
@@ -178,7 +196,7 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
                 .length
             : 0
         : steps.length;
-      if (input.motions.length * (GPU_SWEEP_STRIDE * 4 + 256) > 32 * 1024 * 1024)
+      if (input.motions.length * (GPU_SWEEP_HEADER_STRIDE * 4 + 256) > 32 * 1024 * 1024)
         throw new SimulationCapabilityError(
           'GPU cutter compilation exceeds its 32 MiB staging budget; use CPU simulation',
         );
@@ -500,14 +518,19 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
               new Set([...history.tiles(step), ...(source?.layout.storedTiles ?? [])]),
             )
           : source?.layout.storedTiles;
+        const isCylinder = input.stock.type === 'cylinder';
         const layout = createDexelLayout(size, pitch, intervalCapacity, {
           bounds: sweeps.map((sweep) => sweep.bounds),
           retainedTiles,
           memoryLimitBytes: this.memoryLimitBytes,
+          bindingLimitBytes: this.bindingLimitBytes,
+          cylinder: isCylinder,
         });
-        const index = indexDexelTiles(layout, sweeps, this.memoryLimitBytes);
+        const index = indexDexelTiles(layout, sweeps, this.memoryLimitBytes, isCylinder);
         const staging = layout.tiles * 96 + index.sweeps.length * 16;
-        const records = sweeps.length * (GPU_SWEEP_STRIDE * 12 + 320);
+        // Compiled sweeps are already accounted for in compiledSweepBytes; reserve only the GPU staging arrays.
+        const recordWords = sweeps.reduce((words, s) => words + s.data.length, 0);
+        const records = recordWords * 8 + sweeps.length * 128;
         const cutTiles = history
           ? Uint32Array.from(
               history.work(source ? sourceStep : -1, step).reduce<number[]>((tiles, count, i) => {
@@ -546,7 +569,9 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
           layout.estimatedBytes +
           staging +
           records +
-          (rotationalBase?.estimatedBytes ?? 0) * 2 +
+          (rotationalBase && rotationalBase !== this.rotationalBase
+            ? rotationalBase.estimatedBytes
+            : 0) +
           4096 -
           (arena ? 2 * (layout.intervalBytes + Math.max(1, layout.storageRays) * 4) : 0);
         this.makeRoom(baseBytes, source ?? (arena ? arenaProvider : undefined));
@@ -557,12 +582,13 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
           (phase === 'coarse' || sweeps.length <= 512);
         const tileBytes = 2 * 1024 * (intervalCapacity * 8 + 4) + 12;
         const spare = Math.max(0, this.memoryLimitBytes - this.residentBytes() - baseBytes);
-        // Reserve a bounded atlas, leaving most spare memory for streamed history.
+        // Reserve a bounded atlas; fine stocks without history omit speculative extra slots.
+        const maxExtraTiles = phase === 'fine' && !capture ? 0 : layout.storedTiles.length * 3;
         const arenaTiles = !arena
           ? Math.min(
-              layout.storedTiles.length * 4,
+              layout.storedTiles.length + maxExtraTiles,
               layout.storedTiles.length + Math.floor(spare / 3 / tileBytes),
-              Math.floor(DEXEL_BINDING_BYTES / (1024 * intervalCapacity * 8)),
+              Math.floor(this.bindingLimitBytes / (1024 * intervalCapacity * 8)),
             )
           : layout.storedTiles.length;
         const arenaExtra = !arena ? (arenaTiles - layout.storedTiles.length) * tileBytes : 0;
@@ -599,8 +625,10 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
             rotationalBase,
             updateBase,
             memoryLimitBytes: this.memoryLimitBytes,
+            bindingLimitBytes: this.bindingLimitBytes,
             preparedLayout: layout,
             preparedIndex: index,
+            sharedSweeps: true,
           },
         );
         const attemptStarted = performance.now();

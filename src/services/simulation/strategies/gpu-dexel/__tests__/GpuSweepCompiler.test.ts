@@ -11,10 +11,12 @@ import {
   compileGpuSweeps,
   evaluateGpuSweep,
   evaluateGpuSweepRayCuts,
+  GPU_SWEEP_HEADER_STRIDE,
   GPU_SWEEP_MAX_PLANES,
   GPU_SWEEP_STRIDE,
   GPU_SWEEP_WGSL,
   GPU_SWEEP_RAY_WGSL,
+  packGpuSweepRecords,
   usesAnalyticalBallSweepRayCuts,
   usesAnalyticalFlatRayCuts,
   usesAnalyticalProfileRayCuts,
@@ -154,6 +156,7 @@ describe('GPU continuous sweep compiler', () => {
     config.motions[1].executionStep = 19;
     const before = JSON.stringify(config);
     const sweeps = compileGpuSweeps(config);
+    expect(GPU_SWEEP_HEADER_STRIDE).toBe(32);
     expect(GPU_SWEEP_STRIDE).toBe(288);
     expect(GPU_SWEEP_MAX_PLANES).toBe(64);
     expect(GPU_SWEEP_STRIDE % 4).toBe(0);
@@ -161,13 +164,14 @@ describe('GPU continuous sweep compiler', () => {
       [0, 7],
       [1, 19],
     ]);
-    expect(sweeps[0].data).toHaveLength(GPU_SWEEP_STRIDE);
+    expect(sweeps[0].data).toHaveLength(GPU_SWEEP_HEADER_STRIDE);
     expect(sweeps[0].data).not.toBe(sweeps[1].data);
     expect(sweeps[0].data.every(Number.isFinite)).toBe(true);
+    expect(packGpuSweepRecords(sweeps)).toHaveLength(sweeps.length * GPU_SWEEP_HEADER_STRIDE);
     expect(JSON.stringify(config)).toBe(before);
     expect(compileGpuSweeps(input([]))).toEqual([]);
     expect(GPU_SWEEP_WGSL).toContain('fn gpuSweepDistance(point: vec3f, sweep: u32) -> f32');
-    expect(GPU_SWEEP_WGSL).toContain('GPU_SWEEP_VEC4_STRIDE: u32 = 72u');
+    expect(GPU_SWEEP_WGSL).toContain('GPU_SWEEP_VEC4_STRIDE: u32 = 8u');
     expect(GPU_SWEEP_WGSL + GPU_SWEEP_RAY_WGSL).not.toMatch(/ptr\s*<\s*storage\b/);
   });
 

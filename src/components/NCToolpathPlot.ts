@@ -316,6 +316,8 @@ export class NCToolpathPlot extends HTMLElement {
           default: sim?.cpuResolutionMm?.default ?? DEFAULT_SIMULATION_CONFIG.cpuResolutionMm.default,
         },
         stockMemoryMiB: sim?.stockMemoryMiB ?? DEFAULT_SIMULATION_CONFIG.stockMemoryMiB,
+        gpuStorageBindingMiB:
+          sim?.gpuStorageBindingMiB ?? DEFAULT_SIMULATION_CONFIG.gpuStorageBindingMiB,
         gpuStockPixelBudget: {
           min: sim?.gpuStockPixelBudget?.min ?? DEFAULT_SIMULATION_CONFIG.gpuStockPixelBudget.min,
           max: sim?.gpuStockPixelBudget?.max ?? DEFAULT_SIMULATION_CONFIG.gpuStockPixelBudget.max,
@@ -383,6 +385,10 @@ export class NCToolpathPlot extends HTMLElement {
 
   private getConfiguredStockMemoryBytes(): number {
     return Math.round(this.simulationConfig.stockMemoryMiB * 1024 * 1024);
+  }
+
+  private getConfiguredStorageBindingBytes(): number {
+    return Math.round(this.simulationConfig.gpuStorageBindingMiB * 1024 * 1024);
   }
 
   private createStockSurfaceMaterial(): THREE.Material {
@@ -532,6 +538,7 @@ export class NCToolpathPlot extends HTMLElement {
       finePitchMm,
       residentBytes: this.gpuWarmupStock?.estimatedBytes ?? 0,
       memoryLimitBytes: this.getConfiguredStockMemoryBytes(),
+      bindingLimitBytes: this.getConfiguredStorageBindingBytes(),
       isCurrent: (session) => this.materialReplay === session && !this.stale,
       onFallback: (reason) => { this.gpuFallbackReason = reason; },
       onRefined: (frame, session) => {
@@ -1920,9 +1927,41 @@ export class NCToolpathPlot extends HTMLElement {
 
     if (navigator.gpu) {
       try {
+        if (this.configService) {
+          try {
+            const cfg = await this.configService.getConfig();
+            if (cfg.simulation?.gpuStorageBindingMiB) {
+              this.simulationConfig.gpuStorageBindingMiB = cfg.simulation.gpuStorageBindingMiB;
+            }
+          } catch {
+            // Keep default binding limit
+          }
+        }
         const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
         if (!adapter) throw new Error('No WebGPU adapter');
-        const device = await adapter.requestDevice();
+        const configuredBindingBytes = this.getConfiguredStorageBindingBytes();
+        const adapterLimits = adapter.limits as Partial<GPUSupportedLimits> | undefined;
+        const maxBinding =
+          typeof adapterLimits?.maxStorageBufferBindingSize === 'number'
+            ? Math.min(
+                Math.max(128 * 1024 * 1024, configuredBindingBytes),
+                adapterLimits.maxStorageBufferBindingSize,
+              )
+            : configuredBindingBytes;
+        const maxBuffer =
+          typeof adapterLimits?.maxBufferSize === 'number'
+            ? Math.min(Math.max(256 * 1024 * 1024, configuredBindingBytes), adapterLimits.maxBufferSize)
+            : Math.max(256 * 1024 * 1024, configuredBindingBytes);
+        const device = await adapter.requestDevice(
+          adapterLimits
+            ? {
+                requiredLimits: {
+                  maxStorageBufferBindingSize: maxBinding,
+                  maxBufferSize: maxBuffer,
+                },
+              }
+            : undefined,
+        );
         const renderer = new WebGPURenderer({ antialias: true, device });
         try { await renderer.init(); }
         catch (error) { await renderer.dispose(); device.destroy(); throw error; }

@@ -23,6 +23,7 @@ export class VsCodeConfigService implements IConfigService {
       gpuPitchMm: { ...DEFAULT_SIMULATION_CONFIG.gpuPitchMm },
       cpuResolutionMm: { ...DEFAULT_SIMULATION_CONFIG.cpuResolutionMm },
       stockMemoryMiB: DEFAULT_SIMULATION_CONFIG.stockMemoryMiB,
+      gpuStorageBindingMiB: DEFAULT_SIMULATION_CONFIG.gpuStorageBindingMiB,
       gpuStockPixelBudget: { ...DEFAULT_SIMULATION_CONFIG.gpuStockPixelBudget },
     },
   }; // Defaults
@@ -39,7 +40,7 @@ export class VsCodeConfigService implements IConfigService {
     if ((window as any).ncedit7labHostMode) {
       this.config.hostMode = (window as any).ncedit7labHostMode;
     }
-    
+
     // VS Code passes some settings initially via the webview HTML
     if ((window as any).vscodeConfig) {
       this.mergeConfig((window as any).vscodeConfig);
@@ -98,6 +99,6 @@ export class VsCodeConfigService implements IConfigService {
   }
 
   private notifyListeners() {
-    this.listeners.forEach(cb => cb(this.config));
+    this.listeners.forEach((cb) => cb(this.config));
   }
 }

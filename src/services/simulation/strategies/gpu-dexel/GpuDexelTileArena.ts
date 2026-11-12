@@ -16,6 +16,7 @@ export class GpuDexelTileArena {
     readonly tiles: number,
     readonly capacity: DexelIntervalCapacity,
     memoryLimitBytes: number = DEXEL_MEMORY_BYTES,
+    bindingLimitBytes: number = DEXEL_BINDING_BYTES,
   ) {
     const intervalBytes = Math.max(1, tiles * 1024) * capacity * 8;
     this.estimatedBytes = 2 * (intervalBytes + Math.max(1, tiles * 1024) * 4) + tiles * 12;
@@ -23,7 +24,7 @@ export class GpuDexelTileArena {
       !Number.isSafeInteger(tiles) ||
       tiles < 0 ||
       ![4, 8, 16, 32, 64].includes(capacity) ||
-      intervalBytes > DEXEL_BINDING_BYTES ||
+      intervalBytes > bindingLimitBytes ||
       this.estimatedBytes > memoryLimitBytes
     )
       throw new SimulationCapabilityError('GPU tile arena exceeds storage or memory limits');

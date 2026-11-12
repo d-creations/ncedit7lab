@@ -24,6 +24,7 @@ import {
 } from 'three/tsl';
 import {
   createDexelLayout,
+  DEXEL_BINDING_BYTES,
   DEXEL_INTERVALS,
   DEXEL_MAX_INTERVALS,
   DEXEL_MEMORY_BYTES,
@@ -34,9 +35,9 @@ import {
   type DexelTileIndex,
 } from './DexelLayout';
 import {
-  GPU_SWEEP_STRIDE,
   GPU_SWEEP_WGSL,
   GPU_SWEEP_RAY_WGSL,
+  packGpuSweepRecords,
   type CompiledGpuSweep,
   usesAnalyticalBallSweepRayCuts,
   usesAnalyticalFlatRayCuts,
@@ -61,8 +62,16 @@ export function dexelDispatchRays(tileRanges: Uint32Array, allAnalytical = false
   let maxTileSweeps = 1;
   for (let i = 1; i < tileRanges.length; i += 2)
     maxTileSweeps = Math.max(maxTileSweeps, Math.min(DEXEL_PASS_SWEEPS, tileRanges[i]));
-  const budget = allAnalytical ? 262144 : 65536;
-  return Math.max(64, Math.min(DEXEL_DISPATCH_RAYS, Math.floor(budget / maxTileSweeps / 64) * 64));
+  if (allAnalytical) {
+    // Closed-form analytical ray cuts take ~20 ALU ops per sweep (vs ~80 ternary/bisection field evals),
+    // allowing full 16,384-ray dispatches without exceeding GPU TDR budgets.
+    const analyticalBudget = 4194304;
+    return Math.max(
+      64,
+      Math.min(DEXEL_DISPATCH_RAYS, Math.floor(analyticalBudget / maxTileSweeps / 64) * 64),
+    );
+  }
+  return Math.max(64, Math.min(DEXEL_DISPATCH_RAYS, Math.floor(65536 / maxTileSweeps / 64) * 64));
 }
 
 export function dexelDispatchRanges(ranges: Uint32Array, entryOffset: number): [number, number][] {
@@ -930,8 +939,10 @@ export class GpuDexelStock {
   private computeShader?: string;
   private readonly dispatchRays: number;
   private readonly maxTileSweeps: number;
-  private readonly tileRanges: Uint32Array;
+  private tileRanges: Uint32Array;
   private readonly tileIndices: StorageBufferAttribute;
+  private readonly computeTileSweeps: StorageBufferAttribute;
+  private readonly sweepBytes: number;
   readonly tileSlots: Uint32Array;
   readonly timings = {
     copyMs: 0,
@@ -953,6 +964,7 @@ export class GpuDexelStock {
   private readonly copyKey: string;
   private readonly baseTransitionSource?: object;
   private readonly memoryLimitBytes: number;
+  private readonly bindingLimitBytes: number;
 
   constructor(
     private readonly renderer: WebGPURenderer,
@@ -974,12 +986,16 @@ export class GpuDexelStock {
       rotationalBase?: RotationalDexelBase;
       updateBase?: boolean;
       memoryLimitBytes?: number;
+      bindingLimitBytes?: number;
       preparedLayout?: DexelLayout;
       preparedIndex?: DexelTileIndex;
+      sharedSweeps?: boolean;
     },
   ) {
     const memoryLimitBytes = sparse?.memoryLimitBytes ?? DEXEL_MEMORY_BYTES;
+    const bindingLimitBytes = sparse?.bindingLimitBytes ?? DEXEL_BINDING_BYTES;
     this.memoryLimitBytes = memoryLimitBytes;
+    this.bindingLimitBytes = bindingLimitBytes;
     this.rotationalBase = sparse?.rotationalBase;
     if ((this.rotationalBase?.maxIntervals ?? 0) > intervalCapacity)
       throw new GpuDexelIntervalOverflowError(intervalCapacity);
@@ -1015,6 +1031,8 @@ export class GpuDexelStock {
               bounds: sweeps.map((sweep) => sweep.bounds),
               retainedTiles: sparse.retainedTiles,
               memoryLimitBytes,
+              bindingLimitBytes,
+              cylinder,
             }
           : undefined,
       );
@@ -1022,7 +1040,8 @@ export class GpuDexelStock {
     this.analyticalProfileSweeps = sweeps.filter(
       (sweep) => usesAnalyticalProfileRayCuts(sweep) || usesAnalyticalBallSweepRayCuts(sweep),
     ).length;
-    const index = sparse?.preparedIndex ?? indexDexelTiles(this.layout, sweeps, memoryLimitBytes);
+    const index =
+      sparse?.preparedIndex ?? indexDexelTiles(this.layout, sweeps, memoryLimitBytes, cylinder);
     this.tileRanges = index.ranges;
     this.tileSlots = new Uint32Array(this.layout.tiles).fill(0xffffffff);
     const source = sparse?.source;
@@ -1058,6 +1077,7 @@ export class GpuDexelStock {
         Math.max(this.layout.storedTiles.length, sparse?.arenaTiles ?? 0),
         intervalCapacity,
         memoryLimitBytes,
+        bindingLimitBytes,
       );
     const privateSet = new Set(this.privateTiles);
     this.tileArena.acquire();
@@ -1068,15 +1088,16 @@ export class GpuDexelStock {
           : this.tileArena.allocate();
     });
     const baseWords = this.rotationalBase?.words ?? new Uint32Array(1);
-    const mappedIndices = new Uint32Array(
-      this.layout.tiles + baseWords.length + index.sweeps.length,
-    );
-    mappedIndices.set(this.tileSlots);
-    mappedIndices.set(baseWords, this.layout.tiles);
-    mappedIndices.set(index.sweeps, this.layout.tiles + baseWords.length);
-    for (let i = 0; i < index.ranges.length; i += 2)
-      index.ranges[i] += this.layout.tiles + baseWords.length;
-    this.maxTileSweeps = index.ranges.reduce(
+    const displayIndices = new Uint32Array(this.layout.tiles + baseWords.length);
+    displayIndices.set(this.tileSlots);
+    displayIndices.set(baseWords, this.layout.tiles);
+    const indexRanges = new Uint32Array(index.ranges);
+    const mappedIndices = new Uint32Array(displayIndices.length + index.sweeps.length);
+    mappedIndices.set(displayIndices);
+    mappedIndices.set(index.sweeps, displayIndices.length);
+    for (let i = 0; i < indexRanges.length; i += 2) indexRanges[i] += displayIndices.length;
+    this.tileRanges = indexRanges;
+    this.maxTileSweeps = indexRanges.reduce(
       (maximum, value, i) => (i % 2 === 1 ? Math.max(maximum, value) : maximum),
       0,
     );
@@ -1084,17 +1105,16 @@ export class GpuDexelStock {
     const allAnalytical =
       sweeps.length > 0 &&
       this.analyticalFlatSweeps + this.analyticalProfileSweeps >= sweeps.length * 0.9;
-    this.dispatchRays = dexelDispatchRays(index.ranges, allAnalytical);
+    this.dispatchRays = dexelDispatchRays(indexRanges, allAnalytical);
     const passCapacity =
       Math.max(1, Math.min(DEXEL_PASS_SWEEPS, this.maxTileSweeps)) *
       Math.max(1, Math.min(this.dispatchRays, this.layout.storageRays)) *
       4;
     const captureEvents = historyEvents ? Math.min(historyEvents, passCapacity) : 1;
     this.captureAttribute = new StorageBufferAttribute(new Uint32Array(captureEvents * 4), 4);
-    const recordData = new Float32Array(Math.max(4, sweeps.length * GPU_SWEEP_STRIDE));
+    const recordData = packGpuSweepRecords(sweeps);
     const boundData = new Float32Array(Math.max(8, sweeps.length * 8));
     sweeps.forEach((sweep, i) => {
-      recordData.set(sweep.data, i * GPU_SWEEP_STRIDE);
       const bOffset = i * 8;
       boundData[bOffset] = sweep.bounds.min.x;
       boundData[bOffset + 1] = sweep.bounds.min.y;
@@ -1103,16 +1123,20 @@ export class GpuDexelStock {
       boundData[bOffset + 5] = sweep.bounds.max.y;
       boundData[bOffset + 6] = sweep.bounds.max.z;
     });
+    this.sweepBytes = sparse?.sharedSweeps
+      ? sweeps.length * 64
+      : sweeps.reduce((sum, sweep) => sum + sweep.data.byteLength + 256, 0);
     this.estimatedBytes =
       this.layout.estimatedBytes +
       this.tileArena.estimatedBytes -
       2 * (this.layout.intervalBytes + Math.max(1, this.layout.storageRays) * 4) +
-      index.bytes +
-      this.layout.tiles * 12 +
+      2 * (index.ranges.byteLength + mappedIndices.byteLength + displayIndices.byteLength) +
       this.captureAttribute.array.byteLength * 2 +
       2 * (recordData.byteLength + boundData.byteLength) +
-      sweeps.reduce((sum, sweep) => sum + sweep.data.byteLength + 256, 0);
-    this.estimatedBytes += (this.rotationalBase?.estimatedBytes ?? 0) + baseWords.byteLength * 2;
+      this.sweepBytes;
+    if (!sparse?.sharedSweeps) {
+      this.estimatedBytes += this.rotationalBase?.estimatedBytes ?? 0;
+    }
     if (this.estimatedBytes > memoryLimitBytes) {
       this.tileArena.release(this.layout.storedTiles.map((tile) => this.tileSlots[tile]));
       throw new SimulationCapabilityError(
@@ -1123,9 +1147,11 @@ export class GpuDexelStock {
     this.countAttribute = this.tileArena.counts;
     const records = new StorageBufferAttribute(recordData, 4),
       bounds = new StorageBufferAttribute(boundData, 4);
-    const ranges = new StorageBufferAttribute(index.ranges, 2),
-      indices = new StorageBufferAttribute(mappedIndices, 1);
+    const ranges = new StorageBufferAttribute(indexRanges, 2),
+      indices = new StorageBufferAttribute(displayIndices, 1),
+      computeSweeps = new StorageBufferAttribute(mappedIndices, 1);
     this.tileIndices = indices;
+    this.computeTileSweeps = computeSweeps;
     this.attributes = [
       this.intervalAttribute,
       this.countAttribute,
@@ -1133,6 +1159,7 @@ export class GpuDexelStock {
       bounds,
       ranges,
       indices,
+      computeSweeps,
       this.errorAttribute,
       this.captureAttribute,
     ];
@@ -1157,7 +1184,9 @@ export class GpuDexelStock {
         .setName('dexelBounds')
         .toReadOnly(),
       storage(ranges, 'uvec2', this.layout.tiles).setName('dexelTileRanges').toReadOnly(),
-      storage(indices, 'uint', mappedIndices.length).setName('dexelTileSweeps').toReadOnly(),
+      storage(this.computeTileSweeps, 'uint', mappedIndices.length)
+        .setName('dexelTileSweeps')
+        .toReadOnly(),
       intervals,
       counts,
       storage(this.errorAttribute, 'uint', 4).setName('dexelErrors').toAtomic(),
@@ -1194,7 +1223,7 @@ export class GpuDexelStock {
     const readCounts = storage(this.countAttribute, 'uint', this.countAttribute.array.length)
       .setName('dexelCounts')
       .toReadOnly();
-    const readTiles = storage(indices, 'uint', mappedIndices.length)
+    const readTiles = storage(indices, 'uint', displayIndices.length)
       .setName('dexelTileSweeps')
       .toReadOnly();
     const displayHelpers = code(
@@ -1661,6 +1690,7 @@ export class GpuDexelStock {
           this.sweeps,
           this.historyKey,
           this.memoryLimitBytes,
+          this.bindingLimitBytes,
         );
         this.historyUnavailable = undefined;
       } catch (error) {
@@ -1696,8 +1726,9 @@ export class GpuDexelStock {
     if (!this.calculated || this.sealed) return;
     this.sealed = true;
     this.computeNode.dispose();
-    this.estimatedBytes -= this.sweeps.reduce((sum, sweep) => sum + sweep.data.byteLength + 256, 0);
+    this.estimatedBytes -= this.sweepBytes;
     this.sweeps = [];
+    this.tileRanges = new Uint32Array(0);
     for (const attribute of this.attributes) {
       if (
         attribute === this.intervalAttribute ||

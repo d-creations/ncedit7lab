@@ -23,6 +23,7 @@ export class WebConfigService implements IConfigService {
       gpuPitchMm: { ...DEFAULT_SIMULATION_CONFIG.gpuPitchMm },
       cpuResolutionMm: { ...DEFAULT_SIMULATION_CONFIG.cpuResolutionMm },
       stockMemoryMiB: DEFAULT_SIMULATION_CONFIG.stockMemoryMiB,
+      gpuStorageBindingMiB: DEFAULT_SIMULATION_CONFIG.gpuStorageBindingMiB,
       gpuStockPixelBudget: { ...DEFAULT_SIMULATION_CONFIG.gpuStockPixelBudget },
     },
   }; // Defaults
@@ -83,6 +84,6 @@ export class WebConfigService implements IConfigService {
   }
 
   private notifyListeners() {
-    this.listeners.forEach(cb => cb(this.config));
+    this.listeners.forEach((cb) => cb(this.config));
   }
 }

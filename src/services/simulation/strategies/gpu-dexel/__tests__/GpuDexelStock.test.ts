@@ -10,7 +10,11 @@ import {
   dexelHistorySubmission,
   GpuDexelStock,
 } from '../GpuDexelStock';
-import { GPU_SWEEP_STRIDE, type CompiledGpuSweep } from '../GpuSweepCompiler';
+import {
+  GPU_SWEEP_HEADER_STRIDE,
+  GPU_SWEEP_STRIDE,
+  type CompiledGpuSweep,
+} from '../GpuSweepCompiler';
 import { GpuDexelIntervalOverflowError, type DexelIntervalCapacity } from '../DexelLayout';
 import { GpuDexelHistory } from '../GpuDexelHistory';
 import { RotationalProfile } from '../../cpu-hybrid/RotationalProfile';
@@ -361,7 +365,7 @@ describe('bounded GPU dexel submissions', () => {
         await f.stock.calculate(sweeps.length);
         const bytes = f.stock.estimatedBytes;
         f.stock.releasePreparation();
-        expect(f.stock.estimatedBytes).toBeLessThan(bytes - 200 * GPU_SWEEP_STRIDE * 8);
+        expect(f.stock.estimatedBytes).toBeLessThan(bytes - 200 * GPU_SWEEP_HEADER_STRIDE * 8);
         const retained = f.stock.estimatedBytes;
         f.stock.releasePreparation();
         expect(f.stock.estimatedBytes).toBe(retained);
@@ -516,7 +520,9 @@ describe('bounded GPU dexel submissions', () => {
         Reflect.set(builder, 'camera', new THREE.PerspectiveCamera());
         const fragment = generateShader(builder, 'fragmentShader');
         fragments.push(fragment);
-        expect(fragment).toContain('gpuDexelIntervals(ray, size, dims, capacity, cylinder, &spans)');
+        expect(fragment).toContain(
+          'gpuDexelIntervals(ray, size, dims, capacity, cylinder, &spans)',
+        );
         expect(fragment).not.toContain('gpuDexelCount(');
         expect(fragment).not.toContain('gpuDexelSpan(');
         expect(fragment).not.toContain('gpuOriginalCount(');

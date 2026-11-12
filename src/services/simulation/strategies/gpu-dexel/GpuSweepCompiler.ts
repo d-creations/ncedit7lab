@@ -17,8 +17,34 @@ export interface CompiledGpuSweep {
 }
 
 export const GPU_SWEEP_MAX_PLANES = 64;
-/** 72 vec4s / 1152 bytes per record. Never use a motion index as a record index. */
+/** 8 vec4s / 128 bytes per milling header; turning appends variable plane vec4s. */
+export const GPU_SWEEP_HEADER_STRIDE = 8 * 4;
+/** 72 vec4s / 1152 bytes maximum record size (8 header vec4s + up to 64 turning planes). */
 export const GPU_SWEEP_STRIDE = (8 + GPU_SWEEP_MAX_PLANES) * 4;
+
+export function packGpuSweepRecords(sweeps: readonly CompiledGpuSweep[]): Float32Array {
+  let totalVec4s = sweeps.length * 8;
+  for (let i = 0; i < sweeps.length; i++) {
+    const d = sweeps[i].data;
+    if (d[0] === 5) totalVec4s += Math.max(0, Math.floor(d[28]));
+  }
+  const packed = new Float32Array(Math.max(4, totalVec4s * 4));
+  let planeVec4Offset = sweeps.length * 8;
+  for (let i = 0; i < sweeps.length; i++) {
+    const d = sweeps[i].data;
+    const headerOffset = i * 32;
+    packed.set(d.subarray(0, 32), headerOffset);
+    if (d[0] === 5) {
+      const planeCount = Math.max(0, Math.floor(d[28]));
+      packed[headerOffset + 31] = planeVec4Offset;
+      if (planeCount > 0) {
+        packed.set(d.subarray(32, 32 + planeCount * 4), planeVec4Offset * 4);
+        planeVec4Offset += planeCount;
+      }
+    }
+  }
+  return packed;
+}
 
 export function usesAnalyticalFlatRayCuts(sweep: CompiledGpuSweep): boolean {
   const d = sweep.data;
@@ -156,9 +182,9 @@ export function compileGpuSweeps(input: DeepReadonly<SimulationInput>): Compiled
       cutter = new CuttingToolModel(motion.tool, motion.executedQ);
       variants.set(motion.executedQ, cutter);
     }
-    const data = new Float32Array(GPU_SWEEP_STRIDE);
     let bounds: THREE.Box3;
     let turningVolume: ImplicitVolume | undefined;
+    let data: Float32Array;
     let usedWords = 32;
     if (motion.mode === 'turning') {
       const volume = buildTurningSweep(
@@ -174,6 +200,8 @@ export function compileGpuSweeps(input: DeepReadonly<SimulationInput>): Compiled
       const planes = section!.planes!;
       if (planes.length > GPU_SWEEP_MAX_PLANES)
         fail(`turning section has ${planes.length} planes; maximum is ${GPU_SWEEP_MAX_PLANES}`);
+      usedWords = 32 + planes.length * 4;
+      data = new Float32Array(usedWords);
       data[0] = 5;
       data[20] = spindleOrigin.x;
       data[21] = spindleOrigin.y;
@@ -192,7 +220,6 @@ export function compileGpuSweeps(input: DeepReadonly<SimulationInput>): Compiled
         data[base + 1] = plane.y;
         data[base + 2] = plane.offset;
       }
-      usedWords = 32 + planes.length * 4;
       bounds = volume.bounds.clone();
     } else {
       const part = cutter.part;
@@ -200,6 +227,7 @@ export function compileGpuSweeps(input: DeepReadonly<SimulationInput>): Compiled
         throw new SimulationCapabilityError(
           `GPU sweep ${motionIndex}: insert milling is unsupported`,
         );
+      data = new Float32Array(GPU_SWEEP_HEADER_STRIDE);
       data[0] =
         part.type === 'ballMill' ? 2 : part.type === 'drill' ? 3 : part.cornerRadius ? 4 : 1;
       data[1] = part.diameter / 2;
@@ -332,7 +360,16 @@ function quadratic(a: number, b: number, c: number, candidate: (t: number) => vo
 /** CPU reference reads only the public float32 record, not hidden geometry metadata. */
 export function evaluateGpuSweep(sweep: CompiledGpuSweep, point: THREE.Vector3): number {
   const d = sweep.data;
-  if (d.length !== GPU_SWEEP_STRIDE || !point.toArray().every(Number.isFinite))
+  const requiredWords =
+    d.length >= GPU_SWEEP_HEADER_STRIDE && d[0] === 5
+      ? GPU_SWEEP_HEADER_STRIDE + Math.max(0, Math.floor(d[28])) * 4
+      : GPU_SWEEP_HEADER_STRIDE;
+  if (
+    d.length < requiredWords ||
+    d.length > GPU_SWEEP_STRIDE ||
+    d.length % 4 !== 0 ||
+    !point.toArray().every(Number.isFinite)
+  )
     throw new SimulationCapabilityError(
       'GPU sweep evaluation requires a full record and finite point',
     );
@@ -448,7 +485,7 @@ export function evaluateGpuSweep(sweep: CompiledGpuSweep, point: THREE.Vector3):
 
 /** WGSL helpers use Three.js's global storage struct for browser portability. */
 export const GPU_SWEEP_WGSL = /* wgsl */ `
-const GPU_SWEEP_VEC4_STRIDE: u32 = ${GPU_SWEEP_STRIDE / 4}u;
+const GPU_SWEEP_VEC4_STRIDE: u32 = ${GPU_SWEEP_HEADER_STRIDE / 4}u;
 
 fn gpuSweepPartField(p: vec3f, shape: vec4f, angle: vec2f) -> f32 {
   let r = length(p.xy);
@@ -500,8 +537,9 @@ fn gpuSweepDistance(point: vec3f, sweep: u32) -> f32 {
     let radial = length(relative - axial * axis);
     var positive = -1e30;
     var negative = -1e30;
+    let planeBase = select(base + 8u, u32(sweepInfo.w), sweepInfo.w > 0.0);
     for (var i = 0u; i < u32(sweepInfo.x); i++) {
-      let plane = dexelRecords.value[base + 8u + i];
+      let plane = dexelRecords.value[planeBase + i];
       let divisor = max(1.0, length(plane.xy));
       positive = max(positive, (plane.x * radial + plane.y * axial + plane.z) / divisor);
       negative = max(negative, (-plane.x * radial + plane.y * axial + plane.z) / divisor);
@@ -579,8 +617,13 @@ export function evaluateGpuSweepRayCuts(
   limits: readonly [number, number],
 ): GpuSweepRayCuts {
   const data = sweep.data;
-  if (data.length !== GPU_SWEEP_STRIDE) return 99;
-  for (let i = 0; i < GPU_SWEEP_STRIDE; i++) {
+  const requiredWords =
+    data.length >= GPU_SWEEP_HEADER_STRIDE && data[0] === 5
+      ? GPU_SWEEP_HEADER_STRIDE + Math.max(0, Math.floor(data[28])) * 4
+      : GPU_SWEEP_HEADER_STRIDE;
+  if (data.length < requiredWords || data.length > GPU_SWEEP_STRIDE || data.length % 4 !== 0)
+    return 99;
+  for (let i = 0; i < data.length; i++) {
     if (!Number.isFinite(data[i])) return 99;
   }
   const ox = origin.x,
@@ -1752,8 +1795,10 @@ fn gpuSweepRayCuts(origin:vec3f,direction:vec3f,limits:vec2f,sweep:u32,cuts:ptr<
     var intervals: array<vec2f,4>;
     intervals[0] = vec2f(0.0,1.0);
     var intervalCount = 1u;
+    let planeBase = select(base + 8u, u32(sweepInfo.w), sweepInfo.w > 0.0);
+    if (planeBase + u32(sweepInfo.x) > arrayLength(&dexelRecords.value)) { return 99u; }
     for (var planeIndex=0u; planeIndex<u32(sweepInfo.x); planeIndex++) {
-      let plane = dexelRecords.value[base+8u+planeIndex];
+      let plane = dexelRecords.value[planeBase+planeIndex];
       if (!all(abs(plane.xyz) < vec3f(1e29))) { return 99u; }
       let normalSquared = dot(plane.xy,plane.xy);
       if (!(normalSquared > 0.0) || normalSquared > 4.0) { return 99u; }

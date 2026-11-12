@@ -16,20 +16,22 @@ export class RotationalDexelBase {
 
   constructor(profile: RotationalProfile) {
     this.radius = profile.radius;
-    this.slabs = profile.meridianSlabs.map((slab) =>
-      Object.freeze({
-        lower: slab.lower,
-        upper: slab.upper,
-        intervals: Object.freeze(
-          slab.intervals.map((band) =>
-            Object.freeze({
-              lower: Object.freeze({ ...band.lower }),
-              upper: Object.freeze({ ...band.upper }),
-            }),
+    this.slabs = profile.meridianSlabs
+      .filter((slab) => slab.upper - slab.lower > 1e-12)
+      .map((slab) =>
+        Object.freeze({
+          lower: slab.lower,
+          upper: slab.upper,
+          intervals: Object.freeze(
+            slab.intervals.map((band) =>
+              Object.freeze({
+                lower: Object.freeze({ ...band.lower }),
+                upper: Object.freeze({ ...band.upper }),
+              }),
+            ),
           ),
-        ),
-      }),
-    );
+        }),
+      );
     Object.freeze(this.slabs);
     this.fingerprint = JSON.stringify([profile.radius, profile.length, this.slabs]);
     const levels = [
@@ -44,9 +46,33 @@ export class RotationalDexelBase {
       ),
     ].sort((a, b) => a - b);
     const radii = [...levels, ...levels.slice(1).map((r, i) => (r + levels[i]) / 2)];
+    let maxTransverseIntervals = 1;
+    for (const slab of this.slabs) {
+      for (const z of [slab.lower, (slab.lower + slab.upper) * 0.5, slab.upper]) {
+        const spans: Span[] = [];
+        for (const band of slab.intervals) {
+          const lo = Math.max(0, band.lower.slope * z + band.lower.offset);
+          const hi = Math.max(0, band.upper.slope * z + band.upper.offset);
+          if (hi <= 0) continue;
+          if (lo > 0) spans.push([-hi, -lo], [lo, hi]);
+          else spans.push([-hi, hi]);
+        }
+        spans.sort((a, b) => a[0] - b[0]);
+        let mergedCount = 0;
+        let lastEnd = -Infinity;
+        const mergeEps = Math.max(1e-6, this.radius * 1e-6);
+        for (const [a, b] of spans) {
+          if (mergedCount && a <= lastEnd + mergeEps) lastEnd = Math.max(lastEnd, b);
+          else {
+            mergedCount++;
+            lastEnd = b;
+          }
+        }
+        if (mergedCount > maxTransverseIntervals) maxTransverseIntervals = mergedCount;
+      }
+    }
     this.maxIntervals = Math.max(
-      1,
-      ...this.slabs.map((s) => s.intervals.length * 2),
+      maxTransverseIntervals,
       ...radii.map((r) => this.intervals(2, new THREE.Vector3(r, 0, 0)).length),
     );
     if (this.maxIntervals > 64)
@@ -115,9 +141,10 @@ export class RotationalDexelBase {
     }
     result.sort((a, b) => a[0] - b[0]);
     const merged: Span[] = [];
+    const mergeEps = Math.max(1e-6, this.radius * 1e-6);
     for (const span of result) {
       const last = merged.at(-1);
-      if (last && span[0] <= last[1]) last[1] = Math.max(last[1], span[1]);
+      if (last && span[0] <= last[1] + mergeEps) last[1] = Math.max(last[1], span[1]);
       else merged.push(span);
     }
     return merged;
@@ -129,7 +156,8 @@ export class RotationalDexelBase {
       const lo = Math.max(bounds.min.z, Math.min(slab.lower, Math.fround(slab.lower))),
         hi = Math.min(bounds.max.z, Math.max(slab.upper, Math.fround(slab.upper)));
       if (lo > hi || !slab.intervals.length) continue;
-      let radius = 0;
+      let outerRadius = 0;
+      let innerRadius = Infinity;
       for (const band of slab.intervals) {
         const line = band.upper;
         const slope = Math.fround(line.slope),
@@ -138,16 +166,40 @@ export class RotationalDexelBase {
           8 *
           2 ** -23 *
           (Math.abs(slope) * Math.max(Math.abs(lo), Math.abs(hi)) + Math.abs(offset) + 1);
-        radius = Math.max(
-          radius,
+        outerRadius = Math.max(
+          outerRadius,
           line.slope * lo + line.offset,
           line.slope * hi + line.offset,
           slope * lo + offset + roundoff,
           slope * hi + offset + roundoff,
         );
+        const lowLine = band.lower;
+        const lowSlope = Math.fround(lowLine.slope),
+          lowOffset = Math.fround(lowLine.offset);
+        const lowRoundoff =
+          8 *
+          2 ** -23 *
+          (Math.abs(lowSlope) * Math.max(Math.abs(lo), Math.abs(hi)) + Math.abs(lowOffset) + 1);
+        innerRadius = Math.min(
+          innerRadius,
+          Math.max(0, lowLine.slope * lo + lowLine.offset),
+          Math.max(0, lowLine.slope * hi + lowLine.offset),
+          Math.max(0, lowSlope * lo + lowOffset - lowRoundoff),
+          Math.max(0, lowSlope * hi + lowOffset - lowRoundoff),
+        );
       }
-      radius = Math.min(this.radius, radius);
-      // Conservative outer bounds only: bores and annuli are resolved by ray intersections.
+      const radius = Math.min(this.radius, outerRadius);
+      // If the cutter XY box lies strictly inside a turned bore, this slab has no material to cut.
+      if (innerRadius > 0) {
+        const maxCornerSq =
+          Math.max(Math.abs(bounds.min.x), Math.abs(bounds.max.x)) ** 2 +
+          Math.max(Math.abs(bounds.min.y), Math.abs(bounds.max.y)) ** 2;
+        if (maxCornerSq < innerRadius * innerRadius) continue;
+      }
+      // If the cutter XY box lies strictly outside the turned outer circle (corner gap), skip this slab.
+      const nearX = Math.max(bounds.min.x, Math.min(0, bounds.max.x));
+      const nearY = Math.max(bounds.min.y, Math.min(0, bounds.max.y));
+      if (nearX * nearX + nearY * nearY > radius * radius) continue;
       const part = new THREE.Box3(
         new THREE.Vector3(-radius, -radius, lo),
         new THREE.Vector3(radius, radius, hi),
@@ -226,11 +278,12 @@ fn gpuOriginalPointIntervals(axis: u32, point: vec3f, size: vec3f, dims: vec3f, 
       }
       for (var j = 0u; j < n; j++) {
         // Insert/union in sorted order, including adjacent axial slabs.
+        let mergeEps = max(1e-6, max(size.x, size.z) * 5e-7);
         var cut = spans[j]; var at = 0u;
-        loop { if (at >= count || (*segments)[at].y >= cut.x) { break; } at++; }
+        loop { if (at >= count || (*segments)[at].y + mergeEps >= cut.x) { break; } at++; }
         var end = at;
         loop {
-          if (end >= count || (*segments)[end].x > cut.y) { break; }
+          if (end >= count || (*segments)[end].x > cut.y + mergeEps) { break; }
           cut = vec2f(min(cut.x, (*segments)[end].x), max(cut.y, (*segments)[end].y)); end++;
         }
         if (at == end && count == 64u) { return 99u; }

@@ -40,9 +40,16 @@ export function createDexelLayout(
   size: THREE.Vector3,
   pitchMm: number,
   intervalCapacity: DexelIntervalCapacity = DEXEL_INTERVALS,
-  sparse?: { bounds: readonly THREE.Box3[]; retainedTiles?: Uint32Array; memoryLimitBytes?: number },
+  sparse?: {
+    bounds: readonly THREE.Box3[];
+    retainedTiles?: Uint32Array;
+    memoryLimitBytes?: number;
+    bindingLimitBytes?: number;
+    cylinder?: boolean;
+  },
 ): DexelLayout {
   const memoryLimitBytes = sparse?.memoryLimitBytes ?? DEXEL_MEMORY_BYTES;
+  const bindingLimitBytes = sparse?.bindingLimitBytes ?? DEXEL_BINDING_BYTES;
   if (![4, 8, 16, 32, 64].includes(intervalCapacity))
     throw new SimulationCapabilityError('GPU interval capacity must be 4, 8, 16, 32 or 64');
   if (
@@ -77,7 +84,8 @@ export function createDexelLayout(
       if (!Number.isSafeInteger(tile) || tile < 0 || tile >= tiles)
         throw new SimulationCapabilityError('Invalid retained GPU tile');
     for (const bounds of sparse!.bounds)
-      for (const tile of dexelTilesForBounds(geometry, bounds)) selected.add(tile);
+      for (const tile of dexelTilesForBounds(geometry, bounds, sparse!.cylinder))
+        selected.add(tile);
   }
   const storedTiles = selected
     ? Uint32Array.from([...selected].sort((a, b) => a - b))
@@ -89,11 +97,11 @@ export function createDexelLayout(
     2 * (intervalBytes + Math.max(1, storageRays) * 4 + tiles * 16) + storedTiles.byteLength + 4096;
   if (
     !Number.isSafeInteger(rays) ||
-    intervalBytes > DEXEL_BINDING_BYTES ||
+    intervalBytes > bindingLimitBytes ||
     estimatedBytes > memoryLimitBytes
   ) {
     throw new SimulationCapabilityError(
-      `GPU stock at ${pitchMm} mm needs approximately ${(estimatedBytes / 1048576).toFixed(1)} MiB including CPU/GPU buffers, or exceeds the 128 MiB storage binding limit. Use a larger pitch or smaller stock; resolution is not silently reduced.`,
+      `GPU stock at ${pitchMm} mm needs approximately ${(estimatedBytes / 1048576).toFixed(1)} MiB including CPU/GPU buffers, or exceeds the ${Math.round(bindingLimitBytes / 1048576)} MiB storage binding limit. Use a larger pitch or smaller stock; resolution is not silently reduced.`,
     );
   }
   return {
@@ -115,6 +123,7 @@ export function createDexelLayout(
 export function dexelTilesForBounds(
   layout: Pick<DexelLayout, 'size' | 'dimensions' | 'tileCounts'>,
   bounds: THREE.Box3,
+  cylinder = false,
 ): number[] {
   if (
     bounds.isEmpty() ||
@@ -126,6 +135,10 @@ export function dexelTilesForBounds(
   )
     return [];
   const result: number[] = [];
+  const radius = layout.size.x / 2;
+  const radiusSq = radius * radius;
+  const stepX = layout.size.x / layout.dimensions.x;
+  const stepY = layout.size.y / layout.dimensions.y;
   let base = 0;
   for (let axis = 0; axis < 3; axis++) {
     const u = axis === 0 ? 1 : 0,
@@ -143,7 +156,33 @@ export function dexelTilesForBounds(
     const loV = Math.max(0, coordinate(bounds.min.getComponent(v), v));
     const hiV = Math.min(tilesV - 1, coordinate(bounds.max.getComponent(v), v));
     for (let y = loV; y <= hiV; y++)
-      for (let x = loU; x <= hiU; x++) result.push(base + x + tilesU * y);
+      for (let x = loU; x <= hiU; x++) {
+        if (cylinder) {
+          if (axis === 2) {
+            const minX = -layout.size.x / 2 + (x * DEXEL_TILE_SIZE + 0.5) * stepX;
+            const maxX =
+              -layout.size.x / 2 +
+              (Math.min(layout.dimensions.x - 1, (x + 1) * DEXEL_TILE_SIZE - 1) + 0.5) * stepX;
+            const minY = -layout.size.y / 2 + (y * DEXEL_TILE_SIZE + 0.5) * stepY;
+            const maxY =
+              -layout.size.y / 2 +
+              (Math.min(layout.dimensions.y - 1, (y + 1) * DEXEL_TILE_SIZE - 1) + 0.5) * stepY;
+            const nearX = Math.max(minX, Math.min(0, maxX));
+            const nearY = Math.max(minY, Math.min(0, maxY));
+            if (nearX * nearX + nearY * nearY >= radiusSq) continue;
+          } else {
+            const stepRad = axis === 0 ? stepY : stepX;
+            const dimRad = axis === 0 ? layout.dimensions.y : layout.dimensions.x;
+            const sizeRad = axis === 0 ? layout.size.y : layout.size.x;
+            const minR = -sizeRad / 2 + (x * DEXEL_TILE_SIZE + 0.5) * stepRad;
+            const maxR =
+              -sizeRad / 2 + (Math.min(dimRad - 1, (x + 1) * DEXEL_TILE_SIZE - 1) + 0.5) * stepRad;
+            const nearR = Math.max(minR, Math.min(0, maxR));
+            if (nearR * nearR >= radiusSq) continue;
+          }
+        }
+        result.push(base + x + tilesU * y);
+      }
     base += layout.tileCounts[axis];
   }
   return result;
@@ -197,6 +236,7 @@ export function indexDexelTiles(
   layout: DexelLayout,
   sweeps: readonly CompiledGpuSweep[],
   memoryLimitBytes: number = DEXEL_MEMORY_BYTES,
+  cylinder = false,
 ): DexelTileIndex {
   const stagingBase = layout.tiles * 96;
   if (layout.estimatedBytes + stagingBase > memoryLimitBytes)
@@ -205,7 +245,7 @@ export function indexDexelTiles(
   const touchedPerSweep: number[][] = new Array(sweeps.length);
   let entries = 0;
   for (let i = 0; i < sweeps.length; i++) {
-    const touched = dexelTilesForBounds(layout, sweeps[i].bounds);
+    const touched = dexelTilesForBounds(layout, sweeps[i].bounds, cylinder);
     touchedPerSweep[i] = touched;
     entries += touched.length;
     if (layout.estimatedBytes + stagingBase + entries * 16 > memoryLimitBytes)

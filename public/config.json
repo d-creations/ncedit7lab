@@ -26,6 +26,7 @@
       "default": 0.05
     },
     "stockMemoryMiB": 512,
+    "gpuStorageBindingMiB": 256,
     "gpuStockPixelBudget": {
       "min": 500000,
       "max": 1500000,

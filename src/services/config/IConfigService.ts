@@ -1,8 +1,10 @@
-export type HostMode = 'web' | 'vscode-editor' | 'vscode-panel' | 'vscode-templates' | 'vscode-tools';
+export type HostMode =
+  'web' | 'vscode-editor' | 'vscode-panel' | 'vscode-templates' | 'vscode-tools';
 
 export type TransferPlacement = 'side-panel' | 'bottom-panel' | 'external-panel' | 'disabled';
 export type TransferProtocol = 'ftp' | 'focas' | 'smb' | 'usb' | 'none';
-export type TemplatesPlacement = 'auto' | 'web-tab' | 'workbench-right' | 'workbench-left' | 'disabled';
+export type TemplatesPlacement =
+  'auto' | 'web-tab' | 'workbench-right' | 'workbench-left' | 'disabled';
 export type ToolsPlacement = 'auto' | 'workbench-right' | 'workbench-left' | 'disabled';
 export type TemplateStorageMode = 'local' | 'workspace' | 'host';
 
@@ -18,6 +20,7 @@ export interface SimulationConfiguration {
   gpuPitchMm: { min: number; max: number; default: number };
   cpuResolutionMm: { min: number; max: number; default: number };
   stockMemoryMiB: number;
+  gpuStorageBindingMiB: number;
   gpuStockPixelBudget: SimulationPixelBudgetConfig;
 }
 
@@ -47,6 +50,7 @@ export const DEFAULT_SIMULATION_CONFIG: SimulationConfiguration = {
   gpuPitchMm: { min: 0.001, max: 0.2, default: 0.02 },
   cpuResolutionMm: { min: 0.05, max: 0.2, default: 0.05 },
   stockMemoryMiB: 256,
+  gpuStorageBindingMiB: 128,
   gpuStockPixelBudget: {
     min: 250_000,
     max: 1_500_000,
@@ -58,7 +62,7 @@ export const DEFAULT_SIMULATION_CONFIG: SimulationConfiguration = {
 export interface IConfigService {
   /** Gets the full current configuration object */
   getConfig(): Promise<AppConfiguration>;
-  
+
   /** Gets a specific configuration key */
   get<K extends keyof AppConfiguration>(key: K): Promise<AppConfiguration[K]>;
 

@@ -21,6 +21,7 @@ export interface ReplayStrategyOptions {
   finePitchMm: number;
   residentBytes: number;
   memoryLimitBytes?: number;
+  bindingLimitBytes?: number;
   isCurrent(strategy: MaterialReplayStrategy): boolean;
   onFallback(reason: string): void;
   onRefined(frame: GpuReplayFrame, strategy: MaterialReplayStrategy): void;
@@ -73,7 +74,9 @@ export function createReplayStrategy(options: ReplayStrategyOptions): MaterialRe
     },
     async start(captured, timeline, progress: ReplayProgress = () => {}, prepareFinal = false) {
       if (cancelled) throw new DOMException('Material replay cancelled', 'AbortError');
-      input = options.memoryLimitBytes ? { ...captured, stockBytes: options.memoryLimitBytes } : captured;
+      input = options.memoryLimitBytes
+        ? { ...captured, stockBytes: options.memoryLimitBytes }
+        : captured;
       steps = [...timeline];
       if (
         options.gpuEnabled &&
@@ -132,6 +135,7 @@ export function createReplayStrategy(options: ReplayStrategyOptions): MaterialRe
       finePitchMm: options.finePitchMm,
       residentBytes: options.residentBytes,
       memoryLimitBytes: options.memoryLimitBytes,
+      bindingLimitBytes: options.bindingLimitBytes,
       onRefined: (frame) => {
         if (selected === gpu && current()) options.onRefined(frame, strategy);
       },

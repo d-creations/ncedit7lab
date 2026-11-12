@@ -545,7 +545,12 @@ describe('symmetry-aware hybrid turning replay', () => {
     const replay = session();
     const apply = vi.spyOn(RotationalProfile.prototype, 'apply');
     try {
-      const pending = replay.start(input(motions), motions.map((cut) => cut.executionStep), () => {}, true);
+      const pending = replay.start(
+        input(motions),
+        motions.map((cut) => cut.executionStep),
+        () => {},
+        true,
+      );
       const rejected = expect(pending).rejects.toMatchObject({ name: 'AbortError' });
       expect(replay.computing).toBe(true);
       expect(apply).toHaveBeenCalledTimes(16);
@@ -570,7 +575,7 @@ describe('symmetry-aware hybrid turning replay', () => {
       expect(frame.backend).toBe('webgpu-dexel');
       expect(reduce).toHaveBeenCalledOnce();
       expect(frame.estimatedBytes).toBeGreaterThan(
-        sweeps.length * (sweepCompiler.GPU_SWEEP_STRIDE * 4 + 256),
+        sweeps.reduce((bytes, sweep) => bytes + sweep.data.byteLength + 256, 0),
       );
     } finally {
       compile.mockRestore();
@@ -589,7 +594,12 @@ describe('symmetry-aware hybrid turning replay', () => {
       if (sweep.turningVolume) expected.apply(sweep.turningVolume, () => {});
     const apply = vi.spyOn(RotationalProfile.prototype, 'apply');
     try {
-      const pending = session().start(config, motions.map((cut) => cut.executionStep), () => {}, true);
+      const pending = session().start(
+        config,
+        motions.map((cut) => cut.executionStep),
+        () => {},
+        true,
+      );
       expect(apply).toHaveBeenCalledTimes(16);
       await vi.advanceTimersByTimeAsync(10);
       const frame = await pending;

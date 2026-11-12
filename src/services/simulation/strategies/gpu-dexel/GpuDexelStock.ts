@@ -31,6 +31,7 @@ import {
   indexDexelTiles,
   type DexelLayout,
   type DexelIntervalCapacity,
+  type DexelTileIndex,
 } from './DexelLayout';
 import {
   GPU_SWEEP_STRIDE,
@@ -973,6 +974,8 @@ export class GpuDexelStock {
       rotationalBase?: RotationalDexelBase;
       updateBase?: boolean;
       memoryLimitBytes?: number;
+      preparedLayout?: DexelLayout;
+      preparedIndex?: DexelTileIndex;
     },
   ) {
     const memoryLimitBytes = sparse?.memoryLimitBytes ?? DEXEL_MEMORY_BYTES;
@@ -1001,23 +1004,25 @@ export class GpuDexelStock {
     )
       throw new SimulationCapabilityError('Invalid GPU history retention limit');
     this.recordHistory.value = historyEvents ? 1 : 0;
-    this.layout = createDexelLayout(
-      size,
-      pitchMm,
-      intervalCapacity,
-      sparse
-        ? {
-            bounds: sweeps.map((sweep) => sweep.bounds),
-            retainedTiles: sparse.retainedTiles,
-            memoryLimitBytes,
-          }
-        : undefined,
-    );
+    this.layout =
+      sparse?.preparedLayout ??
+      createDexelLayout(
+        size,
+        pitchMm,
+        intervalCapacity,
+        sparse
+          ? {
+              bounds: sweeps.map((sweep) => sweep.bounds),
+              retainedTiles: sparse.retainedTiles,
+              memoryLimitBytes,
+            }
+          : undefined,
+      );
     this.analyticalFlatSweeps = sweeps.filter(usesAnalyticalFlatRayCuts).length;
     this.analyticalProfileSweeps = sweeps.filter(
       (sweep) => usesAnalyticalProfileRayCuts(sweep) || usesAnalyticalBallSweepRayCuts(sweep),
     ).length;
-    const index = indexDexelTiles(this.layout, sweeps, memoryLimitBytes);
+    const index = sparse?.preparedIndex ?? indexDexelTiles(this.layout, sweeps, memoryLimitBytes);
     this.tileRanges = index.ranges;
     this.tileSlots = new Uint32Array(this.layout.tiles).fill(0xffffffff);
     const source = sparse?.source;
@@ -1534,7 +1539,7 @@ export class GpuDexelStock {
             : dexelDispatchRanges(this.tileRanges, entryOffset);
         this.assertWritable(ranges);
         for (const [start, rays] of ranges) {
-          for (let offset = start; offset < start + rays; ) {
+          for (let offset = start; offset < start + rays;) {
             const count = Math.min(submission.rays, start + rays - offset);
             if (this.disposed || cancelled())
               throw new DOMException('GPU stock calculation cancelled', 'AbortError');

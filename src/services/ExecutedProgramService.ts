@@ -194,11 +194,17 @@ export class ExecutedProgramService {
         ? materials[0]
         : undefined;
     if (sharedMaterial) {
-      const primaryFrameId =
-        results[0]?.plotMetadata?.segments
-          .flatMap((seg) => seg.poses ?? [])
-          .find((pose) => typeof pose.frameId === 'string' && pose.frameId.length > 0)?.frameId ??
-        captured[0]?.machineProfile?.simulation?.stockBindings?.[0]?.frameId;
+      let primaryFrameId: string | undefined;
+      for (const seg of results[0]?.plotMetadata?.segments ?? []) {
+        const pose = seg.poses?.find(
+          (candidate) => typeof candidate.frameId === 'string' && candidate.frameId.length > 0,
+        );
+        if (pose) {
+          primaryFrameId = pose.frameId;
+          break;
+        }
+      }
+      primaryFrameId ??= captured[0]?.machineProfile?.simulation?.stockBindings?.[0]?.frameId;
       results = results.map((result, index) =>
         result.plotMetadata
           ? {

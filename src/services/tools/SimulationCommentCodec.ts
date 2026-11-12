@@ -77,31 +77,252 @@ function unwrap(line: string, syntax: SimulationCommentSyntax): string | undefin
   // Nested/terminated comments must never be mistaken for one safe payload line.
   return /[()]/.test(inner) ? undefined : inner.trimStart();
 }
-function boundedJSON(json: string): unknown {
-  if (json.length > METADATA_LIMITS.value) error('Metadata value exceeds size limit');
-  let depth = 0;
-  let quoted = false;
-  let escaped = false;
-  for (const char of json) {
-    if (quoted) {
-      if (escaped) escaped = false;
-      else if (char === '\\') escaped = true;
-      else if (char === '"') quoted = false;
-    } else if (char === '"') quoted = true;
-    else if (char === '[' || char === '{') {
-      if (++depth > METADATA_LIMITS.depth) error('Metadata nesting exceeds limit');
-    } else if (char === ']' || char === '}') depth--;
+function setObjectField(target: Record<string, unknown>, key: string, value: unknown): void {
+  Object.defineProperty(target, key, {
+    value,
+    enumerable: true,
+    configurable: true,
+    writable: true,
+  });
+}
+function encodeString(value: string): string {
+  return `"${value.replace(
+    /["\\();%<>&{}@\u0000-\u001f\u007f-\uffff]/g,
+    (char) => `@u${char.charCodeAt(0).toString(16).padStart(4, '0')}`,
+  )}"`;
+}
+function encodeMetadataValue(value: unknown, depth = 0): string {
+  if (typeof value === 'string') return encodeString(value);
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) error('Metadata number must be finite');
+    return String(value);
   }
-  return JSON.parse(json);
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  if (value === null) return 'null';
+  if (depth + 1 > METADATA_LIMITS.depth) error('Metadata nesting exceeds limit');
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => encodeMetadataValue(item, depth + 1)).join(',')}]`;
+  }
+  if (typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>).filter(
+      ([, item]) => item !== undefined,
+    );
+    if (entries.length === 0) return '[:]';
+    return `[${entries
+      .map(([key, item]) => `${encodeString(key)}:${encodeMetadataValue(item, depth + 1)}`)
+      .join(',')}]`;
+  }
+  error('Unsupported metadata value');
+}
+function boundedJSON(input: string, fieldKey?: string): unknown {
+  if (input.length > METADATA_LIMITS.value) error('Metadata value exceeds size limit');
+  let pos = 0;
+  let depth = 0;
+  const skipWhitespace = (): void => {
+    while (pos < input.length && (input[pos] === ' ' || input[pos] === '\t' || input[pos] === '\r' || input[pos] === '\n')) {
+      pos++;
+    }
+  };
+  const parseString = (): string => {
+    if (input[pos] !== '"') error('Expected string');
+    pos++;
+    let out = '';
+    while (pos < input.length) {
+      const ch = input[pos++];
+      if (ch === '"') return out;
+      if (ch === '\\') {
+        if (pos >= input.length) error('Unterminated string escape');
+        const esc = input[pos++];
+        if (esc === 'u') {
+          const hex = input.slice(pos, pos + 4);
+          if (!/^[0-9a-fA-F]{4}$/.test(hex)) error('Invalid unicode escape');
+          pos += 4;
+          out += String.fromCharCode(parseInt(hex, 16));
+        } else if (esc === '"' || esc === '\\' || esc === '/') out += esc;
+        else if (esc === 'b') out += '\b';
+        else if (esc === 'f') out += '\f';
+        else if (esc === 'n') out += '\n';
+        else if (esc === 'r') out += '\r';
+        else if (esc === 't') out += '\t';
+        else error('Invalid string escape');
+      } else if (
+        (ch === '@' || ch === ' ') &&
+        input[pos] === 'u' &&
+        /^[0-9a-fA-F]{4}$/.test(input.slice(pos + 1, pos + 5))
+      ) {
+        const hex = input.slice(pos + 1, pos + 5);
+        pos += 5;
+        out += String.fromCharCode(parseInt(hex, 16));
+      } else if (ch.charCodeAt(0) < 0x20) {
+        error('Invalid control character in string');
+      } else {
+        out += ch;
+      }
+    }
+    error('Unterminated string');
+  };
+  const parseUnbracedObject = (firstKey: string): Record<string, unknown> => {
+    if (++depth > METADATA_LIMITS.depth) error('Metadata nesting exceeds limit');
+    pos++; // consume ':'
+    const obj: Record<string, unknown> = {};
+    setObjectField(obj, firstKey, parseValue(true));
+    while (true) {
+      skipWhitespace();
+      if (input[pos] !== ',') break;
+      pos++;
+      skipWhitespace();
+      const key = parseString();
+      skipWhitespace();
+      if (input[pos] !== ':') error('Expected colon after object key');
+      pos++;
+      setObjectField(obj, key, parseValue(true));
+    }
+    depth--;
+    return obj;
+  };
+  const parseBracedObject = (): Record<string, unknown> => {
+    pos++; // consume '{'
+    if (++depth > METADATA_LIMITS.depth) error('Metadata nesting exceeds limit');
+    const obj: Record<string, unknown> = {};
+    skipWhitespace();
+    if (input[pos] === '}') {
+      pos++;
+      depth--;
+      return obj;
+    }
+    while (true) {
+      skipWhitespace();
+      const key = parseString();
+      skipWhitespace();
+      if (input[pos] !== ':') error('Expected colon after object key');
+      pos++;
+      setObjectField(obj, key, parseValue(false));
+      skipWhitespace();
+      if (input[pos] === ',') {
+        pos++;
+        continue;
+      }
+      if (input[pos] === '}') {
+        pos++;
+        depth--;
+        return obj;
+      }
+      error('Expected comma or closing brace');
+    }
+  };
+  const parseBracketContainer = (): unknown => {
+    pos++; // consume '['
+    if (++depth > METADATA_LIMITS.depth) error('Metadata nesting exceeds limit');
+    skipWhitespace();
+    if (input[pos] === ']') {
+      pos++;
+      depth--;
+      return [];
+    }
+    if (input[pos] === ':') {
+      pos++;
+      skipWhitespace();
+      if (input[pos] !== ']') error('Invalid empty bracket object');
+      pos++;
+      depth--;
+      return {};
+    }
+    const first = parseValue(false);
+    skipWhitespace();
+    if (input[pos] === ':') {
+      if (typeof first !== 'string') error('Bracket object key must be a string');
+      pos++;
+      const obj: Record<string, unknown> = {};
+      setObjectField(obj, first, parseValue(true));
+      while (true) {
+        skipWhitespace();
+        if (input[pos] === ',') {
+          pos++;
+          skipWhitespace();
+          const key = parseString();
+          skipWhitespace();
+          if (input[pos] !== ':') error('Expected colon after bracket object key');
+          pos++;
+          setObjectField(obj, key, parseValue(true));
+          continue;
+        }
+        if (input[pos] === ']') {
+          pos++;
+          depth--;
+          return obj;
+        }
+        error('Expected comma or closing bracket in object');
+      }
+    }
+    const arr: unknown[] = [first];
+    while (true) {
+      skipWhitespace();
+      if (input[pos] === ',') {
+        pos++;
+        arr.push(parseValue(false));
+        continue;
+      }
+      if (input[pos] === ']') {
+        pos++;
+        depth--;
+        return arr;
+      }
+      error('Expected comma or closing bracket in array');
+    }
+  };
+  const parsePrimitive = (): unknown => {
+    if (input.startsWith('true', pos)) {
+      pos += 4;
+      return true;
+    }
+    if (input.startsWith('false', pos)) {
+      pos += 5;
+      return false;
+    }
+    if (input.startsWith('null', pos)) {
+      pos += 4;
+      return null;
+    }
+    const match = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/.exec(input.slice(pos));
+    if (!match) error('Invalid metadata value');
+    pos += match[0].length;
+    return Number(match[0]);
+  };
+  const parseValue = (allowUnbracedObject: boolean): unknown => {
+    skipWhitespace();
+    if (pos >= input.length) error('Unexpected end of metadata value');
+    const ch = input[pos];
+    if (ch === '"') {
+      const str = parseString();
+      if (allowUnbracedObject) {
+        skipWhitespace();
+        if (input[pos] === ':') return parseUnbracedObject(str);
+      }
+      return str;
+    }
+    if (ch === '[') return parseBracketContainer();
+    if (ch === '{') return parseBracedObject();
+    return parsePrimitive();
+  };
+  const parsed = parseValue(true);
+  skipWhitespace();
+  if (pos !== input.length) error('Unexpected trailing metadata characters');
+  if (
+    (fieldKey === 'holder' || fieldKey === 'cutting' || fieldKey === 'offsets') &&
+    parsed &&
+    typeof parsed === 'object' &&
+    !Array.isArray(parsed) &&
+    /^\[\s*"/.test(input.trimStart())
+  ) {
+    return [parsed];
+  }
+  return parsed;
 }
 function encodeJSON(value: unknown): string {
-  // Escape delimiters and non-ASCII UTF-16 code units, including surrogates, without changing values.
-  const json = JSON.stringify(value).replace(
-    /[();%<>&\u007f-\uffff]/g,
-    (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`,
-  );
-  boundedJSON(json);
-  return json;
+  // Encode objects with CNC-safe square brackets and escape special/non-ASCII chars with @uXXXX (no {, }, or \).
+  const encoded = encodeMetadataValue(value);
+  boundedJSON(encoded);
+  return encoded;
 }
 function encodeRecord(key: string, value: unknown, syntax: SimulationCommentSyntax): string[] {
   const json = encodeJSON(value);
@@ -112,8 +333,8 @@ function encodeRecord(key: string, value: unknown, syntax: SimulationCommentSynt
   if (capacity < 6) error('Comment line limit is too small for safe continuation records');
   const chunks: string[] = [];
   let chunk = '';
-  // Treat each JSON escape as an atomic unit; never split \uXXXX or an escaped backslash.
-  for (const token of json.match(/\\u[0-9a-fA-F]{4}|\\.|[^\\]/g) ?? []) {
+  // Treat each @uXXXX or JSON escape as an atomic unit; never split an escape across continuation lines.
+  for (const token of json.match(/@u[0-9a-fA-F]{4}|\\u[0-9a-fA-F]{4}|\\.|[^@\\]/g) ?? []) {
     if (chunk.length + token.length > capacity) {
       chunks.push(chunk);
       chunk = '';
@@ -145,7 +366,7 @@ function decodeRecords(payloads: string[]): Record<string, unknown> {
         if (json.length > METADATA_LIMITS.value) error('Metadata value exceeds size limit');
       }
     }
-    value[key] = boundedJSON(json);
+    value[key] = boundedJSON(json, key);
   }
   return value;
 }

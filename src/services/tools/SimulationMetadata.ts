@@ -421,9 +421,13 @@ export function validateProgramMaterial(value: unknown): ProgramMaterialDefiniti
 
 /** Freeze owned JSON values, including nested geometry arrays (readonly types alone are insufficient). */
 export function freezeMetadata<T>(value: T): DeepReadonly<T> {
-  if (value && typeof value === 'object') {
-    Object.values(value).forEach(freezeMetadata);
+  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
     Object.freeze(value);
+    if (Array.isArray(value)) {
+      for (let i = 0; i < value.length; i++) freezeMetadata(value[i]);
+    } else {
+      for (const entry of Object.values(value)) freezeMetadata(entry);
+    }
   }
   return value as DeepReadonly<T>;
 }

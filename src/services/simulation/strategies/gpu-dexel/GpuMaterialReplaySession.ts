@@ -382,8 +382,7 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
     // Turning-only material and asymmetric removals are intersected, never re-revolved.
     if (motionCount <= this.rotationalThrough)
       return this.rotationalFrame(requestedPosition, phase, motionCount);
-    const pitch =
-      phase === 'fine' ? this.finePitchMm : Math.max(0.1, this.finePitchMm);
+    const pitch = phase === 'fine' ? this.finePitchMm : Math.max(0.1, this.finePitchMm);
     const cache = phase === 'fine' ? this.fine : this.coarse;
     for (const stock of [...this.owned]) {
       if (
@@ -600,6 +599,8 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
             rotationalBase,
             updateBase,
             memoryLimitBytes: this.memoryLimitBytes,
+            preparedLayout: layout,
+            preparedIndex: index,
           },
         );
         const attemptStarted = performance.now();
@@ -833,10 +834,12 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
       this.makeRoom(bytes);
     };
     this.progress(0, motionCount);
+    let applied = 0;
     for (let i = from; i < motionCount; i++) {
-      if (i > from && (i - from) % 16 === 0)
-        await new Promise<void>((resolve) => setTimeout(resolve, 0));
       if (!this.implicitTurning[i]) continue;
+      if (applied > 0 && applied % 16 === 0)
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      applied++;
       reserve(profile.allocatedBytes);
       profile.apply(this.compiledSweeps[i].turningVolume!, reserve);
       this.progress(Math.min(i + 1, this.rotationalThrough), motionCount);
@@ -859,8 +862,7 @@ export class GpuMaterialReplaySession implements MaterialReplayStrategy {
     if (input.stock.type !== 'cylinder') throw new Error('Rotational stock requires a cylinder');
     const position = Math.min(requestedPosition, this.safePosition);
     const key = `${phase}:${position}`;
-    const pitch =
-      phase === 'fine' ? this.finePitchMm : Math.max(0.1, this.finePitchMm);
+    const pitch = phase === 'fine' ? this.finePitchMm : Math.max(0.1, this.finePitchMm);
     const epoch = this.epoch;
     let entry = this.revolved.get(key);
     const cacheHit = !!entry;

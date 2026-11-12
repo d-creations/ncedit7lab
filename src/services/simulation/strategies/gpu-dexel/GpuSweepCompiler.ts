@@ -90,6 +90,17 @@ export function compileGpuSweeps(input: DeepReadonly<SimulationInput>): Compiled
     workpieceToStock,
   );
   const cutters = new WeakMap<object, Map<number | undefined, CuttingToolModel>>();
+  const unitScale = new THREE.Vector3(1, 1, 1);
+  const posVec = new THREE.Vector3();
+  const startPoseMat = new THREE.Matrix4();
+  const endPoseMat = new THREE.Matrix4();
+  const partMatrix = new THREE.Matrix4();
+  const inverse = new THREE.Matrix4();
+  const endPartMatrix = new THREE.Matrix4();
+  const travel = new THREE.Vector3();
+  const endBounds = new THREE.Box3();
+  const a = new THREE.Quaternion();
+  const b = new THREE.Quaternion();
   return input.motions.map((motion, motionIndex) => {
     const fail = (message: string): never => {
       throw new SimulationCapabilityError(`GPU sweep ${motionIndex}: ${message}`);
@@ -98,34 +109,43 @@ export function compileGpuSweeps(input: DeepReadonly<SimulationInput>): Compiled
     if (!Number.isSafeInteger(motion.executionStep) || motion.executionStep < 0)
       fail('execution step must be a nonnegative safe integer');
     for (const pose of [motion.start, motion.end]) {
+      const pos = pose.position;
+      const ori = pose.orientation;
       if (
-        pose.position.length !== 3 ||
-        !pose.position.every(Number.isFinite) ||
-        pose.orientation.length !== 4 ||
-        !pose.orientation.every(Number.isFinite) ||
-        Math.abs(Math.hypot(...pose.orientation) - 1) > 1e-6
+        pos.length !== 3 ||
+        !Number.isFinite(pos[0]) ||
+        !Number.isFinite(pos[1]) ||
+        !Number.isFinite(pos[2]) ||
+        ori.length !== 4 ||
+        !Number.isFinite(ori[0]) ||
+        !Number.isFinite(ori[1]) ||
+        !Number.isFinite(ori[2]) ||
+        !Number.isFinite(ori[3]) ||
+        Math.abs(Math.hypot(ori[0], ori[1], ori[2], ori[3]) - 1) > 1e-6
       )
         fail('poses must have finite XYZ positions and unit quaternions');
       if (pose.frameId !== input.binding.frameId)
         fail('pose is not in the explicitly bound stock frame');
     }
-    const a = new THREE.Quaternion(...motion.start.orientation).normalize();
-    const b = new THREE.Quaternion(...motion.end.orientation).normalize();
+    a.set(
+      motion.start.orientation[0],
+      motion.start.orientation[1],
+      motion.start.orientation[2],
+      motion.start.orientation[3],
+    ).normalize();
+    b.set(
+      motion.end.orientation[0],
+      motion.end.orientation[1],
+      motion.end.orientation[2],
+      motion.end.orientation[3],
+    ).normalize();
     if (a.dot(b) < 0) b.set(-b.x, -b.y, -b.z, -b.w);
     if (Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z, a.w - b.w) > 1e-12)
       fail('changing orientations are unsupported; only continuous fixed-orientation sweeps');
-    const poseMatrix = (position: readonly number[]) =>
-      workpieceToStock
-        .clone()
-        .multiply(
-          new THREE.Matrix4().compose(
-            new THREE.Vector3(...position),
-            a,
-            new THREE.Vector3(1, 1, 1),
-          ),
-        );
-    const start = poseMatrix(motion.start.position);
-    const end = poseMatrix(motion.end.position);
+    posVec.set(motion.start.position[0], motion.start.position[1], motion.start.position[2]);
+    startPoseMat.compose(posVec, a, unitScale).premultiply(workpieceToStock);
+    posVec.set(motion.end.position[0], motion.end.position[1], motion.end.position[2]);
+    endPoseMat.compose(posVec, a, unitScale).premultiply(workpieceToStock);
     let variants = cutters.get(motion.tool);
     if (!variants) {
       variants = new Map();
@@ -139,8 +159,15 @@ export function compileGpuSweeps(input: DeepReadonly<SimulationInput>): Compiled
     const data = new Float32Array(GPU_SWEEP_STRIDE);
     let bounds: THREE.Box3;
     let turningVolume: ImplicitVolume | undefined;
+    let usedWords = 32;
     if (motion.mode === 'turning') {
-      const volume = buildTurningSweep(cutter, start, end, spindleOrigin, spindleAxis);
+      const volume = buildTurningSweep(
+        cutter,
+        startPoseMat,
+        endPoseMat,
+        spindleOrigin,
+        spindleAxis,
+      );
       turningVolume = volume;
       const section = volume.rotationalSection;
       if (!section?.planes?.length) fail('turning requires a validated convex meridian section');
@@ -148,13 +175,24 @@ export function compileGpuSweeps(input: DeepReadonly<SimulationInput>): Compiled
       if (planes.length > GPU_SWEEP_MAX_PLANES)
         fail(`turning section has ${planes.length} planes; maximum is ${GPU_SWEEP_MAX_PLANES}`);
       data[0] = 5;
-      data.set(spindleOrigin.toArray(), 20);
+      data[20] = spindleOrigin.x;
+      data[21] = spindleOrigin.y;
+      data[22] = spindleOrigin.z;
       data[23] = section!.polygon.some((point) => point.x >= 0) ? 1 : 0;
-      data.set(spindleAxis.toArray(), 24);
+      data[24] = spindleAxis.x;
+      data[25] = spindleAxis.y;
+      data[26] = spindleAxis.z;
       data[27] = section!.polygon.some((point) => point.x <= 0) ? 1 : 0;
       data[28] = planes.length;
       data[30] = 1;
-      planes.forEach((plane, i) => data.set([plane.x, plane.y, plane.offset, 0], 32 + i * 4));
+      for (let i = 0; i < planes.length; i++) {
+        const plane = planes[i];
+        const base = 32 + i * 4;
+        data[base] = plane.x;
+        data[base + 1] = plane.y;
+        data[base + 2] = plane.offset;
+      }
+      usedWords = 32 + planes.length * 4;
       bounds = volume.bounds.clone();
     } else {
       const part = cutter.part;
@@ -172,26 +210,38 @@ export function compileGpuSweeps(input: DeepReadonly<SimulationInput>): Compiled
         data[7] = Math.cos(angle);
         data[29] = Math.sin(angle);
       }
-      const partMatrix = start.clone().multiply(cutter.partToAssembly);
-      const inverse = partMatrix.clone().invert();
-      const travel = new THREE.Vector3()
-        .setFromMatrixPosition(end.clone().multiply(cutter.partToAssembly))
-        .applyMatrix4(inverse);
+      partMatrix.multiplyMatrices(startPoseMat, cutter.partToAssembly);
+      inverse.copy(partMatrix).invert();
+      endPartMatrix.multiplyMatrices(endPoseMat, cutter.partToAssembly);
+      travel.setFromMatrixPosition(endPartMatrix).applyMatrix4(inverse);
       // Suppress only double-precision rigid-transform cancellation, not actual travel.
-      const cancellation =
-        32 * Number.EPSILON * Math.max(1, ...partMatrix.elements.map(Math.abs), travel.length());
-      for (let axis = 0; axis < 3; axis++)
-        if (Math.abs(travel.getComponent(axis)) < cancellation) travel.setComponent(axis, 0);
+      const pe = partMatrix.elements;
+      let maxElem = Math.max(1, travel.length());
+      for (let i = 0; i < 16; i++) {
+        const abs = Math.abs(pe[i]);
+        if (abs > maxElem) maxElem = abs;
+      }
+      const cancellation = 32 * Number.EPSILON * maxElem;
+      if (Math.abs(travel.x) < cancellation) travel.x = 0;
+      if (Math.abs(travel.y) < cancellation) travel.y = 0;
+      if (Math.abs(travel.z) < cancellation) travel.z = 0;
       const axial = travel.x === 0 && travel.y === 0;
       if (data[0] === 4 && !axial && travel.z !== 0)
         fail(
           'rounded endmills support only axial or lateral travel; diagonal rounded sweep unsupported',
         );
-      data.set(travel.toArray(), 4);
+      data[4] = travel.x;
+      data[5] = travel.y;
+      data[6] = travel.z;
       data[31] = axial && data[0] !== 2 ? 1 : 0;
       const e = inverse.elements;
-      for (let row = 0; row < 3; row++)
-        data.set([e[row], e[row + 4], e[row + 8], e[row + 12]], 8 + row * 4);
+      for (let row = 0; row < 3; row++) {
+        const base = 8 + row * 4;
+        data[base] = e[row];
+        data[base + 1] = e[row + 4];
+        data[base + 2] = e[row + 8];
+        data[base + 3] = e[row + 12];
+      }
       // Gershgorin bound on R R^T compensates float32 affine rotation packing.
       let squaredBound = 1;
       for (let i = 0; i < 3; i++) {
@@ -208,22 +258,47 @@ export function compileGpuSweeps(input: DeepReadonly<SimulationInput>): Compiled
         Math.sqrt(squaredBound) *
         Math.max(1, part.type === 'drill' ? Math.hypot(data[7], data[29]) : 1) *
         (1 + 2 ** -23);
-      bounds = cutter.bounds
-        .clone()
-        .applyMatrix4(start)
-        .union(cutter.bounds.clone().applyMatrix4(end));
+      bounds = cutter.bounds.clone().applyMatrix4(startPoseMat);
+      endBounds.copy(cutter.bounds).applyMatrix4(endPoseMat);
+      bounds.union(endBounds);
     }
+    let finiteData = true;
+    for (let i = 0; i < usedWords; i++) {
+      if (!Number.isFinite(data[i])) {
+        finiteData = false;
+        break;
+      }
+    }
+    const minX = bounds.min.x,
+      minY = bounds.min.y,
+      minZ = bounds.min.z;
+    const maxX = bounds.max.x,
+      maxY = bounds.max.y,
+      maxZ = bounds.max.z;
     if (
-      !data.every(Number.isFinite) ||
-      [...bounds.min.toArray(), ...bounds.max.toArray()].some(
-        (value) => !Number.isFinite(value) || Math.abs(value) > 1_000_000,
-      )
+      !finiteData ||
+      !Number.isFinite(minX) ||
+      !Number.isFinite(minY) ||
+      !Number.isFinite(minZ) ||
+      !Number.isFinite(maxX) ||
+      !Number.isFinite(maxY) ||
+      !Number.isFinite(maxZ) ||
+      Math.abs(minX) > 1_000_000 ||
+      Math.abs(minY) > 1_000_000 ||
+      Math.abs(minZ) > 1_000_000 ||
+      Math.abs(maxX) > 1_000_000 ||
+      Math.abs(maxY) > 1_000_000 ||
+      Math.abs(maxZ) > 1_000_000
     )
       fail('float32 geometry requires finite stock-local bounds within +/-1,000,000 mm');
     const magnitude = Math.max(
       1,
-      ...bounds.min.toArray().map(Math.abs),
-      ...bounds.max.toArray().map(Math.abs),
+      Math.abs(minX),
+      Math.abs(minY),
+      Math.abs(minZ),
+      Math.abs(maxX),
+      Math.abs(maxY),
+      Math.abs(maxZ),
     );
     bounds.expandByScalar(magnitude * 2 ** -19);
     return { executionStep: motion.executionStep, motionIndex, bounds, data, turningVolume };
@@ -504,57 +579,117 @@ export function evaluateGpuSweepRayCuts(
   limits: readonly [number, number],
 ): GpuSweepRayCuts {
   const data = sweep.data;
-  const values = [...origin.toArray(), ...direction.toArray(), ...limits];
+  if (data.length !== GPU_SWEEP_STRIDE) return 99;
+  for (let i = 0; i < GPU_SWEEP_STRIDE; i++) {
+    if (!Number.isFinite(data[i])) return 99;
+  }
+  const ox = origin.x,
+    oy = origin.y,
+    oz = origin.z;
+  const dirX = direction.x,
+    dirY = direction.y,
+    dirZ = direction.z;
+  const lim0 = limits[0],
+    lim1 = limits[1];
   if (
-    data.length !== GPU_SWEEP_STRIDE ||
-    !data.every(Number.isFinite) ||
-    values.some((value) => !Number.isFinite(value) || Math.abs(value) >= 1e29) ||
-    direction.lengthSq() === 0 ||
-    limits[0] > limits[1] ||
-    ![1, 2, 3, 4, 5].includes(data[0]) ||
+    !Number.isFinite(ox) ||
+    !Number.isFinite(oy) ||
+    !Number.isFinite(oz) ||
+    !Number.isFinite(dirX) ||
+    !Number.isFinite(dirY) ||
+    !Number.isFinite(dirZ) ||
+    !Number.isFinite(lim0) ||
+    !Number.isFinite(lim1) ||
+    Math.abs(ox) >= 1e29 ||
+    Math.abs(oy) >= 1e29 ||
+    Math.abs(oz) >= 1e29 ||
+    Math.abs(dirX) >= 1e29 ||
+    Math.abs(dirY) >= 1e29 ||
+    Math.abs(dirZ) >= 1e29 ||
+    Math.abs(lim0) >= 1e29 ||
+    Math.abs(lim1) >= 1e29 ||
+    dirX * dirX + dirY * dirY + dirZ * dirZ === 0 ||
+    lim0 > lim1 ||
+    (data[0] !== 1 && data[0] !== 2 && data[0] !== 3 && data[0] !== 4 && data[0] !== 5) ||
     !(data[30] >= 1)
   )
     return 99;
-  const first = origin.clone().addScaledVector(direction, limits[0]);
-  const travel = direction.clone().multiplyScalar(limits[1] - limits[0]);
-  const last = first.clone().add(travel);
+  const span = lim1 - lim0;
+  const firstX = ox + dirX * lim0,
+    firstY = oy + dirY * lim0,
+    firstZ = oz + dirZ * lim0;
+  const travelX = dirX * span,
+    travelY = dirY * span,
+    travelZ = dirZ * span;
+  const lastX = firstX + travelX,
+    lastY = firstY + travelY,
+    lastZ = firstZ + travelZ;
   if (
-    [...first.toArray(), ...travel.toArray(), ...last.toArray()].some(
-      (value) => !Number.isFinite(value) || Math.abs(value) > 10_000_000,
-    )
+    !Number.isFinite(firstX) ||
+    !Number.isFinite(firstY) ||
+    !Number.isFinite(firstZ) ||
+    !Number.isFinite(travelX) ||
+    !Number.isFinite(travelY) ||
+    !Number.isFinite(travelZ) ||
+    !Number.isFinite(lastX) ||
+    !Number.isFinite(lastY) ||
+    !Number.isFinite(lastZ) ||
+    Math.abs(firstX) > 10_000_000 ||
+    Math.abs(firstY) > 10_000_000 ||
+    Math.abs(firstZ) > 10_000_000 ||
+    Math.abs(travelX) > 10_000_000 ||
+    Math.abs(travelY) > 10_000_000 ||
+    Math.abs(travelZ) > 10_000_000 ||
+    Math.abs(lastX) > 10_000_000 ||
+    Math.abs(lastY) > 10_000_000 ||
+    Math.abs(lastZ) > 10_000_000
   )
     return 99;
+  const first = new THREE.Vector3(firstX, firstY, firstZ);
+  const travel = new THREE.Vector3(travelX, travelY, travelZ);
   const epsilon =
     1e-6 *
     Math.max(
       1,
       data[1],
       data[2],
-      travel.length(),
-      ...first.toArray().map(Math.abs),
-      ...last.toArray().map(Math.abs),
+      Math.hypot(travelX, travelY, travelZ),
+      Math.abs(firstX),
+      Math.abs(firstY),
+      Math.abs(firstZ),
+      Math.abs(lastX),
+      Math.abs(lastY),
+      Math.abs(lastZ),
     );
   const convert = (intervals: [number, number][]): [number, number][] =>
-    intervals.map(([low, high]) => [
-      limits[0] + low * (limits[1] - limits[0]),
-      limits[0] + high * (limits[1] - limits[0]),
-    ]);
+    intervals.map(([low, high]) => [lim0 + low * span, lim0 + high * span]);
   if (usesAnalyticalProfileRayCuts(sweep)) {
     const p = new THREE.Vector3(
-      data[8] * first.x + data[9] * first.y + data[10] * first.z + data[11],
-      data[12] * first.x + data[13] * first.y + data[14] * first.z + data[15],
-      data[16] * first.x + data[17] * first.y + data[18] * first.z + data[19],
+      data[8] * firstX + data[9] * firstY + data[10] * firstZ + data[11],
+      data[12] * firstX + data[13] * firstY + data[14] * firstZ + data[15],
+      data[16] * firstX + data[17] * firstY + data[18] * firstZ + data[19],
     );
     const d = new THREE.Vector3(
-      data[8] * travel.x + data[9] * travel.y + data[10] * travel.z,
-      data[12] * travel.x + data[13] * travel.y + data[14] * travel.z,
-      data[16] * travel.x + data[17] * travel.y + data[18] * travel.z,
+      data[8] * travelX + data[9] * travelY + data[10] * travelZ,
+      data[12] * travelX + data[13] * travelY + data[14] * travelZ,
+      data[16] * travelX + data[17] * travelY + data[18] * travelZ,
     );
     const allowance = epsilon * data[30];
     if (
-      [...p.toArray(), ...d.toArray(), allowance].some(
-        (x) => !Number.isFinite(x) || Math.abs(x) >= 1e14,
-      )
+      !Number.isFinite(p.x) ||
+      !Number.isFinite(p.y) ||
+      !Number.isFinite(p.z) ||
+      !Number.isFinite(d.x) ||
+      !Number.isFinite(d.y) ||
+      !Number.isFinite(d.z) ||
+      !Number.isFinite(allowance) ||
+      Math.abs(p.x) >= 1e14 ||
+      Math.abs(p.y) >= 1e14 ||
+      Math.abs(p.z) >= 1e14 ||
+      Math.abs(d.x) >= 1e14 ||
+      Math.abs(d.y) >= 1e14 ||
+      Math.abs(d.z) >= 1e14 ||
+      Math.abs(allowance) >= 1e14
     )
       return 99;
     const low = data[0] === 3 ? Math.min(0, data[6]) : 0;
@@ -620,23 +755,44 @@ export function evaluateGpuSweepRayCuts(
   }
   if (usesAnalyticalFlatRayCuts(sweep)) {
     const p = new THREE.Vector3(
-      data[8] * first.x + data[9] * first.y + data[10] * first.z + data[11],
-      data[12] * first.x + data[13] * first.y + data[14] * first.z + data[15],
-      data[16] * first.x + data[17] * first.y + data[18] * first.z + data[19],
+      data[8] * firstX + data[9] * firstY + data[10] * firstZ + data[11],
+      data[12] * firstX + data[13] * firstY + data[14] * firstZ + data[15],
+      data[16] * firstX + data[17] * firstY + data[18] * firstZ + data[19],
     );
     const d = new THREE.Vector3(
-      data[8] * travel.x + data[9] * travel.y + data[10] * travel.z,
-      data[12] * travel.x + data[13] * travel.y + data[14] * travel.z,
-      data[16] * travel.x + data[17] * travel.y + data[18] * travel.z,
+      data[8] * travelX + data[9] * travelY + data[10] * travelZ,
+      data[12] * travelX + data[13] * travelY + data[14] * travelZ,
+      data[16] * travelX + data[17] * travelY + data[18] * travelZ,
     );
     const allowance = epsilon * data[30];
     const radius = data[1] + allowance;
     const lower = (data[31] ? Math.min(0, data[6]) : 0) - allowance;
     const upper = data[2] + (data[31] ? Math.max(0, data[6]) : 0) + allowance;
     if (
-      [...p.toArray(), ...d.toArray(), data[4], data[5], data[6], radius, lower, upper].some(
-        (value) => !Number.isFinite(value) || Math.abs(value) >= 1e14,
-      ) ||
+      !Number.isFinite(p.x) ||
+      !Number.isFinite(p.y) ||
+      !Number.isFinite(p.z) ||
+      !Number.isFinite(d.x) ||
+      !Number.isFinite(d.y) ||
+      !Number.isFinite(d.z) ||
+      !Number.isFinite(data[4]) ||
+      !Number.isFinite(data[5]) ||
+      !Number.isFinite(data[6]) ||
+      !Number.isFinite(radius) ||
+      !Number.isFinite(lower) ||
+      !Number.isFinite(upper) ||
+      Math.abs(p.x) >= 1e14 ||
+      Math.abs(p.y) >= 1e14 ||
+      Math.abs(p.z) >= 1e14 ||
+      Math.abs(d.x) >= 1e14 ||
+      Math.abs(d.y) >= 1e14 ||
+      Math.abs(d.z) >= 1e14 ||
+      Math.abs(data[4]) >= 1e14 ||
+      Math.abs(data[5]) >= 1e14 ||
+      Math.abs(data[6]) >= 1e14 ||
+      Math.abs(radius) >= 1e14 ||
+      Math.abs(lower) >= 1e14 ||
+      Math.abs(upper) >= 1e14 ||
       radius < 0 ||
       lower > upper
     )

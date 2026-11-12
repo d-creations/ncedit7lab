@@ -3,7 +3,11 @@ import type { ChannelId, PlotMetadata, PlotSegment, PoseSample } from '@core/typ
 import type { PlotRunInput } from './PlotRunSnapshot';
 import type { DeepReadonly, ProgramMaterialDefinition } from './SimulationMetadata';
 import { MetadataValidationError } from './SimulationMetadata';
-import type { SimulationInput, StockBinding, RemovalStop } from '../simulation/shared/SimulationTypes';
+import type {
+  SimulationInput,
+  StockBinding,
+  RemovalStop,
+} from '../simulation/shared/SimulationTypes';
 import {
   validateStockBinding,
   stockPlacement,
@@ -55,19 +59,57 @@ export function stockKey(stock: DeepReadonly<ProgramMaterialDefinition>): string
 }
 
 function validPose(pose: DeepReadonly<PoseSample> | undefined): pose is DeepReadonly<PoseSample> {
-  return Boolean(
-    pose &&
-    Array.isArray(pose.position) &&
-    pose.position.length === 3 &&
-    pose.position.every(Number.isFinite) &&
-    Array.isArray(pose.orientation) &&
-    pose.orientation.length === 4 &&
-    pose.orientation.every(Number.isFinite) &&
-    Math.abs(Math.hypot(...pose.orientation) - 1) <= 1e-6 &&
+  if (!pose) return false;
+  const pos = pose.position;
+  const ori = pose.orientation;
+  if (
+    !Array.isArray(pos) ||
+    pos.length !== 3 ||
+    !Number.isFinite(pos[0]) ||
+    !Number.isFinite(pos[1]) ||
+    !Number.isFinite(pos[2]) ||
+    !Array.isArray(ori) ||
+    ori.length !== 4 ||
+    !Number.isFinite(ori[0]) ||
+    !Number.isFinite(ori[1]) ||
+    !Number.isFinite(ori[2]) ||
+    !Number.isFinite(ori[3])
+  ) {
+    return false;
+  }
+  const norm = Math.hypot(ori[0], ori[1], ori[2], ori[3]);
+  return (
+    Math.abs(norm - 1) <= 1e-6 &&
     (pose.reference === 'millingTip' || pose.reference === 'turningVirtualTip') &&
     typeof pose.frameId === 'string' &&
-    pose.frameId.length > 0,
+    pose.frameId.length > 0
   );
+}
+
+function clonePoseSample(pose: DeepReadonly<PoseSample>): PoseSample {
+  return {
+    position: [pose.position[0], pose.position[1], pose.position[2]],
+    orientation: [
+      pose.orientation[0],
+      pose.orientation[1],
+      pose.orientation[2],
+      pose.orientation[3],
+    ],
+    reference: pose.reference,
+    frameId: pose.frameId,
+    ...(pose.turningReference
+      ? {
+          turningReference: {
+            ...pose.turningReference,
+            tipPosition: [
+              pose.turningReference.tipPosition[0],
+              pose.turningReference.tipPosition[1],
+              pose.turningReference.tipPosition[2],
+            ],
+          },
+        }
+      : {}),
+  };
 }
 
 function supportsRemovalSource(segment: DeepReadonly<PlotSegment>): boolean {
@@ -86,9 +128,11 @@ export function resolveMachineStockBinding(
   if (!config || bindings === undefined) return undefined;
   if (!Array.isArray(bindings) || bindings.length > 64)
     throw new Error('Machine stock bindings must be a list of at most 64 entries');
-  const allowed = new Set(config.carriers
-    .filter((carrier) => carrier.role === 'workpiece')
-    .map((carrier) => `workpiece:${carrier.id}`));
+  const allowed = new Set(
+    config.carriers
+      .filter((carrier) => carrier.role === 'workpiece')
+      .map((carrier) => `workpiece:${carrier.id}`),
+  );
   const seen = new Set<string>();
   for (const binding of bindings) {
     validateStockBinding(binding);
@@ -145,11 +189,21 @@ export function prepareMaterialRemoval(
     );
   }
   let configured = setup ?? inputs.find((input) => input.materialSimulation)?.materialSimulation;
-  const frames = new Set(
-    metadata.segments.flatMap(
-      (segment) => segment.poses?.filter(validPose).map((pose) => pose.frameId) ?? [],
-    ),
-  );
+  const frames = new Set<string>();
+  const seenPoseArrays = new Set<readonly DeepReadonly<PoseSample>[]>();
+  const validPoses = new WeakSet<object>();
+  for (const segment of metadata.segments) {
+    const poses = segment.poses;
+    if (!poses || seenPoseArrays.has(poses)) continue;
+    seenPoseArrays.add(poses);
+    for (let i = 0; i < poses.length; i++) {
+      const pose = poses[i];
+      if (validPose(pose)) {
+        validPoses.add(pose);
+        frames.add(pose.frameId);
+      }
+    }
+  }
   const frameId = frames.size === 1 ? [...frames][0] : undefined;
   if (!configured && (inputs.length === 1 || hasMultiChannelSetup)) {
     const binding = resolveMachineStockBinding(inputs[0], frames);
@@ -254,9 +308,7 @@ export function prepareMaterialRemoval(
         ? (firstToolSegment?.sourceSegmentIndex ?? 0)
         : 0;
       const rawStop = metadata.removalStops?.find(
-        (stop) =>
-          stop.channelId === chId &&
-          stop.sourceSegmentIndex >= firstToolSourceSegmentIndex,
+        (stop) => stop.channelId === chId && stop.sourceSegmentIndex >= firstToolSourceSegmentIndex,
       );
       return [chId, rawStop] as const;
     }),
@@ -314,24 +366,31 @@ export function prepareMaterialRemoval(
       );
       break;
     }
-    if (
-      segment.motionContext?.endAxes &&
-      segment.motionContext.startAxes &&
-      Object.entries(segment.motionContext.endAxes).some(
-        ([axis, value]) =>
+    const endAxes = segment.motionContext?.endAxes;
+    const startAxes = segment.motionContext?.startAxes;
+    if (endAxes && startAxes) {
+      let undersampledRotary = false;
+      const denom = Math.max(1, (segment.poses?.length ?? 0) - 1);
+      for (const axis in endAxes) {
+        const c0 = axis.charCodeAt(0);
+        if (
+          (c0 === 65 || c0 === 66 || c0 === 67) &&
           /^[ABC]\d*$/.test(axis) &&
-          segment.motionContext?.startAxes[axis] !== undefined &&
-          Math.abs(value - segment.motionContext.startAxes[axis]) /
-            Math.max(1, (segment.poses?.length ?? 0) - 1) >=
-            180 - 1e-6,
-      )
-    ) {
-      stopAt(
-        'unsupported-operation',
-        'Rotary motion is not sufficiently sampled to resolve its angular travel',
-        context,
-      );
-      break;
+          startAxes[axis] !== undefined &&
+          Math.abs(endAxes[axis] - startAxes[axis]) / denom >= 180 - 1e-6
+        ) {
+          undersampledRotary = true;
+          break;
+        }
+      }
+      if (undersampledRotary) {
+        stopAt(
+          'unsupported-operation',
+          'Rotary motion is not sufficiently sampled to resolve its angular travel',
+          context,
+        );
+        break;
+      }
     }
     if (!Number.isSafeInteger(segment.executionStep) || segment.executionStep! < 0) {
       stopAt('unsupported-operation', 'Motion has no valid execution occurrence', context);
@@ -347,7 +406,7 @@ export function prepareMaterialRemoval(
           ? channelTools?.get(segment.toolNumber)
           : fallbackExplicitTools.has(segment.toolNumber)
             ? fallbackTools.get(segment.toolNumber)
-            : channelTools?.get(segment.toolNumber) ?? fallbackTools.get(segment.toolNumber)
+            : (channelTools?.get(segment.toolNumber) ?? fallbackTools.get(segment.toolNumber))
         : undefined;
     const isExplicitTool =
       segment.toolNumber !== null &&
@@ -364,7 +423,7 @@ export function prepareMaterialRemoval(
     const index = segment.subsegmentIndex;
     const start = index === undefined ? undefined : segment.poses?.[index];
     const end = index === undefined ? undefined : segment.poses?.[index + 1];
-    if (!validPose(start) || !validPose(end)) {
+    if (!start || !end || !validPoses.has(start) || !validPoses.has(end)) {
       stopAt(
         'tool-pose-unavailable',
         'Motion has missing or invalid aligned start/end poses',
@@ -384,6 +443,9 @@ export function prepareMaterialRemoval(
       break;
     }
     const isInsert = tool.cutting[0].type === 'insert';
+    const executedQ = segment.motionContext?.toolOffset?.tipOrientation;
+    const key = `${segChannel}:${typeof tool.toolNumber}:${String(tool.toolNumber)}:${executedQ ?? ''}`;
+    let cutter = cutters.get(key);
     const stationarySpindleDrill =
       segment.machiningMode === 'turning' &&
       !isInsert &&
@@ -398,7 +460,11 @@ export function prepareMaterialRemoval(
           ) > 1e-6
         )
           return false;
-        const c = new CuttingToolModel(structuredClone(tool), undefined);
+        if (!cutter) {
+          cutter = new CuttingToolModel(tool, executedQ);
+          cutters.set(key, cutter);
+        }
+        const c = cutter;
         for (const pose of [start, end]) {
           const matrix = inverse
             .clone()
@@ -436,12 +502,9 @@ export function prepareMaterialRemoval(
       );
       break;
     }
-    const executedQ = segment.motionContext?.toolOffset?.tipOrientation;
-    const key = JSON.stringify([segChannel, typeof tool.toolNumber, tool.toolNumber, executedQ]);
-    let cutter = cutters.get(key);
     try {
       if (!cutter) {
-        cutter = new CuttingToolModel(structuredClone(tool), executedQ);
+        cutter = new CuttingToolModel(tool, executedQ);
         cutters.set(key, cutter);
       }
       if (turning) {
@@ -450,20 +513,25 @@ export function prepareMaterialRemoval(
           const offset = segment.motionContext?.toolOffset;
           const verified = [start, end].every((pose) => {
             const resolved = pose.turningReference;
-            return resolved?.kind === 'resolved-center-path-v1' &&
+            return (
+              resolved?.kind === 'resolved-center-path-v1' &&
               (radiusMode === 'LEFT' || radiusMode === 'RIGHT') &&
               resolved.radiusMode === radiusMode &&
               resolved.tipOrientation === executedQ &&
-              Number.isInteger(executedQ) && executedQ! >= 0 && executedQ! <= 9 &&
-              Number.isFinite(offset?.radius) && offset!.radius! >= 0 &&
+              Number.isInteger(executedQ) &&
+              executedQ! >= 0 &&
+              executedQ! <= 9 &&
+              Number.isFinite(offset?.radius) &&
+              offset!.radius! >= 0 &&
               resolved.compensationRadius === offset?.radius &&
               tool.cutting![0].type === 'insert' &&
               resolved.noseRadius === tool.cutting![0].noseRadius &&
               Array.isArray(resolved.tipPosition) &&
               resolved.tipPosition.length === 3 &&
-              resolved.tipPosition.every((value, axis) =>
-                value === (tool.cutting![0].position ?? [0, 0, 0])[axis],
-              );
+              resolved.tipPosition.every(
+                (value, axis) => value === (tool.cutting![0].position ?? [0, 0, 0])[axis],
+              )
+            );
           });
           if (!verified)
             throw new SimulationCapabilityError(
@@ -507,8 +575,8 @@ export function prepareMaterialRemoval(
     }
     simulation.motions.push({
       mode: effectiveMode,
-      start: structuredClone(start),
-      end: structuredClone(end),
+      start: clonePoseSample(start),
+      end: clonePoseSample(end),
       tool,
       executedQ,
       executionStep: segment.executionStep!,

@@ -44,6 +44,7 @@ describe('SimulationCommentCodec', () => {
       expect(parsed.tools).toEqual([drill]);
       expect(parsed.blocks).toHaveLength(2);
       expect(encoded).not.toMatch(/units=|frame=|channelId=/);
+      expect(encoded).not.toMatch(/[{}\\]/);
     },
   );
 
@@ -59,11 +60,15 @@ describe('SimulationCommentCodec', () => {
       expect(encoded.split('\r\n').every((line) => line.length <= 58)).toBe(true);
       expect(encoded).toMatch(/description@1\/[0-9]+=/);
       expect(encoded).not.toContain('工具');
+      expect(encoded).not.toMatch(/[{}\\]/);
       for (const line of encoded.split('\r\n')) {
         if (style.kind === 'block') expect(line.match(/[()]/g)).toEqual(['(', ')']);
         else expect(line.startsWith('; ')).toBe(true);
         const fragment = line.replace(/\)$/, '').split(/=(.*)/s)[1];
-        if (fragment) expect(fragment).not.toMatch(/(?<!\\)\\u[0-9a-f]{0,3}$/i);
+        if (fragment) {
+          expect(fragment).not.toMatch(/(?<!\\)\\u[0-9a-f]{0,3}$/i);
+          expect(fragment).not.toMatch(/@u[0-9a-f]{0,3}$/i);
+        }
       }
       const parsed = codec.parse(encoded, syntax);
       expect(parsed.diagnostics).toEqual([]);
@@ -85,10 +90,53 @@ describe('SimulationCommentCodec', () => {
     for (const syntax of [semicolon, parentheses]) {
       const encoded = codec.encodeTool(turningTool, syntax);
       expect(encoded).toContain('"zeroVertex":2');
+      expect(encoded).not.toMatch(/[{}\\]/);
       const parsed = codec.parse(`${encoded}\nT300\nG1 X10`, syntax);
       expect(parsed.diagnostics).toEqual([]);
       expect(parsed.tools).toEqual([turningTool]);
     }
+  });
+
+  it('recovers CNC-returned blocks where the controller replaced {, }, and \\ with spaces', () => {
+    const machineReturned = [
+      '(@NCE-SIM:1 BEGIN SETUP) ',
+      '(machineName="FANUC_STAR_SR20R_IV_B")',
+      '(material= "type":"cylinder","diameter":20,"length":45,"zeroVertex":0,"channelReferences": "2": "zeroVertex":1,"rotation":[180,0,0]   )',
+      '(@NCE-SIM:1 END SETUP) ',
+      '(@NCE-SIM:1 BEGIN TOOL)',
+      '(toolNumber=1300)',
+      '(description="Inner Turn V  u00d83 mm Upper  u0028+X u0029") ',
+      '(Q=2)',
+      '(R=0.1)',
+      '(holder=[ "type":"turningHolderProfile","width":4,"depth":2.3,"outline":[[-0.4,0.25],[-12,0.25],[-14,0.975],[-34,0.975],[-34,-3.025],[-14,-3.025],[-12,-2.05],[-0.4,-2.05]],"stickOut":12,"position":[-1,0,2.5] ]) ',
+      '(cutting=[ "type":"insert","shape":"V","ic":0.85,"thickness":0.9,"noseRadius":0.1,"clearanceAngle":7,"zeroVertex":2,"rotation":[0,-249.5,0] ]) ',
+      '(orientation=[0,270,0])',
+      '(turning= "hand":"right","mount":"back","approachAngle":93,"activeCorner":"back-left","reference":"virtualTip" ) ',
+      '(@NCE-SIM:1 END TOOL)',
+    ].join('\r\n');
+    const parsed = codec.parse(machineReturned, parentheses);
+    expect(parsed.diagnostics).toEqual([]);
+    expect(parsed.setup).toEqual({
+      machineName: 'FANUC_STAR_SR20R_IV_B',
+      material: {
+        type: 'cylinder',
+        diameter: 20,
+        length: 45,
+        zeroVertex: 0,
+        channelReferences: {
+          '2': { zeroVertex: 1, rotation: [180, 0, 0] },
+        },
+      },
+    });
+    expect(parsed.tools).toHaveLength(1);
+    expect(parsed.tools[0].description).toBe('Inner Turn V \u00d83 mm Upper (+X)');
+    expect(parsed.tools[0].turning).toEqual({
+      hand: 'right',
+      mount: 'back',
+      approachAngle: 93,
+      activeCorner: 'back-left',
+      reference: 'virtualTip',
+    });
   });
 
   it('preserves exact source spans and mixed LF/CRLF endings without rewriting unrelated code', () => {

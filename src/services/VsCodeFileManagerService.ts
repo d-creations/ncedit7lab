@@ -112,7 +112,10 @@ export class VsCodeFileManagerService implements IFileManagerService {
     }
 
     private syncToHost(channelId: string, content: string, oldText: string) {
-        const hostBridge = ServiceRegistry.getInstance().get(HOST_BRIDGE_SERVICE_TOKEN);
+        const registry = ServiceRegistry.getInstance();
+        const hostBridge = registry.has(HOST_BRIDGE_SERVICE_TOKEN)
+            ? registry.get(HOST_BRIDGE_SERVICE_TOKEN)
+            : undefined;
         if (hostBridge && hostBridge.isAvailable()) {
             hostBridge.notifyDocumentChanged(channelId, content, oldText);
         } else {

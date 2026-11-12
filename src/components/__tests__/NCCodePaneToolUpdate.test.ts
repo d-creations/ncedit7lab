@@ -154,7 +154,7 @@ describe('NCCodePane program tool updates', () => {
     const updateChannel = vi.fn();
     const triggerParse = vi.fn();
     Object.assign(pane, {
-      editor: { getValue: () => 'G0 X10', execCommand: vi.fn() },
+      editor: { getValue: () => 'G0 X10', execCommand: vi.fn(), destroy: vi.fn() },
       stateService: { updateChannel },
       triggerParse,
       addEventListener: vi.fn(),
